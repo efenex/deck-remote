@@ -139,13 +139,19 @@
     sessions: new Map(),      // id -> session object
     convos: new Map(),        // id -> array of turn entries {role, content, ts, requestId, kind}
     pending: new Map(),       // id -> {requestId, ctx} active turn
+    history: new Map(),       // id -> {loaded, hasMore, loading} scroll-back paging state
     pushConfig: null,         // {enabled, publicKey}
     openSheetId: null,        // session id whose sheet is open
     activityTimer: null,      // interval id for the open sheet's live-activity poll
+    convoScrollHandler: null, // scroll listener attached to the open sheet's #convo
   };
 
   // How often the open detail sheet probes /api/rc/activity for live state.
   const ACTIVITY_MS = 3000;
+  // How many history messages to load per page (open-load and each scroll-up).
+  const HISTORY_PAGE = 30;
+  // Pixels from the top of the convo that trigger an older-window fetch.
+  const SCROLL_TOP_THRESHOLD = 80;
 
   // ---------------------------------------------------------------------------
   // Token screen
@@ -409,6 +415,13 @@
   // ---------------------------------------------------------------------------
   function closeSheet() {
     stopActivityPoll(); // stop the live-activity poll so it doesn't leak
+    // Detach the convo scroll listener and clear any in-flight paging flag so a
+    // fetch settling after close doesn't touch a stale DOM.
+    const convoEl = $('#convo');
+    if (convoEl && state.convoScrollHandler) convoEl.removeEventListener('scroll', state.convoScrollHandler);
+    state.convoScrollHandler = null;
+    const hs = state.openSheetId && state.history.get(state.openSheetId);
+    if (hs) hs.loading = false;
     const scrim = $('#scrim');
     const sheet = $('#sheet');
     if (scrim) scrim.remove();
@@ -477,6 +490,14 @@
     convo.id = 'convo';
     sheet.appendChild(convo);
 
+    // Scroll-up paging: when the user nears the top and older history exists,
+    // fetch the next older window and prepend it (preserving scroll position).
+    const onScroll = () => {
+      if (convo.scrollTop <= SCROLL_TOP_THRESHOLD) loadOlderHistory(s.id);
+    };
+    state.convoScrollHandler = onScroll;
+    convo.addEventListener('scroll', onScroll, { passive: true });
+
     // Approve section mounts inside the scrolling convo; populated only when a
     // real pending dialog is detected. Starts empty.
     const approveMount = el('div');
@@ -540,7 +561,7 @@
     startActivityPoll(s.id);
 
     renderConvo(s.id);
-    loadReply(s.id);
+    loadHistory(s.id);
     checkPermission(s, false); // auto-check for a real pending dialog on open
   }
 
@@ -623,7 +644,104 @@
     }
   }
 
-  function renderConvo(id) {
+  // Map a history entry (role "user"|"reply", unix-seconds ts) onto a convo turn.
+  function historyToTurn(m) {
+    const role = m.role === 'user' ? 'me' : 'reply';
+    return { role, content: m.content || '', ts: m.ts };
+  }
+
+  // Open-load: fetch the most recent history window and seed the convo with it.
+  // Falls back to the legacy last-reply behavior when there's no transcript
+  // (non-Claude sessions return {messages:[], hasMore:false}).
+  async function loadHistory(id) {
+    state.history.set(id, { loaded: 0, hasMore: false, loading: true });
+    let r;
+    try {
+      r = await api('GET', '/api/rc/history?id=' + encodeURIComponent(id) +
+        '&limit=' + HISTORY_PAGE + '&offset=0');
+    } catch (e) {
+      // Graceful: don't wipe the thread. Fall back to the last-reply behavior.
+      const hs = state.history.get(id);
+      if (hs) hs.loading = false;
+      if (state.openSheetId === id) loadReply(id);
+      return;
+    }
+    if (state.openSheetId !== id) return; // sheet closed while in flight
+    const msgs = (r && r.messages) || [];
+    if (msgs.length) {
+      // Seed the convo from history (oldest-first), preserving any in-flight
+      // pending turn (that's tracked separately in state.pending, so we only
+      // need to avoid clobbering it — which we don't, convos != pending).
+      const conv = ensureConvo(id);
+      // Keep any live turns the user fired before history landed (e.g. queued
+      // 'me' rows / errors): prepend the history snapshot ahead of them.
+      const live = conv.slice();
+      conv.length = 0;
+      msgs.forEach((m) => conv.push(historyToTurn(m)));
+      live.forEach((e) => conv.push(e));
+      state.history.set(id, { loaded: msgs.length, hasMore: !!(r && r.hasMore), loading: false });
+      renderConvo(id);
+      renderDeck();
+    } else {
+      // No transcript (non-Claude or empty): legacy fallback + subtle note.
+      state.history.set(id, { loaded: 0, hasMore: false, loading: false });
+      const s = state.sessions.get(id);
+      if (s && s.tool && s.tool !== 'claude') {
+        const conv = ensureConvo(id);
+        if (!conv.some((e) => e.role === 'note' && e.kind === 'no-history')) {
+          conv.unshift({ role: 'note', kind: 'no-history', content: 'Full history: open terminal.' });
+        }
+      }
+      loadReply(id);
+    }
+  }
+
+  // Scroll-up paging: fetch the next older window and prepend it, preserving the
+  // visual scroll position. Guarded against concurrent/duplicate fetches.
+  async function loadOlderHistory(id) {
+    const hs = state.history.get(id);
+    if (!hs || !hs.hasMore || hs.loading) return;
+    hs.loading = true;
+    renderConvo(id); // surface the "Loading…" affordance at the top
+
+    const convo = $('#convo');
+    const beforeH = convo ? convo.scrollHeight : 0;
+    const beforeT = convo ? convo.scrollTop : 0;
+
+    let r;
+    try {
+      r = await api('GET', '/api/rc/history?id=' + encodeURIComponent(id) +
+        '&limit=' + HISTORY_PAGE + '&offset=' + hs.loaded);
+    } catch (e) {
+      const cur = state.history.get(id);
+      if (cur) { cur.loading = false; renderConvo(id); }
+      return;
+    }
+    if (state.openSheetId !== id) return; // sheet closed while in flight
+    const msgs = (r && r.messages) || [];
+    const conv = ensureConvo(id);
+    // Prepend older messages ahead of the existing thread, after any leading
+    // note row so the "Full history" hint stays at the very top.
+    const turns = msgs.map(historyToTurn);
+    let insertAt = 0;
+    while (insertAt < conv.length && conv[insertAt].role === 'note') insertAt++;
+    conv.splice(insertAt, 0, ...turns);
+    state.history.set(id, {
+      loaded: hs.loaded + msgs.length,
+      hasMore: !!(r && r.hasMore),
+      loading: false,
+    });
+    renderConvo(id, { keepScroll: true });
+
+    // Preserve scroll position: the view should stay anchored on the same
+    // content, so add the height that was inserted above the viewport.
+    if (convo) {
+      const afterH = convo.scrollHeight;
+      convo.scrollTop = beforeT + (afterH - beforeH);
+    }
+  }
+
+  function renderConvo(id, opts) {
     if (state.openSheetId !== id) return;
     const convo = $('#convo');
     if (!convo) return;
@@ -634,7 +752,16 @@
     convo.innerHTML = '';
     if (approveMount) convo.appendChild(approveMount);
 
-    conv.forEach((e) => {
+    // Scroll-back affordance at the very top: a "Loading…" spinner while a page
+    // is in flight, hidden entirely once there's no older history.
+    const hs = state.history.get(id);
+    if (hs && (hs.hasMore || hs.loading)) {
+      const more = el('div', 'history-more' + (hs.loading ? ' loading' : ''));
+      more.textContent = hs.loading ? 'Loading older…' : 'Scroll up for older messages';
+      convo.appendChild(more);
+    }
+
+    conv.forEach((e, i) => {
       if (e.role === 'me') {
         const b = el('div', 'bubble me' + (e.queued ? ' queued' : ''));
         b.textContent = e.content;
@@ -642,10 +769,19 @@
         const ts = el('div', 'ts me', fmtTime(e.ts) + (e.queued ? ' · sent' : ''));
         convo.appendChild(ts);
       } else if (e.role === 'reply') {
+        // Merge consecutive 'reply' entries (one Claude turn can yield several
+        // assistant text entries) into a single bubble; skip those folded in.
+        if (i > 0 && conv[i - 1].role === 'reply') return;
+        let content = e.content;
+        let last = e;
+        for (let j = i + 1; j < conv.length && conv[j].role === 'reply'; j++) {
+          content += '\n\n' + conv[j].content;
+          last = conv[j];
+        }
         const b = el('div', 'bubble reply');
-        b.innerHTML = renderMarkdown(e.content);
+        b.innerHTML = renderMarkdown(content);
         convo.appendChild(b);
-        convo.appendChild(el('div', 'ts', fmtTime(e.ts)));
+        convo.appendChild(el('div', 'ts', fmtTime(last.ts)));
       } else if (e.role === 'error') {
         const b = el('div', 'bubble err');
         b.textContent = '⛔ ' + e.content;
@@ -673,7 +809,9 @@
     const wb = $('#workingBanner');
     if (wb) wb.hidden = !pend;
 
-    convo.scrollTop = convo.scrollHeight;
+    // Older-paging re-renders restore scroll position themselves (the caller
+    // anchors on inserted height); everything else sticks to the bottom.
+    if (!(opts && opts.keepScroll)) convo.scrollTop = convo.scrollHeight;
   }
 
   // Tiny, safe markdown: escapes first, then re-introduces a few inline forms.
