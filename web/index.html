@@ -116,15 +116,25 @@
   .tab .gi{font-size:20px}
   .tab.active{color:var(--accent)}
 
-  /* ===== session detail action sheet (slides up over dimmed deck) ===== */
+  /* ===== session detail sheet (full-height flex column over dimmed deck) ===== */
   .scrim{position:fixed;inset:0;background:rgba(5,6,12,.55);z-index:70;animation:fade .18s ease}
   @keyframes fade{from{opacity:0}to{opacity:1}}
-  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:75;background:var(--panel);
-    border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid var(--border);
-    box-shadow:0 -16px 50px rgba(0,0,0,.55);display:flex;flex-direction:column;max-height:92%;
-    padding-bottom:var(--safe-bottom);animation:slideup .26s cubic-bezier(.2,.8,.2,1)}
+  /* Full-screen sheet: a proper full-height flex column. Order top→bottom is
+     grabber+header (flex:0) → convo (flex:1) → live-activity (flex:0) →
+     slash popup (absolute) → composer (flex:0). The composer pins to the very
+     bottom; its only bottom padding is the safe-area inset (no dead gap). */
+  .sheet{position:fixed;inset:0;z-index:75;background:var(--panel);
+    display:flex;flex-direction:column;height:100%;height:100dvh;overflow:hidden;
+    box-shadow:0 -16px 50px rgba(0,0,0,.55);
+    animation:slideup .26s cubic-bezier(.2,.8,.2,1)}
+  /* During a swipe-down/edge drag we follow the finger; suppress the entry
+     animation and add a snap-back transition managed in JS via .dragging. */
+  .sheet.dragging{animation:none;transition:none}
+  .sheet.snapback{animation:none;transition:transform .2s cubic-bezier(.2,.8,.2,1)}
   @keyframes slideup{from{transform:translateY(100%)}to{transform:translateY(0)}}
-  .grabber{width:120px;height:5px;border-radius:3px;background:#3a3f59;margin:9px auto 2px;flex:0 0 auto;cursor:pointer}
+  /* grabber + header form the swipe-down handle region (NOT the convo). */
+  .sheet-handle{flex:0 0 auto;touch-action:pan-y}
+  .grabber{width:120px;height:5px;border-radius:3px;background:#3a3f59;margin:calc(9px + var(--safe-top)) auto 2px;flex:0 0 auto;cursor:pointer}
   .sheet-head{padding:4px 18px 12px;border-bottom:1px solid var(--border);flex:0 0 auto}
   .sheet-title-row{display:flex;align-items:center;gap:10px}
   .sheet-title{font-size:18px;font-weight:800;color:#fff;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -132,20 +142,21 @@
   .sheet-term{width:36px;height:36px;flex:0 0 auto;border-radius:10px;background:var(--card);
     border:1px solid var(--border);display:grid;place-items:center;color:var(--purple);font-size:15px;text-decoration:none}
 
-  /* prominent LIVE "what it's doing now" area at the top of the sheet */
-  .live-activity{flex:0 0 auto;padding:11px 16px;border-bottom:1px solid var(--border)}
+  /* LIVE "what it's doing now" — sits directly ABOVE the composer (Claude Code
+     style). When idle it collapses to zero height so it takes no space. */
+  .live-activity{flex:0 0 auto;padding:9px 16px;border-top:1px solid var(--border);
+    background:rgba(122,162,247,.07)}
   .live-activity .la-row{display:flex;align-items:center;gap:9px;min-width:0}
-  .live-activity .la-text{font-size:14px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .live-activity.working{background:rgba(122,162,247,.08)}
+  .live-activity .la-text{font-size:13.5px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .live-activity.working .la-text{color:var(--accent);font-weight:700}
   .live-activity.working .spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(122,162,247,.3);
     border-top-color:var(--accent);animation:spin 1s linear infinite;flex:0 0 auto}
   .live-activity .la-tool{margin-top:5px;padding-left:23px;font-size:12px;color:var(--muted);
     font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .live-activity.idle .la-text{color:var(--muted)}
-  .live-activity.idle .la-dot{width:8px;height:8px;border-radius:50%;background:var(--muted-2);flex:0 0 auto}
+  /* idle: collapse out of the layout entirely so there's no dead band. */
+  .live-activity.idle{display:none}
 
-  .convo{flex:1;overflow-y:auto;padding:14px 16px 8px;display:flex;flex-direction:column;gap:6px;-webkit-overflow-scrolling:touch}
+  .convo{flex:1 1 auto;min-height:0;overflow-y:auto;padding:14px 16px 8px;display:flex;flex-direction:column;gap:2px;-webkit-overflow-scrolling:touch}
   .convo::-webkit-scrollbar{display:none}
 
   /* scroll-back affordance pinned at the top of the convo */
@@ -154,24 +165,36 @@
   .history-more.loading::before{content:'';display:inline-block;width:11px;height:11px;margin-right:7px;vertical-align:-1px;
     border-radius:50%;border:2px solid rgba(122,162,247,.3);border-top-color:var(--accent);animation:spin 0.7s linear infinite}
 
-  /* iMessage-style async bubbles */
-  .bubble{max-width:86%;padding:10px 13px;border-radius:16px;font-size:14px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere}
-  .bubble.me{align-self:flex-end;background:var(--accent);color:#0b0f1a;border-bottom-right-radius:5px;font-weight:500}
-  .bubble.reply{align-self:flex-start;background:var(--card);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:5px}
-  .bubble.reply code{background:rgba(122,162,247,.16);color:var(--accent);padding:1px 5px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
-  .bubble.reply pre{background:#0c0d14;border:1px solid var(--border);border-radius:8px;padding:10px;margin:7px 0 2px;overflow-x:auto;font-size:11.5px;font-family:var(--mono);color:var(--green);line-height:1.5}
-  .bubble.reply pre code{background:none;color:inherit;padding:0}
-  .bubble.reply .md-h{font-weight:700;color:#fff;display:block;margin-bottom:2px}
-  .bubble.reply ul{margin:6px 0 0;padding-left:18px}
-  .bubble.reply li{margin:2px 0}
-  .bubble.err{align-self:flex-start;background:rgba(247,118,142,.10);border:1px solid rgba(247,118,142,.4);color:var(--red);border-bottom-left-radius:5px}
-  .ts{font-size:10.5px;color:var(--muted);margin:1px 4px 6px}
-  .ts.me{align-self:flex-end}
-  .bubble.queued{opacity:.7}
+  /* ---------- full-width message rows (no left/right bubbles) ----------
+     Every message spans the full width; the sender is shown by a leading role
+     marker + accent rather than alignment, so no horizontal space is wasted. */
+  .msg{align-self:stretch;width:100%;display:grid;grid-template-columns:18px 1fr;gap:8px;
+    padding:8px 2px 8px 8px;font-size:14px;line-height:1.55;word-wrap:break-word;overflow-wrap:anywhere}
+  .msg .gutter{font-family:var(--mono);font-size:13px;line-height:1.55;font-weight:700;text-align:center;
+    flex:0 0 auto;user-select:none;padding-top:1px}
+  .msg .body{min-width:0}
+  /* user row: dim '›' marker, lighter text. */
+  .msg.me .gutter{color:var(--muted-2)}
+  .msg.me .body{color:var(--text);font-weight:500;white-space:pre-wrap}
+  /* assistant row: accent left border + '‹' marker. */
+  .msg.reply{border-left:2px solid var(--accent);padding-left:8px;margin-left:1px}
+  .msg.reply .gutter{color:var(--accent)}
+  .msg.reply .body{color:var(--text)}
+  .msg.reply code{background:rgba(122,162,247,.16);color:var(--accent);padding:1px 5px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
+  .msg.reply pre{background:#0c0d14;border:1px solid var(--border);border-radius:8px;padding:10px;margin:7px 0 2px;overflow-x:auto;font-size:11.5px;font-family:var(--mono);color:var(--green);line-height:1.5}
+  .msg.reply pre code{background:none;color:inherit;padding:0}
+  .msg.reply .md-h{font-weight:700;color:#fff;display:block;margin-bottom:2px}
+  .msg.reply ul{margin:6px 0 0;padding-left:18px}
+  .msg.reply li{margin:2px 0}
+  .msg.err{border-left:2px solid var(--red);padding-left:8px;margin-left:1px}
+  .msg.err .gutter{color:var(--red)}
+  .msg.err .body{color:var(--red)}
+  .msg.queued{opacity:.6}
+  .ts{font-size:10.5px;color:var(--muted);margin:0 0 4px 26px}
 
-  /* async "working…" pending row */
-  .pending{align-self:flex-start;display:inline-flex;align-items:center;gap:10px;background:var(--card);
-    border:1px solid var(--border);border-radius:16px;border-bottom-left-radius:5px;padding:11px 14px;color:var(--muted);font-size:13px}
+  /* async "working…" pending row (full-width, accent-bordered) */
+  .pending{align-self:stretch;width:100%;display:flex;align-items:center;gap:10px;
+    border-left:2px solid var(--accent);padding:10px 2px 10px 10px;margin-left:1px;color:var(--muted);font-size:13px}
   .tdots{display:inline-flex;gap:4px}
   .tdots i{width:7px;height:7px;border-radius:50%;display:block;animation:tjump 1.2s infinite}
   .tdots i:nth-child(1){background:#f7768e}
@@ -187,16 +210,23 @@
     border-top-color:#bcd6ff;animation:spin 1s linear infinite;flex:0 0 auto}
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* slash command chips */
-  .slash-rail{display:flex;gap:8px;overflow-x:auto;padding:8px 16px 4px;border-top:1px solid var(--border);flex:0 0 auto}
-  .slash-rail::-webkit-scrollbar{display:none}
-  .slash{flex:0 0 auto;background:var(--card);border:1px solid var(--border);color:var(--accent);
-    border-radius:999px;padding:7px 13px;font-size:13px;font-weight:600;font-family:var(--mono);min-height:36px}
-  .slash:active{background:var(--card-hi)}
-  .slash.muted{color:var(--muted);font-family:inherit}
+  /* dynamic slash-command suggestion popup (shown only while the input starts
+     with '/'). Floats just above the composer; the composer is the relative
+     anchor so it tracks the bottom of the sheet. */
+  .composer-wrap{position:relative;flex:0 0 auto}
+  .slash-pop{position:absolute;left:12px;right:12px;bottom:calc(100% + 6px);z-index:5;
+    background:var(--card);border:1px solid var(--border-hi);border-radius:12px;overflow:hidden;
+    box-shadow:0 10px 28px rgba(0,0,0,.5)}
+  .slash-pop[hidden]{display:none}
+  .slash-opt{display:flex;align-items:baseline;gap:10px;padding:11px 14px;min-height:42px;
+    border-bottom:1px solid var(--border);font-size:14px;cursor:pointer}
+  .slash-opt:last-child{border-bottom:none}
+  .slash-opt:active,.slash-opt.active{background:var(--card-hi)}
+  .slash-opt .cmd{color:var(--accent);font-weight:700;font-family:var(--mono)}
+  .slash-opt .desc{color:var(--muted);font-size:12px}
 
-  /* composer pinned above the keyboard */
-  .composer{padding:8px 12px calc(12px + var(--safe-bottom));border-top:1px solid var(--border);display:flex;align-items:flex-end;gap:9px;background:var(--panel);flex:0 0 auto}
+  /* composer pinned to the very bottom; bottom padding = safe-area inset only */
+  .composer{padding:8px 12px;padding-bottom:calc(8px + var(--safe-bottom));border-top:1px solid var(--border);display:flex;align-items:flex-end;gap:9px;background:var(--panel);flex:0 0 auto}
   .composer textarea{flex:1;resize:none;min-height:var(--tap);max-height:110px;background:var(--card);
     border:1px solid var(--border);border-radius:18px;color:var(--text);font-size:16px;padding:11px 14px;line-height:1.4;font-family:inherit}
   .composer textarea::placeholder{color:var(--muted)}

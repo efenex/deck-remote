@@ -144,6 +144,7 @@
     openSheetId: null,        // session id whose sheet is open
     activityTimer: null,      // interval id for the open sheet's live-activity poll
     convoScrollHandler: null, // scroll listener attached to the open sheet's #convo
+    swipeHandlers: null,      // {sheet,onStart,onMove,onEnd} swipe-dismiss listeners
     lastWorking: new Map(),   // id -> last-seen working flag from the activity poll
     reconciling: new Set(),   // ids with an in-flight transcript-tail reconcile
   };
@@ -426,6 +427,8 @@
     const convoEl = $('#convo');
     if (convoEl && state.convoScrollHandler) convoEl.removeEventListener('scroll', state.convoScrollHandler);
     state.convoScrollHandler = null;
+    // Detach the swipe-dismiss listeners so they can't fire on a stale sheet.
+    teardownSwipe();
     const hs = state.openSheetId && state.history.get(state.openSheetId);
     if (hs) hs.loading = false;
     // Drop live-sync bookkeeping for the closing sheet so a reconcile settling
@@ -475,7 +478,12 @@
     // read from localStorage by terminal.html — we deliberately do NOT put it
     // in the URL (avoids leaking it into history / target=_blank referrers).
     const termURL = '/terminal.html?id=' + encodeURIComponent(s.id);
+    // grabber + header are wrapped in .sheet-handle: this whole region (which
+    // sits ABOVE the scrolling convo and never scrolls) is the swipe-down
+    // dismiss target, keeping it cleanly separate from the convo's scroll-up
+    // history paging.
     return (
+      '<div class="sheet-handle" id="sheetHandle">' +
       '<div class="grabber" id="sheetGrab" title="Back to sessions"></div>' +
       '<div class="sheet-head"><div class="sheet-title-row">' +
         '<button class="icon-btn sheet-back" id="sheetBack" title="Back to sessions"><span class="gi">‹</span></button>' +
@@ -486,19 +494,16 @@
         '</div>' +
         '<button class="icon-btn sheet-check" id="sheetCheckPerm" title="Check for approval"><span class="gi">🔐</span></button>' +
         '<a class="sheet-term" title="Open full web terminal" target="_blank" rel="noopener" href="' + termURL + '">⧉</a>' +
-      '</div></div>'
+      '</div></div>' +
+      '</div>'
     );
   }
 
   // ----- detail sheet (ask + last reply + async pending + gated approve) -----
   function buildDetailSheet(sheet, s) {
-    // Prominent LIVE "what it's doing now" area, kept fresh by a ~3s probe of
-    // /api/rc/activity while the sheet is open. Starts from the list snapshot so
-    // there's no flash of "idle" before the first poll lands.
-    const live = el('div', 'live-activity');
-    live.id = 'liveActivity';
-    sheet.appendChild(live);
-
+    // DOM order top→bottom: handle (already in sheet.innerHTML) → convo (flex:1)
+    // → working-banner → live-activity (flex:0, above the composer) →
+    // composer-wrap (slash popup + composer, pinned to the very bottom).
     const convo = el('div', 'convo');
     convo.id = 'convo';
     sheet.appendChild(convo);
@@ -535,33 +540,36 @@
       '<span class="spin"></span><span>Turn in progress — you\'ll get a push when it\'s done. You can keep typing.</span>';
     sheet.appendChild(workingBanner);
 
-    const rail = el('div', 'slash-rail');
-    const slashes = ['/compact', '/context', '/clear', '/diff'];
-    slashes.forEach((cmd) => {
-      const b = el('button', 'slash', cmd);
-      b.addEventListener('click', () => sendSlash(s.id, cmd));
-      rail.appendChild(b);
-    });
-    const custom = el('button', 'slash muted', '＋ command');
-    custom.addEventListener('click', () => {
-      const cmd = prompt('Slash command (leading / optional):');
-      if (cmd && cmd.trim()) sendSlash(s.id, cmd.trim());
-    });
-    rail.appendChild(custom);
-    sheet.appendChild(rail);
+    // LIVE "what it's doing now" — directly above the composer (Claude Code
+    // style). Kept fresh by a ~3s probe of /api/rc/activity; collapses when idle.
+    const live = el('div', 'live-activity');
+    live.id = 'liveActivity';
+    sheet.appendChild(live);
+
+    // Composer + its slash-suggestion popup (relative anchor for the popup).
+    const composerWrap = el('div', 'composer-wrap');
+
+    // Dynamic slash popup: hidden unless the input value starts with '/'.
+    const slashPop = el('div', 'slash-pop');
+    slashPop.id = 'slashPop';
+    slashPop.hidden = true;
+    composerWrap.appendChild(slashPop);
 
     const composer = el('div', 'composer');
     const ta = el('textarea');
     ta.rows = 1;
-    ta.placeholder = 'Message ' + (s.title || 'this session') + '…';
+    ta.placeholder = 'Message ' + (s.title || 'this session') + '… (/ for commands)';
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 110) + 'px';
       send.disabled = !ta.value.trim();
+      updateSlashPop(s.id, ta);
     });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send.click(); }
     });
+    // Hide the popup on blur (deferred so a tap on a suggestion still fires).
+    ta.addEventListener('blur', () => setTimeout(() => hideSlashPop(), 120));
     const send = el('button', 'send-btn', '↑');
     send.disabled = true;
     send.addEventListener('click', () => {
@@ -570,11 +578,18 @@
       ta.value = '';
       ta.style.height = 'auto';
       send.disabled = true;
-      sendAsk(s.id, text);
+      hideSlashPop();
+      // A leading-slash message is a slash command; otherwise a normal ask.
+      if (text[0] === '/') sendSlash(s.id, text);
+      else sendAsk(s.id, text);
     });
     composer.appendChild(ta);
     composer.appendChild(send);
-    sheet.appendChild(composer);
+    composerWrap.appendChild(composer);
+    sheet.appendChild(composerWrap);
+
+    // Swipe-to-dismiss gestures (swipe-down on the handle, edge-swipe-right).
+    wireSwipeDismiss(sheet);
 
     // Seed the live area from the list snapshot, then poll for fresh state.
     renderLiveActivity(s.id, { working: s.working, activity: s.activity, currentTool: s.currentTool });
@@ -593,6 +608,154 @@
         if (state.openSheetId === s.id) reconcileTranscriptTail(s.id);
       }, 600);
     }
+  }
+
+  // ----- dynamic slash-command popup -----
+  // The known slash commands (label + short hint). Tapping or sending one
+  // routes through the existing /api/rc/slash path (sendSlash).
+  const SLASH_COMMANDS = [
+    { cmd: '/compact', desc: 'condense the conversation' },
+    { cmd: '/context', desc: 'show context usage' },
+    { cmd: '/clear', desc: 'clear the conversation' },
+    { cmd: '/diff', desc: 'show working-tree diff' },
+  ];
+
+  function hideSlashPop() {
+    const pop = $('#slashPop');
+    if (pop) { pop.hidden = true; pop.innerHTML = ''; }
+  }
+
+  // Show a suggestion popup when the input starts with '/', filtered by the
+  // typed prefix. Tapping a suggestion sends it; hides otherwise.
+  function updateSlashPop(id, ta) {
+    const pop = $('#slashPop');
+    if (!pop) return;
+    const v = ta.value;
+    // Only a single leading-slash token (no space yet) triggers suggestions.
+    if (v[0] !== '/' || /\s/.test(v)) { hideSlashPop(); return; }
+    const q = v.toLowerCase();
+    const matches = SLASH_COMMANDS.filter((c) => c.cmd.toLowerCase().indexOf(q) === 0);
+    if (!matches.length) { hideSlashPop(); return; }
+    pop.innerHTML = '';
+    matches.forEach((c) => {
+      const opt = el('div', 'slash-opt');
+      opt.innerHTML = '<span class="cmd">' + esc(c.cmd) + '</span><span class="desc">' + esc(c.desc) + '</span>';
+      // mousedown (not click) fires before the textarea's blur, so the tap
+      // isn't lost to the deferred blur-hide.
+      opt.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        selectSlash(id, ta, c.cmd);
+      });
+      pop.appendChild(opt);
+    });
+    pop.hidden = false;
+  }
+
+  // A picked slash command: clear the input, hide the popup, and send it.
+  function selectSlash(id, ta, cmd) {
+    ta.value = '';
+    ta.style.height = 'auto';
+    const send = ta.parentElement && ta.parentElement.querySelector('.send-btn');
+    if (send) send.disabled = true;
+    hideSlashPop();
+    sendSlash(id, cmd);
+  }
+
+  // ----- swipe-to-dismiss gestures -----
+  // Two iOS-standard gestures dismiss the sheet, complementing the ‹ back button:
+  //   1) swipe DOWN starting on the header/grab-handle region (#sheetHandle) —
+  //      bound to the handle, NOT the convo, because the convo's top edge is used
+  //      for scroll-up history paging (a down-drag there must keep scrolling, not
+  //      close). The two gestures can't collide: the handle never scrolls.
+  //   2) swipe RIGHT from the very left screen edge (touchstart clientX < ~30px).
+  // A cheap translate follows the finger; release past ~60px closes, else snaps
+  // back. Listeners live on `sheet` and are torn down in closeSheet().
+  const SWIPE_DISMISS = 60;   // px past which a release dismisses
+  const EDGE_ZONE = 30;       // px from the left edge that arms edge-back
+  const SWIPE_SLOP = 10;      // px before we commit to a drag axis
+
+  function wireSwipeDismiss(sheet) {
+    let mode = null;          // null | 'down' | 'edge' | 'reject'
+    let startX = 0, startY = 0, dx = 0, dy = 0;
+
+    function onStart(e) {
+      if (e.touches.length !== 1) { mode = 'reject'; return; }
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY; dx = 0; dy = 0;
+      // Edge-back arms anywhere on the sheet when the touch begins at the left
+      // screen edge. The down-swipe arms only on the header/handle region.
+      const onHandle = !!(e.target.closest && e.target.closest('#sheetHandle'));
+      if (startX < EDGE_ZONE) mode = 'edge';
+      else if (onHandle) mode = 'down';
+      else mode = null; // undecided; resolve direction on first move
+    }
+
+    function onMove(e) {
+      if (mode === 'reject') return;
+      const t = e.touches[0];
+      dx = t.clientX - startX;
+      dy = t.clientY - startY;
+      if (mode === null) {
+        // Only a clearly-downward drag that STARTED on the handle could be here
+        // (non-handle starts away from the edge are left to normal scrolling).
+        const onHandle = !!(e.target.closest && e.target.closest('#sheetHandle'));
+        if (Math.abs(dy) < SWIPE_SLOP && Math.abs(dx) < SWIPE_SLOP) return;
+        if (onHandle && dy > Math.abs(dx)) mode = 'down';
+        else { mode = 'reject'; return; }
+      }
+      if (mode === 'down') {
+        if (dy <= 0) { setSheetDrag(sheet, 0); return; } // ignore upward
+        e.preventDefault();
+        setSheetDrag(sheet, dy);
+      } else if (mode === 'edge') {
+        // Commit to horizontal only; a mostly-vertical move releases the gesture.
+        if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > SWIPE_SLOP) { mode = 'reject'; clearSheetDrag(sheet); return; }
+        if (dx <= 0) { setSheetDrag(sheet, 0); return; }
+        e.preventDefault();
+        setSheetDrag(sheet, 0, dx);
+      }
+    }
+
+    function onEnd() {
+      if (mode === 'down' && dy > SWIPE_DISMISS) { closeSheet(); return; }
+      if (mode === 'edge' && dx > SWIPE_DISMISS) { closeSheet(); return; }
+      // Not past threshold: snap back to rest.
+      if (mode === 'down' || mode === 'edge') snapSheetBack(sheet);
+      mode = null;
+    }
+
+    sheet.addEventListener('touchstart', onStart, { passive: true });
+    sheet.addEventListener('touchmove', onMove, { passive: false });
+    sheet.addEventListener('touchend', onEnd, { passive: true });
+    sheet.addEventListener('touchcancel', onEnd, { passive: true });
+    // Stash for teardown in closeSheet.
+    state.swipeHandlers = { sheet, onStart, onMove, onEnd };
+  }
+
+  function setSheetDrag(sheet, ty, tx) {
+    sheet.classList.add('dragging');
+    sheet.classList.remove('snapback');
+    sheet.style.transform = 'translate(' + (tx || 0) + 'px,' + (ty || 0) + 'px)';
+  }
+  function clearSheetDrag(sheet) {
+    sheet.classList.remove('dragging');
+    sheet.style.transform = '';
+  }
+  function snapSheetBack(sheet) {
+    sheet.classList.remove('dragging');
+    sheet.classList.add('snapback');
+    sheet.style.transform = '';
+    setTimeout(() => sheet.classList.remove('snapback'), 220);
+  }
+
+  function teardownSwipe() {
+    const h = state.swipeHandlers;
+    if (!h || !h.sheet) { state.swipeHandlers = null; return; }
+    h.sheet.removeEventListener('touchstart', h.onStart);
+    h.sheet.removeEventListener('touchmove', h.onMove);
+    h.sheet.removeEventListener('touchend', h.onEnd);
+    h.sheet.removeEventListener('touchcancel', h.onEnd);
+    state.swipeHandlers = null;
   }
 
   // ----- live activity (detail sheet) -----
@@ -885,14 +1048,17 @@
 
     conv.forEach((e, i) => {
       if (e.role === 'me') {
-        const b = el('div', 'bubble me' + (e.queued ? ' queued' : ''));
-        b.textContent = e.content;
-        convo.appendChild(b);
-        const ts = el('div', 'ts me', fmtTime(e.ts) + (e.queued ? ' · sent' : ''));
-        convo.appendChild(ts);
+        // Full-width user row: dim '›' marker, plain text body.
+        const row = el('div', 'msg me' + (e.queued ? ' queued' : ''));
+        row.appendChild(el('span', 'gutter', '›'));
+        const body = el('div', 'body');
+        body.textContent = e.content;
+        row.appendChild(body);
+        convo.appendChild(row);
+        convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
       } else if (e.role === 'reply') {
         // Merge consecutive 'reply' entries (one Claude turn can yield several
-        // assistant text entries) into a single bubble; skip those folded in.
+        // assistant text entries) into a single row; skip those folded in.
         if (i > 0 && conv[i - 1].role === 'reply') return;
         let content = e.content;
         let last = e;
@@ -900,14 +1066,21 @@
           content += '\n\n' + conv[j].content;
           last = conv[j];
         }
-        const b = el('div', 'bubble reply');
-        b.innerHTML = renderMarkdown(content);
-        convo.appendChild(b);
+        // Full-width assistant row: accent left border + '‹' marker.
+        const row = el('div', 'msg reply');
+        row.appendChild(el('span', 'gutter', '‹'));
+        const body = el('div', 'body');
+        body.innerHTML = renderMarkdown(content);
+        row.appendChild(body);
+        convo.appendChild(row);
         convo.appendChild(el('div', 'ts', fmtTime(last.ts)));
       } else if (e.role === 'error') {
-        const b = el('div', 'bubble err');
-        b.textContent = '⛔ ' + e.content;
-        convo.appendChild(b);
+        const row = el('div', 'msg err');
+        row.appendChild(el('span', 'gutter', '⛔'));
+        const body = el('div', 'body');
+        body.textContent = e.content;
+        row.appendChild(body);
+        convo.appendChild(row);
         convo.appendChild(el('div', 'ts', fmtTime(e.ts)));
       } else if (e.role === 'approved') {
         const b = el('div', 'approved-strip' + (e.bad ? ' bad' : ''));
