@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Mobile-first full-screen terminal. viewport-fit=cover so we paint into the
+     safe-area inset; the xterm helper textarea must stay above the home bar. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16161e">
+<title>Terminal · deck-remote</title>
+<!-- OFFLINE-ONLY: vendored xterm 5.3.0 + fit addon 0.8.0. No CDN at runtime so
+     the page works once the SW/browser has cached these relative assets. -->
+<link rel="stylesheet" href="vendor/xterm.css">
+<style>
+  :root {
+    --bg: #16161e;       /* xterm canvas + page background (Tokyo Night panel) */
+    --chrome: #1a1b26;   /* top bar */
+    --border: #2a2e42;
+    --fg: #d9e2ec;
+    --muted: #7a88a8;
+    --accent: #7aa2f7;
+    --green: #9ece6a;
+    --red: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    /* Safe-area padding for notch / home indicator. */
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #bar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    height: 42px; padding: 0 12px;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  #bar a.back {
+    color: var(--accent); text-decoration: none;
+    padding: 4px 8px; border-radius: 8px;
+    background: rgba(122,162,247,.12);
+    white-space: nowrap;
+  }
+  #bar a.back:active { background: rgba(122,162,247,.24); }
+  #sid { color: var(--muted); flex: 1; min-width: 0;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #conn {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--muted); white-space: nowrap;
+  }
+  #led { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  #conn.live #led { background: var(--green); }
+  #conn.bad  #led { background: var(--red); }
+  /* Terminal host: fills remaining space; xterm fits into it. */
+  #term {
+    flex: 1; min-height: 0; min-width: 0;
+    padding: 6px 8px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  /* Centered notice (no token / disconnected). */
+  #notice {
+    position: absolute; inset: 0;
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 24px;
+    background: rgba(22,22,30,.92);
+    text-align: center;
+  }
+  #notice.show { display: flex; }
+  #notice .box { max-width: 360px; }
+  #notice h2 { margin: 0 0 8px; font-size: 16px; color: var(--fg); }
+  #notice p  { margin: 0 0 16px; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  #notice .btn {
+    display: inline-block; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--accent); color: #0b0d17;
+    font-weight: 600; font-size: 14px;
+    padding: 9px 16px; text-decoration: none;
+  }
+  #notice .btn.ghost { background: transparent; color: var(--accent); margin-left: 8px; }
+  #notice .btn:active { opacity: .85; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <a class="back" href="/">← back</a>
+    <span id="sid"></span>
+    <span id="conn"><span id="led"></span><span id="conntext">connecting…</span></span>
+  </div>
+  <div id="term"></div>
+</div>
+<div id="notice"><div class="box">
+  <h2 id="noticeTitle">Terminal unavailable</h2>
+  <p id="noticeMsg"></p>
+  <div id="noticeActions"></div>
+</div></div>
+
+<!-- Vendored, offline. xterm 5.x UMD → window.Terminal; fit → window.FitAddon.FitAddon -->
+<script src="vendor/xterm.js"></script>
+<script src="vendor/xterm-addon-fit.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var TOKEN_KEY = 'deck_remote_token';
+
+  // ---- params -------------------------------------------------------------
+  var params = new URLSearchParams(location.search);
+  var sessionId = params.get('id') || '';
+  // Token: prefer localStorage (set when the deck was opened with ?token=),
+  // fall back to an explicit ?token= for direct links.
+  var token = localStorage.getItem(TOKEN_KEY) || params.get('token') || '';
+
+  var $term = document.getElementById('term');
+  var $sid = document.getElementById('sid');
+  var $conn = document.getElementById('conn');
+  var $connText = document.getElementById('conntext');
+  var $notice = document.getElementById('notice');
+  var $noticeTitle = document.getElementById('noticeTitle');
+  var $noticeMsg = document.getElementById('noticeMsg');
+  var $noticeActions = document.getElementById('noticeActions');
+
+  $sid.textContent = sessionId ? ('session · ' + sessionId) : 'no session';
+
+  function setConn(stateName, text) {
+    $conn.className = stateName; // '', 'live', 'bad'
+    $connText.textContent = text;
+  }
+
+  function showNotice(title, msg, actionsHTML) {
+    $noticeTitle.textContent = title;
+    $noticeMsg.textContent = msg;
+    $noticeActions.innerHTML = actionsHTML || '';
+    $notice.classList.add('show');
+  }
+  function hideNotice() { $notice.classList.remove('show'); }
+
+  // ---- guards -------------------------------------------------------------
+  if (!sessionId) {
+    setConn('bad', 'no session');
+    showNotice('No session selected',
+      'This page needs a session id. Open the deck and pick a session, then tap the terminal icon.',
+      '<a class="btn" href="/">Open the deck</a>');
+    return;
+  }
+  if (!token) {
+    setConn('bad', 'no token');
+    showNotice('Open from the deck first',
+      'No saved token on this device. Open the deck (which stores your token), then reopen the terminal.',
+      '<a class="btn" href="/">Open the deck</a>');
+    return;
+  }
+
+  // ---- xterm --------------------------------------------------------------
+  var isMobile = typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches;
+
+  // 5.x UMD globals (verified in the vendored files).
+  var Terminal = window.Terminal;
+  var FitAddon = window.FitAddon && window.FitAddon.FitAddon;
+
+  var terminal = new Terminal({
+    convertEol: false,
+    cursorBlink: !isMobile,
+    disableStdin: false,
+    fontFamily: 'IBM Plex Mono, Menlo, Consolas, monospace',
+    fontSize: 13,
+    scrollback: 10000,
+    theme: {
+      background: '#16161e',
+      foreground: '#d9e2ec',
+      cursor: '#9ecbff',
+    },
+  });
+  var fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
+  terminal.open($term);
+
+  // State mirrored from TerminalPanel.js:
+  //  - terminalAttached: only forward input/resize once the server confirms.
+  //  - readOnly: server gates writes; we mirror disableStdin.
+  //  - decoder: stream-decode binary frames so multi-byte UTF-8 isn't split.
+  var ws = null;
+  var terminalAttached = false;
+  var readOnly = false;
+  var decoder = new TextDecoder();
+  var reconnectTimer = null;
+  var reconnectAttempt = 0;
+  var wsReconnectEnabled = true;
+  var manuallyClosed = false;
+
+  function doFit() {
+    if (!$term.offsetWidth || !$term.offsetHeight) return;
+    try { fitAddon.fit(); } catch (_e) { return; }
+    var cols = terminal.cols, rows = terminal.rows;
+    if (cols >= 10 && rows >= 3 && ws && ws.readyState === WebSocket.OPEN && terminalAttached) {
+      ws.send(JSON.stringify({ type: 'resize', cols: cols, rows: rows }));
+    }
+  }
+
+  var fitTimer = null;
+  function scheduleFit(delay) {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(doFit, delay);
+  }
+
+  if ($term.offsetWidth && $term.offsetHeight) { try { fitAddon.fit(); } catch (_e) {} }
+
+  window.addEventListener('resize', function () { scheduleFit(120); });
+  window.addEventListener('orientationchange', function () { scheduleFit(250); });
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(function () { scheduleFit(90); }).observe($term);
+  }
+
+  // Mobile: tapping the terminal focuses the xterm helper textarea to raise
+  // the on-screen keyboard.
+  $term.addEventListener('click', function () { terminal.focus(); });
+
+  // Input forwarding — gated on terminalAttached + !readOnly, exactly as the
+  // reference client does (server also enforces read-only).
+  terminal.onData(function (data) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !terminalAttached || readOnly) return;
+    ws.send(JSON.stringify({ type: 'input', data: data }));
+  });
+
+  // ---- WebSocket ----------------------------------------------------------
+  function wsURL() {
+    var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    var u = new URL(proto + '://' + location.host + '/ws/session/' + encodeURIComponent(sessionId));
+    if (token) u.searchParams.set('token', token);
+    return u.toString();
+  }
+
+  function reconnectDelay(attempt) {
+    var capped = Math.min(attempt, 8);
+    return Math.min(8000, Math.round(350 * Math.pow(1.8, capped - 1)));
+  }
+
+  function scheduleReconnect() {
+    if (!wsReconnectEnabled || manuallyClosed) return;
+    if (reconnectTimer || ws) return;
+    reconnectAttempt += 1;
+    setConn('', 'reconnecting…');
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      connect();
+    }, reconnectDelay(reconnectAttempt));
+  }
+
+  function connect() {
+    if (ws) { try { ws.close(); } catch (_e) {} ws = null; }
+    terminalAttached = false;
+    manuallyClosed = false;
+    hideNotice();
+    setConn('', 'connecting…');
+
+    ws = new WebSocket(wsURL());
+    ws.binaryType = 'arraybuffer';
+    var sock = ws;
+
+    sock.onopen = function () {
+      if (ws !== sock) return;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectAttempt = 0;
+      setConn('live', 'connected');
+      sock.send(JSON.stringify({ type: 'ping' }));
+    };
+
+    sock.onmessage = function (event) {
+      if (ws !== sock) return;
+      // String frame => control JSON (status / error). Never write these into
+      // the terminal — mirror TerminalPanel.js onmessage exactly.
+      if (typeof event.data === 'string') {
+        var payload;
+        try { payload = JSON.parse(event.data); }
+        catch (_e) { return; } // ignore non-JSON control messages
+        if (payload.type === 'status') {
+          if (payload.event === 'connected') {
+            readOnly = !!payload.readOnly;
+            terminal.options.disableStdin = readOnly;
+            setConn('live', readOnly ? 'connected (read-only)' : 'connected');
+          } else if (payload.event === 'terminal_attached') {
+            terminalAttached = true;
+            scheduleFit(0);
+          } else if (payload.event === 'session_closed') {
+            terminalAttached = false;
+          }
+        } else if (payload.type === 'error') {
+          if (payload.code === 'TERMINAL_ATTACH_FAILED' || payload.code === 'TMUX_SESSION_NOT_FOUND') {
+            terminalAttached = false;
+          }
+          // TMUX_SESSION_NOT_FOUND is terminal-fatal: the session is gone, so
+          // stop reconnecting and surface a banner (reconnect button rebuilds).
+          if (payload.code === 'TMUX_SESSION_NOT_FOUND') {
+            wsReconnectEnabled = false;
+            setConn('bad', 'session gone');
+            showNotice('Terminal disconnected',
+              payload.message || 'tmux session is not available' +
+                (payload.hint ? (' — ' + payload.hint) : ''),
+              '<span class="btn" id="reconnectBtn">Reconnect</span>' +
+              '<a class="btn ghost" href="/">Back to deck</a>');
+            wireReconnect();
+            return;
+          }
+          terminal.write('\r\n[error:' + (payload.code || 'unknown') + '] ' +
+            (payload.message || 'unknown error') + '\r\n');
+        }
+        return;
+      }
+      // Binary frame => raw terminal output.
+      if (event.data instanceof ArrayBuffer) {
+        terminal.write(decoder.decode(new Uint8Array(event.data), { stream: true }));
+      }
+    };
+
+    sock.onerror = function () {
+      if (ws !== sock) return;
+      setConn('bad', 'connection error');
+    };
+
+    sock.onclose = function () {
+      if (ws !== sock) return;
+      ws = null;
+      terminalAttached = false;
+      if (manuallyClosed) return;
+      if (wsReconnectEnabled) {
+        scheduleReconnect();
+        return;
+      }
+      setConn('bad', 'disconnected');
+      showNotice('Disconnected',
+        'The terminal connection was closed.',
+        '<span class="btn" id="reconnectBtn">Reconnect</span>' +
+        '<a class="btn ghost" href="/">Back to deck</a>');
+      wireReconnect();
+    };
+  }
+
+  function wireReconnect() {
+    var btn = document.getElementById('reconnectBtn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      wsReconnectEnabled = true;
+      reconnectAttempt = 0;
+      hideNotice();
+      connect();
+    }, { once: true });
+  }
+
+  terminal.writeln('Connecting to terminal…');
+  connect();
+  if (!isMobile) terminal.focus();
+})();
+</script>
+</body>
+</html>

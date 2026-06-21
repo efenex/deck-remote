@@ -20,7 +20,7 @@
  *   GET  /api/rc/push/config    -> {enabled,publicKey?}
  *   POST /api/rc/push/subscribe   = PushSubscription JSON
  *   POST /api/rc/push/presence    {focused:bool}
- *   /ws/session/<id>?token=    terminal WebSocket (linked, not embedded in v0)
+ *   /ws/session/<id>?token=    terminal WebSocket (consumed by /terminal.html, the embedded xterm.js page)
  *
  * SSE/WebSocket cannot set headers, so the token is appended as ?token=.
  */
@@ -446,7 +446,10 @@
   }
 
   function sheetHeadHTML(s) {
-    const termURL = tokenURL('/ws/session/' + encodeURIComponent(s.id));
+    // Open the embedded xterm.js terminal page. Same-origin, so the token is
+    // read from localStorage by terminal.html — we deliberately do NOT put it
+    // in the URL (avoids leaking it into history / target=_blank referrers).
+    const termURL = '/terminal.html?id=' + encodeURIComponent(s.id);
     return (
       '<div class="grabber"></div>' +
       '<div class="sheet-head"><div class="sheet-title-row">' +
@@ -1109,12 +1112,14 @@
     if (confirm('Forget the token on this device?')) forgetToken('Token cleared.');
   });
 
-  // Escape hatch → agent-deck's own terminal. We deep-link to the open session
-  // if any, else just open the app root (the proxy serves agent-deck's UI paths).
+  // Escape hatch → embedded xterm.js terminal page. We deep-link to the open
+  // session if any, else the most recent session; with no sessions at all we
+  // fall back to the app root. terminal.html reads the token from localStorage
+  // (same origin), so it stays out of the URL.
   $('#escapeTerm').addEventListener('click', (e) => {
     e.preventDefault();
     const id = state.openSheetId || (Array.from(state.sessions.keys())[0]);
-    const url = id ? tokenURL('/ws/session/' + encodeURIComponent(id)) : tokenURL('/');
+    const url = id ? '/terminal.html?id=' + encodeURIComponent(id) : tokenURL('/');
     window.open(url, '_blank', 'noopener');
   });
 

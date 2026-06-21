@@ -9,12 +9,18 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v1';
+const CACHE = 'deck-remote-v2';
 const SHELL = [
   '/',
   '/index.html',
   '/app.js',
   '/manifest.webmanifest',
+  // Embedded terminal page + its vendored (offline) xterm assets, so the
+  // escape-hatch terminal works without a network round-trip to a CDN.
+  '/terminal.html',
+  '/vendor/xterm.js',
+  '/vendor/xterm.css',
+  '/vendor/xterm-addon-fit.js',
 ];
 
 self.addEventListener('install', (event) => {
