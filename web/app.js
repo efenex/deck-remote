@@ -144,10 +144,16 @@
     openSheetId: null,        // session id whose sheet is open
     activityTimer: null,      // interval id for the open sheet's live-activity poll
     convoScrollHandler: null, // scroll listener attached to the open sheet's #convo
+    lastWorking: new Map(),   // id -> last-seen working flag from the activity poll
+    reconciling: new Set(),   // ids with an in-flight transcript-tail reconcile
   };
 
   // How often the open detail sheet probes /api/rc/activity for live state.
   const ACTIVITY_MS = 3000;
+  // How many transcript-tail messages to fetch when reconciling a finished turn
+  // into the open thread (catches replies driven from the agent-deck TUI, not
+  // just PWA-originated /api/rc/ask turns).
+  const RECONCILE_TAIL = 12;
   // How many history messages to load per page (open-load and each scroll-up).
   const HISTORY_PAGE = 30;
   // Pixels from the top of the convo that trigger an older-window fetch.
@@ -422,6 +428,12 @@
     state.convoScrollHandler = null;
     const hs = state.openSheetId && state.history.get(state.openSheetId);
     if (hs) hs.loading = false;
+    // Drop live-sync bookkeeping for the closing sheet so a reconcile settling
+    // after close can't touch a stale thread, and the next open starts clean.
+    if (state.openSheetId) {
+      state.lastWorking.delete(state.openSheetId);
+      state.reconciling.delete(state.openSheetId);
+    }
     const scrim = $('#scrim');
     const sheet = $('#sheet');
     if (scrim) scrim.remove();
@@ -563,6 +575,16 @@
     renderConvo(s.id);
     loadHistory(s.id);
     checkPermission(s, false); // auto-check for a real pending dialog on open
+
+    // If the agent is already idle on open, reconcile the transcript tail once
+    // shortly after history lands — covers a reply that finished just BEFORE we
+    // opened (after this card's last list refresh) so it never produced an SSE
+    // event we'd see. Usually a no-op (dedup against the freshly-loaded history).
+    if (!s.working) {
+      setTimeout(() => {
+        if (state.openSheetId === s.id) reconcileTranscriptTail(s.id);
+      }, 600);
+    }
   }
 
   // ----- live activity (detail sheet) -----
@@ -589,6 +611,7 @@
 
   function startActivityPoll(id) {
     stopActivityPoll();
+    state.lastWorking.set(id, undefined); // unknown until the first probe lands
     async function probe() {
       if (state.openSheetId !== id) { stopActivityPoll(); return; }
       try {
@@ -601,6 +624,23 @@
           s.working = !!(a && a.working);
           s.activity = (a && a.activity) || '';
           s.currentTool = (a && a.currentTool) || '';
+        }
+        // Live thread sync (catch-all for turns NOT originated by this PWA, e.g.
+        // prompts entered in the agent-deck TUI). The SSE reply fast-path stays
+        // as-is; dedup in reconcileTranscriptTail prevents double messages.
+        const now = !!(a && a.working);
+        const prev = state.lastWorking.get(id);
+        state.lastWorking.set(id, now);
+        // A turn just finished (working true→false). Pull the transcript tail and
+        // append anything new. Also reconcile on any observed change (covers a
+        // very fast turn that flipped back to idle between two 3s polls); the
+        // dedup makes the extra call a cheap no-op when nothing is new.
+        if (prev !== undefined && prev !== now && !now) {
+          reconcileTranscriptTail(id);
+        } else if (prev !== undefined && prev !== now && now) {
+          // idle→working: a new turn began; reconcile so any message that landed
+          // between polls (or just before this turn) is captured promptly.
+          reconcileTranscriptTail(id);
         }
       } catch (_) {
         // Graceful: on error just fall back to idle, don't spam.
@@ -739,6 +779,80 @@
       const afterH = convo.scrollHeight;
       convo.scrollTop = beforeT + (afterH - beforeH);
     }
+  }
+
+  // Live thread sync: pull the recent transcript tail and append any messages
+  // that aren't already in the open thread. This is the catch-all for turns that
+  // weren't originated by this PWA (e.g. a prompt typed in the agent-deck TUI),
+  // which never produce an SSE `reply` event here. The SSE fast-path is kept;
+  // dedup-by-content below prevents collisions when both fire.
+  //
+  // Dedup: map each tail message's role (user→'me', reply→'reply') and skip it
+  // if an existing convo entry of the SAME mapped role already has the same
+  // trimmed content. We deliberately do NOT key on `ts` — live SSE entries use
+  // millisecond Date.now()/1000 while transcript ts is whole seconds.
+  async function reconcileTranscriptTail(id) {
+    if (state.openSheetId !== id) return;
+    if (state.reconciling.has(id)) return; // coalesce overlapping reconciles
+    state.reconciling.add(id);
+
+    // Decide auto-scroll BEFORE we mutate/render: only stick to the bottom if the
+    // user is already near it. If they've scrolled up to read, don't yank them.
+    const convo = $('#convo');
+    const nearBottom = convo
+      ? (convo.scrollHeight - convo.scrollTop - convo.clientHeight) < 80
+      : true;
+
+    let r;
+    try {
+      r = await api('GET', '/api/rc/history?id=' + encodeURIComponent(id) +
+        '&limit=' + RECONCILE_TAIL + '&offset=0');
+    } catch (_) {
+      state.reconciling.delete(id);
+      return; // graceful: a poll-driven reconcile failing is a no-op
+    } finally {
+      state.reconciling.delete(id);
+    }
+    if (state.openSheetId !== id) return; // sheet closed while in flight
+
+    const msgs = (r && r.messages) || []; // oldest-first
+    if (!msgs.length) return;
+    const conv = ensureConvo(id);
+
+    // Build a per-role multiset of trimmed contents already present so repeated
+    // identical messages still dedup one-for-one (don't drop a genuine repeat).
+    const seen = new Map(); // key `${role}\n${trimmedContent}` -> remaining count
+    conv.forEach((e) => {
+      if (e.role !== 'me' && e.role !== 'reply') return;
+      if (e.content == null) return;
+      const key = e.role + '\n' + String(e.content).trim();
+      seen.set(key, (seen.get(key) || 0) + 1);
+    });
+
+    let appended = 0;
+    msgs.forEach((m) => {
+      const turn = historyToTurn(m); // {role:'me'|'reply', content, ts}
+      const key = turn.role + '\n' + String(turn.content || '').trim();
+      const left = seen.get(key) || 0;
+      if (left > 0) { seen.set(key, left - 1); return; } // already in thread
+      conv.push(turn);
+      appended++;
+    });
+
+    if (!appended) return; // common case: nothing new — cheap no-op
+
+    if (nearBottom) {
+      // User is at the live edge: render normally so it sticks to the bottom.
+      renderConvo(id);
+    } else {
+      // User scrolled up to read: append without yanking the view. renderConvo
+      // rebuilds the DOM (resetting scrollTop), so restore their position — the
+      // new messages are below the fold and don't shift content above it.
+      const beforeT = convo ? convo.scrollTop : 0;
+      renderConvo(id, { keepScroll: true });
+      if (convo) convo.scrollTop = beforeT;
+    }
+    renderDeck(); // refresh the card's last-reply preview
   }
 
   function renderConvo(id, opts) {
