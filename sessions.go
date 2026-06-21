@@ -59,6 +59,9 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			defer rc()
 			if out, err := s.sessionReply(rctx, sessions[i].ID); err == nil {
 				sessions[i].LastReply = preview(out.Content, 160)
+				if t, perr := time.Parse(time.RFC3339, out.Timestamp); perr == nil {
+					sessions[i].LastActivity = t.Unix()
+				}
 			}
 			if pane, err := s.sessionPane(rctx, sessions[i].ID); err == nil {
 				act := parseActivity(pane)

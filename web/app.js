@@ -32,6 +32,7 @@
   // ---------------------------------------------------------------------------
   const TOKEN_KEY = 'deck_remote_token';
   const PREFS_KEY = 'deck_remote_prefs';
+  const COLLAPSE_KEY = 'deck_remote_group_collapse'; // {groupName: bool} manual overrides
 
   function readToken() {
     const url = new URL(location.href);
@@ -115,10 +116,21 @@
     let p = {};
     try { p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch (_) {}
     // decision #4: idle OFF by default; approve/finished/error ON.
-    return Object.assign({ approve: true, finished: true, error: true, idle: false }, p);
+    // sortGroupsByActivity ON by default (most-recent/working groups float up).
+    return Object.assign({ approve: true, finished: true, error: true, idle: false, sortGroupsByActivity: true }, p);
   }
   function savePrefs(p) { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); }
   let prefs = loadPrefs();
+
+  // Per-group manual collapse overrides. A value here OVERRIDES the stale default
+  // (true=collapsed, false=expanded). Absent => follow the stale default.
+  function loadCollapse() {
+    let m = {};
+    try { m = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}'); } catch (_) {}
+    return (m && typeof m === 'object') ? m : {};
+  }
+  function saveCollapse(m) { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(m)); }
+  let collapseOverrides = loadCollapse();
 
   // ---------------------------------------------------------------------------
   // App state
@@ -231,6 +243,44 @@
     return t.length > m ? t.slice(0, m - 1) + '…' : t;
   }
 
+  const STALE_S = 86400; // 24h — older groups default to collapsed.
+
+  // Relative-age label from a unix-seconds timestamp. "now" when working,
+  // "—" when never (0/absent), else compact "5m" / "3h" / "7d ago".
+  function relAge(lastActivity, working) {
+    if (working) return 'now';
+    const t = Number(lastActivity) || 0;
+    if (!t) return '—';
+    const ageS = Date.now() / 1000 - t;
+    if (ageS < 60) return 'now';
+    if (ageS < 3600) return Math.floor(ageS / 60) + 'm';
+    if (ageS < 86400) return Math.floor(ageS / 3600) + 'h';
+    return Math.floor(ageS / 86400) + 'd ago';
+  }
+
+  // Recency for a group's session list: working sessions rank first (Infinity);
+  // otherwise the MAX lastActivity (unix seconds) across the list, 0 if none.
+  function groupRecency(list) {
+    let anyWorking = false;
+    let max = 0;
+    for (const s of list) {
+      if (s.working) anyWorking = true;
+      const t = Number(s.lastActivity) || 0;
+      if (t > max) max = t;
+    }
+    return { working: anyWorking, recency: anyWorking ? Infinity : max, last: max };
+  }
+
+  // Effective collapsed state: a working group is never collapsed; a manual
+  // override wins; otherwise default-collapse only when stale (>24h).
+  function isGroupCollapsed(name, info) {
+    if (info.working) return false;
+    if (Object.prototype.hasOwnProperty.call(collapseOverrides, name)) {
+      return !!collapseOverrides[name];
+    }
+    return info.last > 0 ? (Date.now() / 1000 - info.last) > STALE_S : true;
+  }
+
   // A currentTool starting with "Task(" means a subagent — relabel it for humans.
   function toolLabel(tool) {
     const t = String(tool || '').trim();
@@ -253,25 +303,64 @@
 
     deck.innerHTML = '';
 
-    // Group by tree/group, stable alpha order. No status emphasis.
+    // Group by tree/group. Within-group session order stays stable-alpha.
     const groups = new Map();
     all.forEach((s) => {
       const k = groupKey(s);
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(s);
     });
-    const keys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+
+    // Precompute per-group recency so we can sort and label headers.
+    const meta = new Map(); // name -> {info, list}
+    groups.forEach((list, k) => {
+      const sorted = list.slice().sort((a, b) => (a.title || a.id).localeCompare(b.title || b.id));
+      meta.set(k, { info: groupRecency(sorted), list: sorted });
+    });
+
+    // Ordering: by activity (working/most-recent first, "never" last) when the
+    // pref is ON; else the legacy alphabetical order. Ties break alphabetically.
+    let keys = Array.from(groups.keys());
+    if (prefs.sortGroupsByActivity) {
+      keys.sort((a, b) => {
+        const rb = meta.get(b).info.recency, ra = meta.get(a).info.recency;
+        if (rb !== ra) return rb - ra;
+        return a.localeCompare(b);
+      });
+    } else {
+      keys.sort((a, b) => a.localeCompare(b));
+    }
+
     keys.forEach((k) => {
-      const list = groups.get(k).slice()
-        .sort((a, b) => (a.title || a.id).localeCompare(b.title || b.id));
-      const grp = el('div', 'group');
+      const { info, list } = meta.get(k);
+      const collapsed = isGroupCollapsed(k, info);
+
+      const grp = el('div', 'group' + (collapsed ? ' collapsed' : ''));
       const head = el('div', 'group-head');
       const treeHTML = esc(k).replace(/ \/ /g, ' / ');
-      head.innerHTML = '<span class="tree">' + treeHTML + '</span> <span class="count">' + list.length + '</span>';
+      const age = relAge(info.last, info.working);
+      // Collapsed headers carry a summary (count + age); expanded show a dim age.
+      const summary = collapsed
+        ? '<span class="summary">' + list.length + ' · ' + esc(age) + '</span>'
+        : '<span class="age">' + esc(age) + '</span><span class="count">' + list.length + '</span>';
+      head.innerHTML =
+        '<span class="chev">' + (collapsed ? '▸' : '▾') + '</span>' +
+        '<span class="tree">' + treeHTML + '</span> ' + summary;
+      head.addEventListener('click', () => toggleGroup(k, info));
       grp.appendChild(head);
-      list.forEach((s) => grp.appendChild(cardEl(s)));
+      if (!collapsed) list.forEach((s) => grp.appendChild(cardEl(s)));
       deck.appendChild(grp);
     });
+  }
+
+  // Tap a header to expand/collapse. Records a manual override (overriding the
+  // stale default). A working group can't be collapsed.
+  function toggleGroup(name, info) {
+    const nowCollapsed = isGroupCollapsed(name, info);
+    if (!nowCollapsed && info.working) return; // never collapse a working group
+    collapseOverrides[name] = !nowCollapsed;
+    saveCollapse(collapseOverrides);
+    renderDeck();
   }
 
   function cardEl(s) {

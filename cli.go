@@ -68,6 +68,10 @@ type sessionInfo struct {
 	// Populated best-effort by handleSessions. The PWA is detail-first: it shows
 	// this instead of agent-deck's unreliable status.
 	LastReply string `json:"lastReply,omitempty"`
+	// LastActivity is the unix time (s) of the last assistant reply, from the
+	// transcript timestamp. Used by the PWA to sort groups by recency and to
+	// fold stale (>1d) groups. 0 when unknown.
+	LastActivity int64 `json:"lastActivity,omitempty"`
 
 	// Live activity, parsed best-effort from the pane (handleSessions).
 	Working     bool   `json:"working,omitempty"`     // agent is actively processing

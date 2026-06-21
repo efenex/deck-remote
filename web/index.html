@@ -71,10 +71,16 @@
   .deck{padding:4px 14px 110px}
   .group{margin-top:16px}
   .group-head{display:flex;align-items:center;gap:8px;padding:4px 6px 8px;color:var(--muted);
-    font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
-  .group-head .tree{color:var(--accent)}
-  .group-head .count{margin-left:auto;background:var(--card);border:1px solid var(--border);
+    font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;cursor:pointer;user-select:none}
+  .group-head:active{opacity:.7}
+  .group-head .chev{color:var(--muted);font-size:11px;width:12px;text-align:center;flex:0 0 auto}
+  .group-head .tree{color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .group-head .age{color:var(--muted-2);font-size:11px;font-weight:600;text-transform:none;letter-spacing:0;margin-left:auto}
+  .group-head .summary{margin-left:auto;color:var(--muted);font-size:11px;font-weight:600;text-transform:none;letter-spacing:0;
+    background:var(--card);border:1px solid var(--border);border-radius:999px;padding:1px 9px}
+  .group-head .count{background:var(--card);border:1px solid var(--border);
     color:var(--muted);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;text-transform:none;letter-spacing:0}
+  .group.collapsed .group-head{padding-bottom:6px}
 
   /* ---------- session card (detail-first: leads with the last reply) ---------- */
   .card{position:relative;background:var(--card);border:1px solid var(--border);
@@ -375,6 +381,11 @@
         <div class="set-row"><span class="gi">✅</span><span class="lbl">Turn completed</span><div class="toggle on" data-pref="finished"><div class="knob"></div></div></div>
         <div class="set-row"><span class="gi">⛔</span><span class="lbl">Session errored</span><div class="toggle on" data-pref="error"><div class="knob"></div></div></div>
         <div class="set-row"><span class="gi">💤</span><span class="lbl">Went idle</span><div class="toggle" data-pref="idle"><div class="knob"></div></div></div>
+      </div>
+
+      <div class="set-section">Deck</div>
+      <div class="set-list">
+        <div class="set-row"><span class="gi">↕</span><span class="lbl">Sort groups by activity<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">Working / most-recent groups float to the top</div></span><div class="toggle on" data-pref="sortGroupsByActivity"><div class="knob"></div></div></div>
       </div>
 
       <a class="escape" id="escapeTerm" href="#">
