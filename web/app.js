@@ -189,6 +189,11 @@
   }
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
   $('#goSettings').addEventListener('click', () => showTab('settings'));
+  $('#goRefresh').addEventListener('click', async () => {
+    const b = $('#goRefresh');
+    b.classList.add('busy');
+    try { await loadSessions(false); } finally { b.classList.remove('busy'); }
+  });
 
   // ---------------------------------------------------------------------------
   // Toast (foreground notify + errors)

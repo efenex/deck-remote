@@ -217,6 +217,9 @@
   /* header check-for-approval button busy state */
   .sheet-check{width:36px;height:36px;border-radius:10px;flex:0 0 auto}
   .icon-btn.busy{opacity:.5}
+  .appbar-actions{display:flex;align-items:center;gap:8px}
+  .icon-btn.busy .gi{display:inline-block;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
 
   /* hold-to-approve with a fill ring */
   .hold-approve{margin-top:14px;position:relative;height:56px;border-radius:28px;overflow:hidden;
@@ -339,7 +342,10 @@
     <div class="appbar">
       <div class="appbar-row">
         <div class="appbar-title">deck<span class="dot">.</span></div>
-        <button class="icon-btn" id="goSettings" title="settings"><span class="gi">⚙️</span></button>
+        <div class="appbar-actions">
+          <button class="icon-btn" id="goRefresh" title="refresh"><span class="gi">↻</span></button>
+          <button class="icon-btn" id="goSettings" title="settings"><span class="gi">⚙️</span></button>
+        </div>
       </div>
       <div class="conn" id="connStrip"><span class="led"></span><span id="connText">Connecting…</span></div>
     </div>
