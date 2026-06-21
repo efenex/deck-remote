@@ -161,6 +161,7 @@ func (s *server) routes() http.Handler {
 	// deck-remote's own structured endpoints (the gap-closers). Bearer-gated.
 	mux.Handle("GET /api/rc/sessions", s.auth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/rc/reply", s.auth(http.HandlerFunc(s.handleReply)))
+	mux.Handle("GET /api/rc/history", s.auth(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("GET /api/rc/status", s.auth(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("POST /api/rc/ask", s.auth(http.HandlerFunc(s.handleAsk)))
 	mux.Handle("POST /api/rc/slash", s.auth(http.HandlerFunc(s.handleSlash)))
