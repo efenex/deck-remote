@@ -476,8 +476,9 @@
     // in the URL (avoids leaking it into history / target=_blank referrers).
     const termURL = '/terminal.html?id=' + encodeURIComponent(s.id);
     return (
-      '<div class="grabber"></div>' +
+      '<div class="grabber" id="sheetGrab" title="Back to sessions"></div>' +
       '<div class="sheet-head"><div class="sheet-title-row">' +
+        '<button class="icon-btn sheet-back" id="sheetBack" title="Back to sessions"><span class="gi">‹</span></button>' +
         '<div style="flex:1;min-width:0">' +
           '<div class="sheet-title">' + esc(s.title || s.id) + '</div>' +
           '<div class="sheet-sub"><span class="harness"><span class="gi">✦</span>' + esc(s.tool || 'agent') + '</span>' +
@@ -515,6 +516,13 @@
     const approveMount = el('div');
     approveMount.id = 'approveMount';
     convo.appendChild(approveMount);
+
+    // Back affordances (standalone PWA has no back gesture, and the full-screen
+    // sheet covers the scrim — so an explicit control is required).
+    const backBtn = $('#sheetBack', sheet);
+    if (backBtn) backBtn.addEventListener('click', closeSheet);
+    const grab = $('#sheetGrab', sheet);
+    if (grab) grab.addEventListener('click', closeSheet);
 
     // Wire the header "Check for approval" affordance.
     const checkBtn = $('#sheetCheckPerm', sheet);
