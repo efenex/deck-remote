@@ -1,0 +1,19 @@
+{
+  "name": "deck-remote",
+  "short_name": "deck",
+  "description": "Phone remote-control for AI coding sessions.",
+  "display": "standalone",
+  "orientation": "portrait",
+  "start_url": "/",
+  "scope": "/",
+  "background_color": "#0c0d14",
+  "theme_color": "#1a1b26",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='112'%20fill='%231a1b26'/%3E%3Crect%20x='96'%20y='150'%20width='320'%20height='212'%20rx='28'%20fill='%2324283b'%20stroke='%237aa2f7'%20stroke-width='10'/%3E%3Ccircle%20cx='168'%20cy='214'%20r='16'%20fill='%2373daca'/%3E%3Ccircle%20cx='168'%20cy='262'%20r='16'%20fill='%23e0af68'/%3E%3Ccircle%20cx='168'%20cy='310'%20r='16'%20fill='%23f7768e'/%3E%3Crect%20x='208'%20y='200'%20width='160'%20height='28'%20rx='14'%20fill='%237aa2f7'/%3E%3Crect%20x='208'%20y='248'%20width='128'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3Crect%20x='208'%20y='296'%20width='144'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

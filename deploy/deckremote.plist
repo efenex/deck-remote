@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd template for deck-remote (macOS). Copy to
+     ~/Library/LaunchAgents/dev.deckremote.server.plist and edit the marked
+     paths, then: launchctl bootstrap gui/$(id -u) <that path>
+     (scripts/cutover.sh does the load + tailscale serve for you). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.deckremote.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/deck-remote</string>   <!-- the built binary -->
+    <string>--listen</string>
+    <string>127.0.0.1:8781</string>
+    <string>--web</string>
+    <string>/ABSOLUTE/PATH/TO/deck-remote/web</string>
+    <!-- optional: terminal escape-hatch proxy to a single `agent-deck web` -->
+    <string>--agentdeck-url</string>
+    <string>http://127.0.0.1:8420</string>
+  </array>
+  <!-- launchd's default PATH lacks Homebrew; agent-deck needs `tmux`. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/deck-remote.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/deck-remote.err.log</string>
+</dict>
+</plist>

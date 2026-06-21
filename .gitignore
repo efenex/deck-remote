@@ -1,0 +1,7 @@
+# compiled binary
+/deck-remote
+# logs / scratch
+*.log
+*.bak.*
+# internal design mockups (contain sample/private session names) — not published
+mockups/

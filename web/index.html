@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<!-- Mobile-first: lock to device width, no zoom; viewport-fit=cover paints into
+     the iOS home-bar safe area. This is the installed-PWA presentation. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="deck">
+<meta name="theme-color" content="#1a1b26">
+<title>deck-remote</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<!-- apple-touch-icon: iOS uses this for the Home-Screen icon (push prereq). -->
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='112'%20fill='%231a1b26'/%3E%3Crect%20x='96'%20y='150'%20width='320'%20height='212'%20rx='28'%20fill='%2324283b'%20stroke='%237aa2f7'%20stroke-width='10'/%3E%3Ccircle%20cx='168'%20cy='214'%20r='16'%20fill='%2373daca'/%3E%3Ccircle%20cx='168'%20cy='262'%20r='16'%20fill='%23e0af68'/%3E%3Ccircle%20cx='168'%20cy='310'%20r='16'%20fill='%23f7768e'/%3E%3Crect%20x='208'%20y='200'%20width='160'%20height='28'%20rx='14'%20fill='%237aa2f7'/%3E%3Crect%20x='208'%20y='248'%20width='128'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3Crect%20x='208'%20y='296'%20width='144'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='112'%20fill='%231a1b26'/%3E%3Crect%20x='96'%20y='150'%20width='320'%20height='212'%20rx='28'%20fill='%2324283b'%20stroke='%237aa2f7'%20stroke-width='10'/%3E%3C/svg%3E">
+<style>
+  /* ===========================================================
+     deck-remote · live PWA
+     CSS lifted from the approved mockup (mockups/v0-recommended.html),
+     adapted from a multi-frame gallery to one full-viewport SPA.
+     Tokyo Night palette. Dark, offline, mobile-first.
+     =========================================================== */
+  :root{
+    --bg:#1a1b26; --panel:#16161e; --card:#24283b; --card-hi:#2b3047;
+    --text:#c0caf5; --fg:#a9b1d6; --muted:#787c99; --muted-2:#565f89;
+    --border:#2a2e42; --border-hi:rgba(120,124,153,.40);
+    --accent:#7aa2f7; --green:#73daca; --red:#f7768e; --yellow:#e0af68;
+    --purple:#bb9af7; --orange:#ff9e64; --cyan:#7dcfff;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --radius:16px; --tap:44px;
+    --glow-wait:0 0 8px rgba(224,175,104,.55);
+    --safe-top:env(safe-area-inset-top,0px);
+    --safe-bottom:env(safe-area-inset-bottom,0px);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    overflow:hidden;
+  }
+  button{font-family:inherit;cursor:pointer}
+
+  /* ---------- app frame (replaces the mockup's phone frame) ---------- */
+  #app{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--bg)}
+  .screen{flex:1;overflow-y:auto;position:relative;-webkit-overflow-scrolling:touch}
+  .screen::-webkit-scrollbar{display:none}
+  [hidden]{display:none !important}
+
+  /* ---------- top app bar ---------- */
+  .appbar{position:sticky;top:0;z-index:40;background:linear-gradient(180deg,var(--bg) 70%,rgba(26,27,38,0));
+    padding:calc(6px + var(--safe-top)) 18px 12px}
+  .appbar-row{display:flex;align-items:center;justify-content:space-between}
+  .appbar-title{font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px}
+  .appbar-title .dot{color:var(--accent)}
+  .icon-btn{width:var(--tap);height:var(--tap);border-radius:12px;background:var(--card);
+    border:1px solid var(--border);display:grid;place-items:center;color:var(--fg);font-size:18px}
+
+  /* connection / error strip */
+  .conn{margin-top:10px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);
+    background:var(--card);border:1px solid var(--border);border-radius:10px;padding:7px 11px}
+  .conn .led{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+  .conn.live .led{background:var(--green)}
+  .conn.bad{color:var(--red);border-color:rgba(247,118,142,.4)}
+  .conn.bad .led{background:var(--red)}
+
+  /* ---------- group / tree sections ---------- */
+  .deck{padding:4px 14px 110px}
+  .group{margin-top:16px}
+  .group-head{display:flex;align-items:center;gap:8px;padding:4px 6px 8px;color:var(--muted);
+    font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
+  .group-head .tree{color:var(--accent)}
+  .group-head .count{margin-left:auto;background:var(--card);border:1px solid var(--border);
+    color:var(--muted);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;text-transform:none;letter-spacing:0}
+
+  /* ---------- session card (detail-first: leads with the last reply) ---------- */
+  .card{position:relative;background:var(--card);border:1px solid var(--border);
+    border-radius:var(--radius);padding:13px 14px;margin-bottom:10px;display:flex;flex-direction:column;align-items:stretch;gap:6px;
+    min-height:64px;transition:transform .12s ease,background .12s ease;cursor:pointer;overflow:hidden}
+  .card:active{transform:scale(.985);background:var(--card-hi)}
+  .card-top{display:flex;align-items:center;gap:10px;min-width:0}
+  .card-title{flex:1;min-width:0;font-size:15px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-meta{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);min-width:0}
+  .card-meta .path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  /* the hero detail: a dim one-line preview of the last reply */
+  .card-reply{font-size:13px;color:var(--fg);line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .card-reply.empty{color:var(--muted-2);font-style:italic}
+  /* live activity (replaces the reply preview while the agent is working) */
+  .card-activity{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--accent);font-weight:600;min-width:0}
+  .card-activity .act-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .card-activity .spin{width:12px;height:12px;border-radius:50%;border:2px solid rgba(122,162,247,.3);
+    border-top-color:var(--accent);animation:spin 1s linear infinite;flex:0 0 auto}
+  .card-tool{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .harness{display:inline-flex;align-items:center;gap:4px;background:rgba(122,162,247,.14);color:var(--accent);
+    border-radius:6px;padding:1px 6px;font-size:11px;font-weight:600;flex:0 0 auto}
+
+  /* empty / loading states */
+  .placeholder{padding:60px 24px;text-align:center;color:var(--muted);font-size:14px;line-height:1.6}
+  .placeholder .big{font-size:34px;margin-bottom:10px}
+
+  /* ---------- bottom tab bar ---------- */
+  .tabbar{position:relative;z-index:45;height:calc(60px + var(--safe-bottom));padding-bottom:var(--safe-bottom);
+    background:linear-gradient(0deg,var(--panel) 78%,rgba(22,22,30,0));border-top:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-around;flex:0 0 auto}
+  .tab{display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--muted);font-size:10px;font-weight:600;width:64px;
+    background:none;border:none;height:100%}
+  .tab .gi{font-size:20px}
+  .tab.active{color:var(--accent)}
+
+  /* ===== session detail action sheet (slides up over dimmed deck) ===== */
+  .scrim{position:fixed;inset:0;background:rgba(5,6,12,.55);z-index:70;animation:fade .18s ease}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:75;background:var(--panel);
+    border-top-left-radius:22px;border-top-right-radius:22px;border-top:1px solid var(--border);
+    box-shadow:0 -16px 50px rgba(0,0,0,.55);display:flex;flex-direction:column;max-height:92%;
+    padding-bottom:var(--safe-bottom);animation:slideup .26s cubic-bezier(.2,.8,.2,1)}
+  @keyframes slideup{from{transform:translateY(100%)}to{transform:translateY(0)}}
+  .grabber{width:38px;height:5px;border-radius:3px;background:#3a3f59;margin:9px auto 4px;flex:0 0 auto}
+  .sheet-head{padding:4px 18px 12px;border-bottom:1px solid var(--border);flex:0 0 auto}
+  .sheet-title-row{display:flex;align-items:center;gap:10px}
+  .sheet-title{font-size:18px;font-weight:800;color:#fff;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sheet-sub{margin-top:2px;font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center}
+  .sheet-term{width:36px;height:36px;flex:0 0 auto;border-radius:10px;background:var(--card);
+    border:1px solid var(--border);display:grid;place-items:center;color:var(--purple);font-size:15px;text-decoration:none}
+
+  /* prominent LIVE "what it's doing now" area at the top of the sheet */
+  .live-activity{flex:0 0 auto;padding:11px 16px;border-bottom:1px solid var(--border)}
+  .live-activity .la-row{display:flex;align-items:center;gap:9px;min-width:0}
+  .live-activity .la-text{font-size:14px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live-activity.working{background:rgba(122,162,247,.08)}
+  .live-activity.working .la-text{color:var(--accent);font-weight:700}
+  .live-activity.working .spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(122,162,247,.3);
+    border-top-color:var(--accent);animation:spin 1s linear infinite;flex:0 0 auto}
+  .live-activity .la-tool{margin-top:5px;padding-left:23px;font-size:12px;color:var(--muted);
+    font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live-activity.idle .la-text{color:var(--muted)}
+  .live-activity.idle .la-dot{width:8px;height:8px;border-radius:50%;background:var(--muted-2);flex:0 0 auto}
+
+  .convo{flex:1;overflow-y:auto;padding:14px 16px 8px;display:flex;flex-direction:column;gap:6px;-webkit-overflow-scrolling:touch}
+  .convo::-webkit-scrollbar{display:none}
+
+  /* iMessage-style async bubbles */
+  .bubble{max-width:86%;padding:10px 13px;border-radius:16px;font-size:14px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere}
+  .bubble.me{align-self:flex-end;background:var(--accent);color:#0b0f1a;border-bottom-right-radius:5px;font-weight:500}
+  .bubble.reply{align-self:flex-start;background:var(--card);color:var(--text);border:1px solid var(--border);border-bottom-left-radius:5px}
+  .bubble.reply code{background:rgba(122,162,247,.16);color:var(--accent);padding:1px 5px;border-radius:5px;font-size:12.5px;font-family:var(--mono)}
+  .bubble.reply pre{background:#0c0d14;border:1px solid var(--border);border-radius:8px;padding:10px;margin:7px 0 2px;overflow-x:auto;font-size:11.5px;font-family:var(--mono);color:var(--green);line-height:1.5}
+  .bubble.reply pre code{background:none;color:inherit;padding:0}
+  .bubble.reply .md-h{font-weight:700;color:#fff;display:block;margin-bottom:2px}
+  .bubble.reply ul{margin:6px 0 0;padding-left:18px}
+  .bubble.reply li{margin:2px 0}
+  .bubble.err{align-self:flex-start;background:rgba(247,118,142,.10);border:1px solid rgba(247,118,142,.4);color:var(--red);border-bottom-left-radius:5px}
+  .ts{font-size:10.5px;color:var(--muted);margin:1px 4px 6px}
+  .ts.me{align-self:flex-end}
+  .bubble.queued{opacity:.7}
+
+  /* async "working…" pending row */
+  .pending{align-self:flex-start;display:inline-flex;align-items:center;gap:10px;background:var(--card);
+    border:1px solid var(--border);border-radius:16px;border-bottom-left-radius:5px;padding:11px 14px;color:var(--muted);font-size:13px}
+  .tdots{display:inline-flex;gap:4px}
+  .tdots i{width:7px;height:7px;border-radius:50%;display:block;animation:tjump 1.2s infinite}
+  .tdots i:nth-child(1){background:#f7768e}
+  .tdots i:nth-child(2){background:#e0af68;animation-delay:.18s}
+  .tdots i:nth-child(3){background:#73daca;animation-delay:.36s}
+  @keyframes tjump{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-5px);opacity:1}}
+  .pending .ctx{color:var(--muted-2)}
+
+  /* persistent "turn in progress" banner */
+  .working-banner{display:flex;align-items:center;gap:9px;padding:9px 16px;flex:0 0 auto;
+    background:rgba(122,162,247,.10);border-top:1px solid rgba(122,162,247,.28);font-size:12px;color:#bcd6ff}
+  .working-banner .spin{width:13px;height:13px;border-radius:50%;border:2px solid rgba(188,214,255,.3);
+    border-top-color:#bcd6ff;animation:spin 1s linear infinite;flex:0 0 auto}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* slash command chips */
+  .slash-rail{display:flex;gap:8px;overflow-x:auto;padding:8px 16px 4px;border-top:1px solid var(--border);flex:0 0 auto}
+  .slash-rail::-webkit-scrollbar{display:none}
+  .slash{flex:0 0 auto;background:var(--card);border:1px solid var(--border);color:var(--accent);
+    border-radius:999px;padding:7px 13px;font-size:13px;font-weight:600;font-family:var(--mono);min-height:36px}
+  .slash:active{background:var(--card-hi)}
+  .slash.muted{color:var(--muted);font-family:inherit}
+
+  /* composer pinned above the keyboard */
+  .composer{padding:8px 12px calc(12px + var(--safe-bottom));border-top:1px solid var(--border);display:flex;align-items:flex-end;gap:9px;background:var(--panel);flex:0 0 auto}
+  .composer textarea{flex:1;resize:none;min-height:var(--tap);max-height:110px;background:var(--card);
+    border:1px solid var(--border);border-radius:18px;color:var(--text);font-size:16px;padding:11px 14px;line-height:1.4;font-family:inherit}
+  .composer textarea::placeholder{color:var(--muted)}
+  .send-btn{flex:0 0 auto;width:var(--tap);height:var(--tap);border-radius:50%;background:var(--accent);
+    color:#0b0f1a;border:none;display:grid;place-items:center;font-size:20px;font-weight:800}
+  .send-btn:disabled{background:#2c3350;color:#565f89}
+
+  /* ===== GUARDED APPROVE ===== */
+  .approve-card{margin:14px 16px;background:var(--card);border:1px solid rgba(224,175,104,.5);
+    border-radius:var(--radius);overflow:hidden}
+  .approve-head{display:flex;align-items:center;gap:9px;padding:12px 14px;background:rgba(224,175,104,.10);
+    color:var(--yellow);font-weight:700;font-size:14px;border-bottom:1px solid var(--border)}
+  .approve-head .dot{width:8px;height:8px;border-radius:50%;background:var(--yellow);box-shadow:var(--glow-wait);flex:0 0 auto}
+  .approve-body{padding:14px}
+  .approve-q{font-size:13.5px;color:var(--text);line-height:1.5;margin-bottom:12px}
+  .approve-what{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:11px 12px}
+  .approve-what .label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:700}
+  /* the ACTUAL permission request text, verbatim (monospace, line breaks kept) */
+  .approve-what .perm-text{margin:6px 0 0;font-family:var(--mono);font-size:12.5px;color:var(--text);
+    background:#0c0d14;border:1px solid var(--border);border-radius:7px;padding:10px 11px;
+    white-space:pre-wrap;word-break:break-word;overflow-x:auto;line-height:1.5;max-height:280px}
+  /* subtle "no pending approval / unavailable" note */
+  .approve-note{align-self:flex-start;color:var(--muted);font-size:12px;padding:8px 2px}
+  /* header check-for-approval button busy state */
+  .sheet-check{width:36px;height:36px;border-radius:10px;flex:0 0 auto}
+  .icon-btn.busy{opacity:.5}
+
+  /* hold-to-approve with a fill ring */
+  .hold-approve{margin-top:14px;position:relative;height:56px;border-radius:28px;overflow:hidden;
+    background:rgba(115,218,202,.10);border:1px solid rgba(115,218,202,.4);user-select:none;touch-action:none}
+  .hold-fill{position:absolute;left:0;top:0;bottom:0;width:0%;background:rgba(115,218,202,.28);transition:width .05s linear}
+  .hold-label{position:absolute;inset:0;display:grid;place-items:center;color:var(--green);
+    font-weight:700;font-size:14px;letter-spacing:.02em;pointer-events:none}
+  .hold-approve.armed .hold-label{color:#0b0f1a}
+  .hold-approve.done{background:var(--green);border-color:var(--green)}
+  .hold-approve.done .hold-label{color:#0b0f1a}
+  .hold-approve.busy{opacity:.7}
+
+  .approve-foot{font-size:11px;color:var(--muted);margin-top:10px;text-align:center}
+
+  /* approved confirmation strip */
+  .approved-strip{align-self:stretch;background:rgba(115,218,202,.08);border:1px solid rgba(115,218,202,.35);
+    border-radius:14px;padding:10px 13px;font-size:12px;color:var(--green);display:flex;align-items:center;gap:8px}
+  .approved-strip.bad{background:rgba(247,118,142,.08);border-color:rgba(247,118,142,.35);color:var(--red)}
+  .approved-strip b{color:#fff}
+
+  /* ===== PUSH OPT-IN / settings ===== */
+  .settings{padding:8px 16px calc(40px + var(--safe-bottom))}
+  .hero-push{margin:8px 0 18px;text-align:center;padding:26px 18px 22px;
+    background:radial-gradient(120% 90% at 50% 0%,rgba(122,162,247,.18),rgba(122,162,247,0) 70%);
+    border:1px solid var(--border);border-radius:18px}
+  .hero-bell{width:64px;height:64px;margin:0 auto 12px;border-radius:18px;
+    background:linear-gradient(160deg,var(--accent),var(--purple));color:#0b0f1a;display:grid;place-items:center;font-size:30px;
+    box-shadow:0 10px 24px rgba(122,162,247,.35)}
+  .hero-push h2{margin:0 0 6px;font-size:19px;color:#fff}
+  .hero-push p{margin:0;font-size:13px;color:var(--muted);line-height:1.5}
+  .btn-enable{margin-top:16px;width:100%;min-height:50px;border-radius:14px;background:var(--accent);
+    color:#0b0f1a;border:none;font-size:16px;font-weight:800}
+  .btn-enable:disabled{background:#2c3350;color:#565f89}
+
+  .why{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:4px 4px;margin-top:6px}
+  .why .item{display:flex;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border)}
+  .why .item:last-child{border-bottom:none}
+  .why .ic{font-size:18px;width:26px;text-align:center;flex:0 0 auto}
+  .why .t{font-size:13px;color:#fff;font-weight:600}
+  .why .d{font-size:11.5px;color:var(--muted);margin-top:1px}
+
+  .set-section{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin:18px 6px 8px}
+  .reqs{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:4px 14px}
+  .req{display:flex;align-items:center;gap:11px;padding:11px 0;border-bottom:1px solid var(--border);font-size:13.5px}
+  .req:last-child{border-bottom:none}
+  .req .rmark{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:13px;font-weight:800;flex:0 0 auto}
+  .req.done .rmark{background:var(--green);color:#0b0f1a}
+  .req.todo .rmark{background:transparent;border:2px solid var(--muted);color:var(--muted)}
+  .req.done .rtext{color:var(--text)}
+  .req.todo .rtext{color:var(--muted)}
+  .req .rhint{font-size:11px;color:var(--muted);margin-top:1px}
+
+  .sub-state{display:flex;align-items:center;gap:10px;padding:13px 14px;margin-top:16px;
+    background:rgba(224,175,104,.10);border:1px solid rgba(224,175,104,.35);border-radius:14px;font-size:13.5px;color:var(--text)}
+  .sub-state .led{width:9px;height:9px;border-radius:50%;background:var(--yellow);flex:0 0 auto}
+  .sub-state b{color:var(--yellow)}
+  .sub-state.ok{background:rgba(115,218,202,.10);border-color:rgba(115,218,202,.35)}
+  .sub-state.ok .led{background:var(--green)}
+  .sub-state.ok b{color:var(--green)}
+  .sub-state.off{background:rgba(247,118,142,.10);border-color:rgba(247,118,142,.35)}
+  .sub-state.off .led{background:var(--red)}
+  .sub-state.off b{color:var(--red)}
+
+  .set-list{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}
+  .set-row{display:flex;align-items:center;gap:12px;padding:14px;border-bottom:1px solid var(--border);min-height:var(--tap);font-size:14px}
+  .set-row:last-child{border-bottom:none}
+  .set-row .gi{color:var(--accent);font-size:18px;width:22px;text-align:center;flex:0 0 auto}
+  .set-row .lbl{flex:1}
+  .set-row .val{color:var(--muted);font-size:13px}
+  .toggle{width:46px;height:28px;border-radius:14px;background:var(--bg);border:1px solid var(--border);position:relative;flex:0 0 auto}
+  .toggle.on{background:var(--accent);border-color:var(--accent)}
+  .toggle .knob{position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:#fff;transition:left .15s}
+  .toggle.on .knob{left:20px}
+
+  .escape{display:flex;align-items:center;gap:12px;margin-top:18px;padding:14px;background:var(--card);
+    border:1px dashed var(--border);border-radius:14px;color:var(--fg);font-size:13.5px;text-decoration:none}
+  .escape .gi{color:var(--purple);font-size:20px;flex:0 0 auto}
+  .escape .arr{margin-left:auto;color:var(--muted)}
+
+  /* ===== token entry screen ===== */
+  .token-screen{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;padding:24px;gap:14px}
+  .token-screen .hero-bell{margin-bottom:4px}
+  .token-screen h2{margin:0;font-size:20px;color:#fff;text-align:center}
+  .token-screen p{margin:0;font-size:13px;color:var(--muted);text-align:center;line-height:1.5;max-width:320px}
+  .token-screen input{width:100%;max-width:340px;background:var(--card);border:1px solid var(--border);border-radius:12px;
+    color:var(--text);font-size:16px;padding:13px 14px;font-family:var(--mono)}
+  .token-screen .btn-enable{max-width:340px}
+  .token-screen .err{color:var(--red);font-size:12.5px;min-height:16px}
+
+  /* in-app toast (foreground notify / errors) */
+  .toast{position:fixed;left:12px;right:12px;top:calc(8px + var(--safe-top));z-index:300;background:rgba(36,40,59,.96);
+    backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:16px;padding:12px 14px;
+    box-shadow:0 12px 30px rgba(0,0,0,.5);animation:drop .4s ease}
+  @keyframes drop{from{transform:translateY(-90px);opacity:0}to{transform:translateY(0);opacity:1}}
+  .toast .pt-head{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);margin-bottom:4px}
+  .toast .pt-ico{width:18px;height:18px;border-radius:5px;background:var(--accent);color:#0b0f1a;display:grid;place-items:center;font-size:11px;font-weight:800;flex:0 0 auto}
+  .toast .pt-title{font-size:14px;font-weight:700;color:#fff}
+  .toast .pt-body{font-size:13px;color:var(--text);margin-top:2px}
+
+  .gi{font-style:normal;line-height:1}
+</style>
+</head>
+<body>
+
+<!-- Token entry (shown only when no token is present). -->
+<div class="token-screen" id="tokenScreen" hidden>
+  <div class="hero-bell"><span class="gi">🔑</span></div>
+  <h2>Connect deck-remote</h2>
+  <p>Paste the bearer token from your deck-remote server, or open this page with <code>?token=…</code>.</p>
+  <input id="tokenInput" type="password" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="bearer token">
+  <button class="btn-enable" id="tokenSave">Connect</button>
+  <div class="err" id="tokenErr"></div>
+</div>
+
+<!-- Main app shell. JS renders into these regions. -->
+<div id="app" hidden>
+  <!-- DECK tab -->
+  <div class="screen" id="screenDeck">
+    <div class="appbar">
+      <div class="appbar-row">
+        <div class="appbar-title">deck<span class="dot">.</span></div>
+        <button class="icon-btn" id="goSettings" title="settings"><span class="gi">⚙️</span></button>
+      </div>
+      <div class="conn" id="connStrip"><span class="led"></span><span id="connText">Connecting…</span></div>
+    </div>
+    <div class="deck" id="deck">
+      <div class="placeholder"><div class="big">⏳</div>Loading sessions…</div>
+    </div>
+  </div>
+
+  <!-- SETTINGS tab -->
+  <div class="screen" id="screenSettings" hidden>
+    <div class="appbar"><div class="appbar-row"><div class="appbar-title">Settings</div></div></div>
+    <div class="settings">
+      <div class="hero-push">
+        <div class="hero-bell"><span class="gi">🔔</span></div>
+        <h2>Get pinged when a session needs you</h2>
+        <p>Turns take minutes. Put the phone down — we'll push the moment a session needs approval, finishes, or errors.</p>
+        <button class="btn-enable" id="btnEnablePush">Enable notifications</button>
+      </div>
+
+      <div class="set-section">What we'll push</div>
+      <div class="why">
+        <div class="item"><span class="ic">🟡</span><div><div class="t">Approval requested</div><div class="d">A session is paused waiting on a permission — highest priority.</div></div></div>
+        <div class="item"><span class="ic">✅</span><div><div class="t">Turn finished</div><div class="d">Your reply is ready — opens straight into the thread.</div></div></div>
+        <div class="item"><span class="ic">🔴</span><div><div class="t">Session errored</div><div class="d">A turn failed or a run exited non-zero.</div></div></div>
+      </div>
+
+      <div class="set-section">Setup</div>
+      <div class="reqs" id="reqs">
+        <div class="req" id="reqInstall"><span class="rmark"></span><span class="rtext">Added to Home Screen<div class="rhint">iOS only allows push for installed PWAs (Share ▸ Add to Home Screen)</div></span></div>
+        <div class="req" id="reqSupport"><span class="rmark"></span><span class="rtext">Push supported on this device<div class="rhint">Needs a service worker + Push API</div></span></div>
+        <div class="req" id="reqPerm"><span class="rmark"></span><span class="rtext">Allow notifications<div class="rhint">Grant permission in the OS prompt</div></span></div>
+      </div>
+
+      <div class="sub-state" id="subState"><span class="led"></span><span id="subStateText">Checking push status…</span></div>
+
+      <div class="set-section">Notify me when…</div>
+      <div class="set-list">
+        <div class="set-row"><span class="gi">🔐</span><span class="lbl">Waiting on approval</span><div class="toggle on" data-pref="approve"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">✅</span><span class="lbl">Turn completed</span><div class="toggle on" data-pref="finished"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">⛔</span><span class="lbl">Session errored</span><div class="toggle on" data-pref="error"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">💤</span><span class="lbl">Went idle</span><div class="toggle" data-pref="idle"><div class="knob"></div></div></div>
+      </div>
+
+      <a class="escape" id="escapeTerm" href="#">
+        <span class="gi">⌨️</span>
+        <span>Open full web terminal<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">For the rare case structured controls aren't enough</div></span>
+        <span class="arr gi">↗</span>
+      </a>
+
+      <div class="set-section">Account</div>
+      <div class="set-list">
+        <div class="set-row" id="forgetToken"><span class="gi">🚪</span><span class="lbl" style="color:var(--red)">Forget token on this device</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- bottom tabs -->
+  <div class="tabbar">
+    <button class="tab active" data-tab="deck"><span class="gi">▦</span>Deck</button>
+    <button class="tab" data-tab="settings"><span class="gi">⚙️</span>Settings</button>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
