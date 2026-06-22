@@ -23,11 +23,16 @@ type activityInfo struct {
 	Stalled bool `json:"stalled,omitempty"`
 }
 
-// spinnerLineRe matches the live "thinking" line by its "· ↓ <count> tokens"
-// counter. The numeric count (digit or "~") is REQUIRED: without it, prose that
-// merely mentions "↓ tokens" — e.g. this parser's own documentation scrolled into
-// the pane — would be misread as live work (it was).
-var spinnerLineRe = regexp.MustCompile(`·\s*↓\s*[~\d][^)\n]*token`)
+// spinnerLineRe matches Claude's live "thinking" status line by its PARENTHESIZED
+// token counter, e.g. "Whisking… (5m 46s · ↓ 15.8k tokens · …)". Requiring the
+// "↓ <count> tokens" to sit INSIDE parentheses is what separates the live spinner
+// from other lines that also carry a "↓ N tokens" counter but freeze — and so
+// would read as a stalled spinner. The false positives this rules out (seen in the
+// wild): a completed subagent batch ("name  desc … 9/9 agents done · 13m 19s · ↓
+// 397.4k tokens", counter NOT in parens) and wrapped fragments ("22.4k tokens)").
+// The numeric count ([~\d]) is required so prose mentioning "↓ tokens" — including
+// this parser's own docs — isn't matched either.
+var spinnerLineRe = regexp.MustCompile(`\([^)]*↓\s*[~\d][^)]*token`)
 
 // toolCallRe pulls "Bash(…)" / "Task(…)" / "Edit(…)" out of a "⏺ Tool(…)" line.
 var toolCallRe = regexp.MustCompile(`([A-Z][A-Za-z]+\([^\n]*)`)

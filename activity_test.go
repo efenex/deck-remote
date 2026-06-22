@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestParseActivity guards the live-activity parser against the self-referential
 // false positive where pane SCROLLBACK that merely mentions the marker strings
@@ -53,6 +56,46 @@ func TestParseActivity(t *testing.T) {
 		pane := "the format is `· ↓ tokens` shown while working\n"
 		if parseActivity(pane).Working {
 			t.Errorf("Working=true on a numberless token mention; want idle")
+		}
+	})
+
+	// A completed subagent batch line carries a "↓ N tokens" counter but NOT in
+	// parentheses, and freezes once done ("N/N agents done") — the exact false
+	// stall observed in the wild. It must not read as a live spinner.
+	t.Run("completed subagent batch line is not a spinner", func(t *testing.T) {
+		pane := "numberblocks-foldables  Design printable fold-and-build paper-craft cube nets, then verify\n" +
+			"  9/9 agents done · 13m 19s · ↓ 397.4k tokens\n"
+		if a := parseActivity(pane); a.Working {
+			t.Errorf("Working=true on a completed subagent line; want idle. Activity=%q", a.Activity)
+		}
+	})
+
+	t.Run("subagent line with parens in the description is not a spinner", func(t *testing.T) {
+		// A "(read-only)" in the task desc must not satisfy the parenthesized-counter
+		// requirement — the counter itself is outside any parens.
+		pane := "burndown-iter85  Scout the 8 items (read-only), then gate\n" +
+			"  9/9 agents done · 16m 58s · ↓ 731.4k tokens\n"
+		if parseActivity(pane).Working {
+			t.Errorf("Working=true on a subagent line whose only parens are in the desc; want idle")
+		}
+	})
+
+	t.Run("wrapped token fragment is not a spinner", func(t *testing.T) {
+		if parseActivity("22.4k tokens)\n").Working {
+			t.Errorf("Working=true on a wrapped counter fragment; want idle")
+		}
+	})
+
+	t.Run("real spinner below a subagent summary is picked over it", func(t *testing.T) {
+		pane := "numberblocks-foldables  Design …\n" +
+			"  9/9 agents done · 13m 19s · ↓ 397.4k tokens\n" +
+			"✻ Whisking… (5m 46s · ↓ 15.8k tokens · almost done thinking)\n"
+		a := parseActivity(pane)
+		if !a.Working {
+			t.Fatalf("Working=false with a live spinner present; want working")
+		}
+		if !strings.HasPrefix(a.Activity, "Whisking…") {
+			t.Errorf("Activity=%q; want the live spinner line, not the subagent summary", a.Activity)
 		}
 	})
 }
