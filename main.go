@@ -29,12 +29,14 @@ import (
 )
 
 type config struct {
-	listen        string // address deck-remote binds (loopback; tailscale serve fronts it)
-	agentdeckURL  string // upstream agent-deck web base URL
-	token         string // shared bearer: phone -> deck-remote, and deck-remote -> agent-deck
-	profile       string // agent-deck profile
-	bin           string // path to the agent-deck binary
-	webDir        string // static PWA directory
+	listen       string // address deck-remote binds (loopback; tailscale serve fronts it)
+	agentdeckURL string // upstream agent-deck web base URL
+	token        string // shared bearer: phone -> deck-remote, and deck-remote -> agent-deck
+	profile      string // agent-deck profile (default for the CLI surface; per-call override-able)
+	proxyProfile string // profile the reverse-proxied agent-deck web is bound to (terminal/push)
+	bin          string // path to the agent-deck binary
+	webDir       string // static PWA directory
+	pushSubject  string // VAPID "sub" contact URI (mailto:/https:); Apple rejects non-routable subjects
 }
 
 func loadConfig() config {
@@ -49,9 +51,11 @@ func loadConfig() config {
 	flag.StringVar(&c.listen, "listen", def("DECK_REMOTE_LISTEN", "127.0.0.1:8765"), "address to bind (loopback; front with tailscale serve)")
 	flag.StringVar(&c.agentdeckURL, "agentdeck-url", def("DECK_REMOTE_AGENTDECK_URL", "http://127.0.0.1:8420"), "upstream agent-deck web base URL")
 	flag.StringVar(&c.token, "token", "", "shared bearer token (default: read DECK_REMOTE_TOKEN or ~/.agent-deck/web-token)")
-	flag.StringVar(&c.profile, "profile", def("AGENTDECK_PROFILE", "default"), "agent-deck profile")
+	flag.StringVar(&c.profile, "profile", def("AGENTDECK_PROFILE", "default"), "agent-deck profile (default for the CLI surface)")
+	flag.StringVar(&c.proxyProfile, "proxy-profile", def("DECK_REMOTE_PROXY_PROFILE", ""), "profile the reverse-proxied agent-deck web is bound to (default = --profile); the in-app terminal + push are scoped to it")
 	flag.StringVar(&c.bin, "bin", def("DECK_REMOTE_BIN", "agent-deck"), "path to the agent-deck binary")
 	flag.StringVar(&c.webDir, "web", def("DECK_REMOTE_WEB", filepath.Join(filepathDir(), "web")), "static PWA directory")
+	flag.StringVar(&c.pushSubject, "push-subject", def("DECK_REMOTE_PUSH_SUBJECT", defaultPushSubject), "VAPID 'sub' contact URI (mailto: or https:); Apple rejects non-routable subjects")
 	flag.Parse()
 
 	if c.token == "" {
@@ -61,6 +65,13 @@ func loadConfig() config {
 		if b, err := os.ReadFile(filepath.Join(home, ".agent-deck", "web-token")); err == nil {
 			c.token = strings.TrimSpace(string(b))
 		}
+	}
+	// The reverse-proxied agent-deck web (the /api/*, /events/*, /ws/* terminal
+	// targets) is a single instance bound to ONE profile (running a 2nd writer
+	// corrupts the registry). Assume it serves the daemon's default profile
+	// unless explicitly told otherwise.
+	if c.proxyProfile == "" {
+		c.proxyProfile = c.profile
 	}
 	return c
 }
@@ -88,7 +99,7 @@ func main() {
 
 	// deck-remote-native push + the event watcher that drives it.
 	home, _ := os.UserHomeDir()
-	pm, err := newPushManager(filepath.Join(home, ".agent-deck"))
+	pm, err := newPushManager(filepath.Join(home, ".agent-deck"), cfg.pushSubject)
 	if err != nil {
 		log.Fatalf("push init: %v", err)
 	}
@@ -96,7 +107,7 @@ func main() {
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
 	go srv.runWatcher(watchCtx)
-	log.Printf("push + watcher started (vapid pub %s…)", pm.vapidPub[:min(12, len(pm.vapidPub))])
+	log.Printf("push + watcher started (subject=%s vapid pub %s…)", pm.subject, pm.vapidPub[:min(12, len(pm.vapidPub))])
 
 	httpSrv := &http.Server{
 		Addr:              cfg.listen,
@@ -121,11 +132,13 @@ func main() {
 }
 
 type server struct {
-	cfg   config
-	proxy *httputil.ReverseProxy
-	hub   *sseHub
-	queue *sessionQueues
-	push  *pushManager
+	cfg    config
+	proxy  *httputil.ReverseProxy
+	hub    *sseHub
+	queue  *sessionQueues
+	push   *pushManager
+	acts   *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
+	tokens *tokenStore    // per-device tokens (additive to the shared bearer)
 }
 
 func newServer(cfg config, upstream *url.URL) *server {
@@ -141,11 +154,14 @@ func newServer(cfg config, upstream *url.URL) *server {
 			r.Header.Set("Authorization", "Bearer "+cfg.token)
 		}
 	}
+	home, _ := os.UserHomeDir()
 	return &server{
-		cfg:   cfg,
-		proxy: proxy,
-		hub:   newSSEHub(),
-		queue: newSessionQueues(),
+		cfg:    cfg,
+		proxy:  proxy,
+		hub:    newSSEHub(),
+		queue:  newSessionQueues(),
+		acts:   newActivityCache(),
+		tokens: newTokenStore(filepath.Join(home, ".agent-deck")),
 	}
 }
 
@@ -159,6 +175,7 @@ func (s *server) routes() http.Handler {
 	})
 
 	// deck-remote's own structured endpoints (the gap-closers). Bearer-gated.
+	mux.Handle("GET /api/rc/profiles", s.auth(http.HandlerFunc(s.handleProfiles)))
 	mux.Handle("GET /api/rc/sessions", s.auth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/rc/reply", s.auth(http.HandlerFunc(s.handleReply)))
 	mux.Handle("GET /api/rc/history", s.auth(http.HandlerFunc(s.handleHistory)))
@@ -175,10 +192,23 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/push/config", s.auth(http.HandlerFunc(s.handlePushConfig)))
 	mux.Handle("POST /api/rc/push/subscribe", s.auth(http.HandlerFunc(s.handlePushSubscribe)))
 	mux.Handle("POST /api/rc/push/presence", s.auth(http.HandlerFunc(s.handlePushPresence)))
+	mux.Handle("POST /api/rc/push/test", s.auth(http.HandlerFunc(s.handlePushTest)))
+	mux.Handle("POST /api/rc/push/prefs", s.auth(http.HandlerFunc(s.handlePushPrefs)))
+
+	// Per-device tokens (additive). "whoami" works with any valid token and
+	// reports whether the caller is the shared (admin) token or a device token.
+	// mint/list/revoke are admin-only (shared token) via authShared.
+	mux.Handle("GET /api/rc/devices/whoami", s.auth(http.HandlerFunc(s.handleWhoami)))
+	mux.Handle("GET /api/rc/devices", s.authShared(http.HandlerFunc(s.handleDevicesList)))
+	mux.Handle("POST /api/rc/devices/mint", s.authShared(http.HandlerFunc(s.handleDeviceMint)))
+	mux.Handle("POST /api/rc/devices/revoke", s.authShared(http.HandlerFunc(s.handleDeviceRevoke)))
 
 	// Everything else agent-deck already serves (session list API, Web Push,
 	// /events/menu SSE, /ws/session/* terminal) is reverse-proxied so the phone
 	// uses a single same-origin host — required for the service worker + push.
+	// NOTE: the proxy targets ONE agent-deck web bound to cfg.proxyProfile, so —
+	// unlike the per-call CLI surface above — these routes CANNOT follow the PWA
+	// profile selector. The PWA gates the terminal affordance accordingly.
 	mux.Handle("/api/", s.proxy)
 	mux.Handle("/events/", s.proxy)
 	mux.Handle("/ws/", s.proxy)
@@ -196,18 +226,40 @@ func (s *server) routes() http.Handler {
 	return logRequests(mux)
 }
 
-// auth enforces the shared bearer token on deck-remote's own endpoints.
+// bearer extracts the presented token from the Authorization header or the
+// ?token= query param (EventSource / WebSocket can't set headers).
+func bearer(r *http.Request) string {
+	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if tok == "" {
+		tok = r.URL.Query().Get("token")
+	}
+	return tok
+}
+
+// auth enforces a bearer token on deck-remote's own endpoints: the legacy
+// SHARED token OR any minted per-device token. Both compares are constant-time
+// (subtleConstantEq / tokenStore.verify) and tokens are NEVER logged.
 func (s *server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if tok == "" {
-			tok = r.URL.Query().Get("token") // EventSource can't set headers
-		}
-		if subtleConstantEq(tok, s.cfg.token) {
+		tok := bearer(r)
+		if subtleConstantEq(tok, s.cfg.token) || s.tokens.verify(tok) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	})
+}
+
+// authShared gates the device-token ADMIN endpoints (mint/list/revoke). Only the
+// shared token may administer device tokens — a device token cannot mint or
+// revoke peers, so a single leaked device secret can't escalate.
+func (s *server) authShared(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtleConstantEq(bearer(r), s.cfg.token) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, `{"error":"admin token required"}`, http.StatusForbidden)
 	})
 }
 

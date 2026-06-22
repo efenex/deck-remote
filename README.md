@@ -86,6 +86,7 @@ go build -o deck-remote .
 | `--listen` | `DECK_REMOTE_LISTEN` | `127.0.0.1:8781` |
 | `--token` | `DECK_REMOTE_TOKEN` | contents of `~/.agent-deck/web-token` |
 | `--profile` | `AGENTDECK_PROFILE` | `default` |
+| `--proxy-profile` | `DECK_REMOTE_PROXY_PROFILE` | `--profile` |
 | `--agentdeck-url` | `DECK_REMOTE_AGENTDECK_URL` | `http://127.0.0.1:8420` (optional web proxy) |
 | `--bin` | `DECK_REMOTE_BIN` | `agent-deck` |
 | `--web` | `DECK_REMOTE_WEB` | `web/` next to the binary |
@@ -98,6 +99,14 @@ registry (stale tmux names, sessions falsely shown as "error", session churn).
 Keep `[instances] allow_multiple = false` and run one agent-deck instance per
 profile. If you want the in-app terminal escape-hatch, run that single instance
 as `agent-deck web` and point `--agentdeck-url` at it.
+
+The PWA's header profile switcher scopes the **structured `/api/rc/*` surface**
+(sessions, reply, history, ask, slash, approve) across all agent-deck profiles
+via a per-call `-p` flag — safe because each call is an independent stock-CLI
+process. The in-app **terminal** and **Web Push** stay bound to the single
+proxied `agent-deck web` profile (`--proxy-profile`, default `--profile`); the
+terminal affordance is disabled in the PWA whenever a different profile is
+selected.
 
 ## Upstreaming
 deck-remote's `/api/rc/*` endpoints work around one gap in agent-deck: there's no

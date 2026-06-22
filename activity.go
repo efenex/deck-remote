@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"regexp"
 	"strings"
@@ -16,10 +17,17 @@ type activityInfo struct {
 	Working     bool   `json:"working"`
 	Activity    string `json:"activity,omitempty"`
 	CurrentTool string `json:"currentTool,omitempty"`
+	// Stalled is set by the watcher's stall detection (NOT by parseActivity): the
+	// agent still reports working=true, but the spinner label has been frozen
+	// across consecutive polls — a "frozen/stalled spinner", not live work.
+	Stalled bool `json:"stalled,omitempty"`
 }
 
-// spinnerLineRe matches the thinking line by its distinctive "· ↓ <n> tokens".
-var spinnerLineRe = regexp.MustCompile(`·\s*↓.*token`)
+// spinnerLineRe matches the live "thinking" line by its "· ↓ <count> tokens"
+// counter. The numeric count (digit or "~") is REQUIRED: without it, prose that
+// merely mentions "↓ tokens" — e.g. this parser's own documentation scrolled into
+// the pane — would be misread as live work (it was).
+var spinnerLineRe = regexp.MustCompile(`·\s*↓\s*[~\d][^)\n]*token`)
 
 // toolCallRe pulls "Bash(…)" / "Task(…)" / "Edit(…)" out of a "⏺ Tool(…)" line.
 var toolCallRe = regexp.MustCompile(`([A-Z][A-Za-z]+\([^\n]*)`)
@@ -27,31 +35,49 @@ var toolCallRe = regexp.MustCompile(`([A-Z][A-Za-z]+\([^\n]*)`)
 // leadingGlyphRe strips the spinner glyph + spaces at the start of a line.
 var leadingGlyphRe = regexp.MustCompile(`^[^\p{L}\p{N}]+`)
 
+// liveTailLines bounds how far up from the bottom of the pane we look for the
+// live status line / in-progress tool. Claude renders these at the very bottom
+// while working; identical markers higher up are scrollback (completed tool
+// calls, message text, docs) and must NOT be read as live activity.
+const liveTailLines = 12
+
 func parseActivity(pane string) activityInfo {
 	clean := stripANSI(pane)
-	low := strings.ToLower(clean)
-	var a activityInfo
-	if strings.Contains(low, "esc to interrupt") {
-		a.Working = true
-	}
 	lines := strings.Split(clean, "\n")
 
-	// Thinking line: scan from the bottom for the "· ↓ … tokens" spinner.
-	for i := len(lines) - 1; i >= 0; i-- {
-		t := strings.TrimSpace(lines[i])
-		if t == "" {
-			continue
+	// Live region: the last few non-empty lines, bottom-first.
+	tail := make([]string, 0, liveTailLines)
+	for i := len(lines) - 1; i >= 0 && len(tail) < liveTailLines; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			tail = append(tail, t)
 		}
+	}
+
+	var a activityInfo
+	// Primary signal: a real spinner line (with a token count) in the live region.
+	for _, t := range tail {
 		if spinnerLineRe.MatchString(t) {
 			a.Working = true
 			a.Activity = strings.TrimSpace(leadingGlyphRe.ReplaceAllString(t, ""))
 			break
 		}
 	}
+	// Fallback signal: "esc to interrupt" in the live region (not reliably present,
+	// so secondary). Restricted to the tail so scrollback can't trip it.
+	if !a.Working {
+		for _, t := range tail {
+			if strings.Contains(strings.ToLower(t), "esc to interrupt") {
+				a.Working = true
+				break
+			}
+		}
+	}
+	if !a.Working {
+		return a // idle: no live activity, and a "current tool" would be meaningless
+	}
 
-	// Current tool: the last "⏺ Tool(…)" line whose result is still "Running…".
-	for i := len(lines) - 1; i >= 0; i-- {
-		t := strings.TrimSpace(lines[i])
+	// Current tool: the closest-to-bottom "⏺ Tool(…)" in the live region.
+	for _, t := range tail {
 		idx := strings.Index(t, "⏺ ")
 		if idx < 0 {
 			continue
@@ -69,6 +95,30 @@ func parseActivity(pane string) activityInfo {
 	return a
 }
 
+// liveActivity returns the session's parsed live activity. It reads the watcher's
+// activity cache (the single pane-reader) and, on a cold miss (no tick yet for
+// this session), falls back to an on-demand capture+parse so endpoints never
+// return empty for a fresh session. The on-demand path also seeds the cache so
+// stall detection starts accumulating immediately.
+func (s *server) liveActivity(ctx context.Context, id string) activityInfo {
+	if st, ok := s.acts.get(id); ok {
+		return activityInfo{
+			Working:     st.Working,
+			Activity:    st.Activity,
+			CurrentTool: st.CurrentTool,
+			Stalled:     st.Stalled,
+		}
+	}
+	pane, err := s.sessionPane(ctx, id)
+	if err != nil {
+		return activityInfo{}
+	}
+	parsed := parseActivity(pane)
+	st := s.acts.update(id, parsed)
+	parsed.Stalled = st.Stalled
+	return parsed
+}
+
 // GET /api/rc/activity?id=<id> — live activity for one session (the detail view
 // polls this). Best-effort: empty/working=false if the pane can't be read.
 func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +127,7 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	ctx, cancel := cliCtx(r.Context(), 10*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 10*time.Second)
 	defer cancel()
 	se, err := s.findSession(ctx, id)
 	if err != nil {
@@ -88,10 +138,5 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, activityInfo{})
 		return
 	}
-	pane, err := s.sessionPane(ctx, se.ID)
-	if err != nil {
-		writeJSON(w, http.StatusOK, activityInfo{})
-		return
-	}
-	writeJSON(w, http.StatusOK, parseActivity(pane))
+	writeJSON(w, http.StatusOK, s.liveActivity(ctx, se.ID))
 }

@@ -21,7 +21,7 @@ func (s *server) handlePermission(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	ctx, cancel := cliCtx(r.Context(), 12*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 12*time.Second)
 	defer cancel()
 
 	se, err := s.findSession(ctx, id)

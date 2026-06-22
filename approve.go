@@ -10,6 +10,8 @@ import (
 
 type approveRequest struct {
 	SessionID string `json:"sessionId"`
+	// Profile optionally scopes the approve to a non-default agent-deck profile.
+	Profile string `json:"profile"`
 }
 
 // claudePermissionMarkers are strings that appear in a Claude permission dialog
@@ -47,12 +49,13 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.Profile = strings.TrimSpace(req.Profile)
 	if req.SessionID == "" {
 		httpError(w, http.StatusBadRequest, "sessionId required")
 		return
 	}
 
-	ctx, cancel := cliCtx(r.Context(), 20*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), req.Profile), 20*time.Second)
 	defer cancel()
 
 	se, err := s.findSession(ctx, req.SessionID)

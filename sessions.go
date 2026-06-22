@@ -34,7 +34,7 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 // some setups (stale registry / churn), so we surface the real last reply
 // (transcript-based, name-independent) rather than a status chip.
 func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := cliCtx(r.Context(), 15*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 15*time.Second)
 	defer cancel()
 	sessions, err := s.listSessions(ctx)
 	if err != nil {
@@ -58,17 +58,16 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			rctx, rc := context.WithTimeout(ctx, 5*time.Second)
 			defer rc()
 			if out, err := s.sessionReply(rctx, sessions[i].ID); err == nil {
-				sessions[i].LastReply = preview(out.Content, 160)
+				sessions[i].LastReply = preview(cleanReplyContent(out.Content), 160)
 				if t, perr := time.Parse(time.RFC3339, out.Timestamp); perr == nil {
 					sessions[i].LastActivity = t.Unix()
 				}
 			}
-			if pane, err := s.sessionPane(rctx, sessions[i].ID); err == nil {
-				act := parseActivity(pane)
-				sessions[i].Working = act.Working
-				sessions[i].Activity = act.Activity
-				sessions[i].CurrentTool = act.CurrentTool
-			}
+			act := s.liveActivity(rctx, sessions[i].ID)
+			sessions[i].Working = act.Working
+			sessions[i].Activity = act.Activity
+			sessions[i].CurrentTool = act.CurrentTool
+			sessions[i].Stalled = act.Stalled
 		}(i)
 	}
 	wg.Wait()
@@ -83,13 +82,16 @@ func (s *server) handleReply(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	ctx, cancel := cliCtx(r.Context(), 10*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 10*time.Second)
 	defer cancel()
 	out, err := s.sessionReply(ctx, id)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	// Sanitize raw/structured content (e.g. a serialized tool_use block) so the
+	// client never renders a reply turn as a literal JSON object/array.
+	out.Content = cleanReplyContent(out.Content)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -100,7 +102,7 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	ctx, cancel := cliCtx(r.Context(), 10*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 10*time.Second)
 	defer cancel()
 	se, err := s.findSession(ctx, id)
 	if err != nil {

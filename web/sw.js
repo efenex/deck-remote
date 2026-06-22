@@ -77,7 +77,8 @@ self.addEventListener('fetch', (event) => {
  *
  * Expected payload (best-effort; tolerant of partial/plain-text bodies):
  *   { title, body, sessionId, tag, kind }
- * kind ∈ approve | finished | error | idle (used only to pick an icon hint).
+ * kind ∈ reply | approval | test (server vocabulary; requireInteraction keys off
+ * "approval"). Field names match what pushManager.send() emits in push.go.
  */
 self.addEventListener('push', (event) => {
   let data = {};

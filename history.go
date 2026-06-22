@@ -158,14 +158,22 @@ func parseTranscript(path string) ([]histMsg, error) {
 }
 
 // assistantText joins the text blocks of an assistant content array (skips
-// thinking / tool_use).
+// thinking / tool_use). Accepts either a JSON array of blocks or a single block
+// object, so the same logic serves both the transcript parser and the
+// reply-content sanitizer.
 func assistantText(raw json.RawMessage) string {
-	var blocks []struct {
+	type block struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
+	var blocks []block
 	if json.Unmarshal(raw, &blocks) != nil {
-		return ""
+		// Not an array — try a single block object.
+		var one block
+		if json.Unmarshal(raw, &one) != nil {
+			return ""
+		}
+		blocks = []block{one}
 	}
 	var b strings.Builder
 	for _, blk := range blocks {
@@ -177,6 +185,61 @@ func assistantText(raw json.RawMessage) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// cleanReplyContent sanitizes a reply-content string before it is hashed,
+// pushed, or sent to clients. `agent-deck session output --json` can return raw
+// structured content (a serialized tool_use block or a literal JSON array of
+// content blocks) that would otherwise render verbatim as JSON in the thread.
+//
+// If the trimmed string is an Anthropic content-block payload (a typed-block
+// array, or a single typed block object), we extract the assistant text blocks
+// (same logic as the transcript parser) and return the joined text, or "" when
+// there is no text (e.g. a tool_use-only turn). Anything else — plain text,
+// malformed JSON, AND valid JSON the model itself produced (`[1,2,3]`,
+// `{"foo":"bar"}`) — is returned unchanged, so a legitimate JSON answer is
+// never silently blanked.
+func cleanReplyContent(s string) string {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return s
+	}
+	if t[0] != '{' && t[0] != '[' {
+		return s
+	}
+	if !json.Valid([]byte(t)) {
+		return s // malformed JSON: leave as-is rather than discard content
+	}
+	if !looksLikeContentBlocks(t) {
+		return s // valid JSON, but a genuine model answer — keep verbatim
+	}
+	return assistantText(json.RawMessage(t))
+}
+
+// looksLikeContentBlocks reports whether the JSON is an Anthropic content-block
+// payload: an array of typed blocks, or a single typed block object. Only these
+// are safe to reduce to text (and to blank when text-less); a bare JSON document
+// the model actually produced is NOT block-shaped and must be left untouched.
+func looksLikeContentBlocks(t string) bool {
+	raw := json.RawMessage(t)
+	if t[0] == '[' {
+		var arr []map[string]json.RawMessage
+		if json.Unmarshal(raw, &arr) != nil || len(arr) == 0 {
+			return false
+		}
+		for _, el := range arr {
+			if _, ok := el["type"]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	_, ok := obj["type"]
+	return ok
 }
 
 // humanText returns the human message text for a user entry, or "" if the entry
@@ -212,7 +275,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 25, 1, 200)
 	offset := queryInt(r, "offset", 0, 0, 100000)
 
-	ctx, cancel := cliCtx(r.Context(), 12*time.Second)
+	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 12*time.Second)
 	defer cancel()
 	se, err := s.findSession(ctx, id)
 	if err != nil {

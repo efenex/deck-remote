@@ -1,0 +1,25 @@
+# systemd (user) unit for deck-remote (Linux). Mirrors deploy/deckremote.plist.
+# Copy to ~/.config/systemd/user/deck-remote.service and edit the marked paths,
+# then: systemctl --user daemon-reload && systemctl --user enable --now deck-remote
+# (scripts/cutover-linux.sh does the enable + tailscale serve for you).
+[Unit]
+Description=deck-remote server
+# Match launchd's KeepAlive/ThrottleInterval (restart on crash, not on clean exit).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Edit these two paths to the built binary and its web/ assets.
+ExecStart=/ABSOLUTE/PATH/TO/deck-remote \
+  --listen 127.0.0.1:8781 \
+  --web /ABSOLUTE/PATH/TO/deck-remote/web \
+  --agentdeck-url http://127.0.0.1:8420
+# systemd's default PATH lacks the dir holding tmux; agent-deck needs `tmux`.
+# (/opt/homebrew/bin covers mac; /usr/bin et al. cover linux.)
+Environment=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

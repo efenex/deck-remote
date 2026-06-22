@@ -100,6 +100,11 @@
   .card-activity .spin{width:12px;height:12px;border-radius:50%;border:2px solid rgba(122,162,247,.3);
     border-top-color:var(--accent);animation:spin 1s linear infinite;flex:0 0 auto}
   .card-tool{font-size:12px;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  /* stalled: frozen spinner — amber, no animation, "stalled" tag */
+  .card-activity.stalled{color:var(--yellow)}
+  .stall-dot{flex:0 0 auto;font-size:12px;line-height:1;color:var(--yellow)}
+  .stall-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;
+    color:var(--yellow);background:rgba(224,175,104,.16);border-radius:5px;padding:1px 5px;margin-left:2px}
   .harness{display:inline-flex;align-items:center;gap:4px;background:rgba(122,162,247,.14);color:var(--accent);
     border-radius:6px;padding:1px 6px;font-size:11px;font-weight:600;flex:0 0 auto}
 
@@ -141,6 +146,7 @@
   .sheet-sub{margin-top:2px;font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center}
   .sheet-term{width:36px;height:36px;flex:0 0 auto;border-radius:10px;background:var(--card);
     border:1px solid var(--border);display:grid;place-items:center;color:var(--purple);font-size:15px;text-decoration:none}
+  .sheet-term.disabled{opacity:.35;cursor:not-allowed;pointer-events:none;color:var(--muted)}
 
   /* LIVE "what it's doing now" — sits directly ABOVE the composer (Claude Code
      style). When idle it collapses to zero height so it takes no space. */
@@ -153,6 +159,9 @@
     border-top-color:var(--accent);animation:spin 1s linear infinite;flex:0 0 auto}
   .live-activity .la-tool{margin-top:5px;padding-left:23px;font-size:12px;color:var(--muted);
     font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live-activity.working.stalled{background:rgba(224,175,104,.1)}
+  .live-activity.working.stalled .la-text{color:var(--yellow)}
+  .live-activity .stall-dot{font-size:14px;line-height:1;color:var(--yellow);flex:0 0 auto}
   /* idle: collapse out of the layout entirely so there's no dead band. */
   .live-activity.idle{display:none}
 
@@ -202,6 +211,16 @@
   .tdots i:nth-child(3){background:#73daca;animation-delay:.36s}
   @keyframes tjump{0%,60%,100%{transform:translateY(0);opacity:.5}30%{transform:translateY(-5px);opacity:1}}
   .pending .ctx{color:var(--muted-2)}
+
+  /* collapsible captured output for a printing slash (/context, /cost, …) */
+  details.slash-out{align-self:stretch;width:100%;border-left:2px solid var(--accent);
+    padding-left:10px;margin-left:1px}
+  details.slash-out>summary{cursor:pointer;color:var(--muted);font-size:13px;padding:6px 0;list-style:none}
+  details.slash-out>summary::-webkit-details-marker{display:none}
+  details.slash-out>summary::before{content:'▸ ';color:var(--muted-2)}
+  details.slash-out[open]>summary::before{content:'▾ '}
+  .slash-out-text{margin:2px 0 6px;font-family:var(--mono);font-size:12px;color:var(--text);
+    white-space:pre-wrap;word-break:break-word;overflow-x:auto}
 
   /* persistent "turn in progress" banner */
   .working-banner{display:flex;align-items:center;gap:9px;padding:9px 16px;flex:0 0 auto;
@@ -255,6 +274,7 @@
   .sheet-back{width:38px;height:38px;border-radius:10px;flex:0 0 auto;margin-right:8px;font-size:26px;line-height:1}
   .icon-btn.busy{opacity:.5}
   .appbar-actions{display:flex;align-items:center;gap:8px}
+  .profile-sel{background:var(--card,#1a1a1e);color:#fff;border:1px solid var(--border,#333);border-radius:8px;padding:5px 8px;font-size:13px;max-width:140px}
   .icon-btn.busy .gi{display:inline-block;animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
 
@@ -380,6 +400,7 @@
       <div class="appbar-row">
         <div class="appbar-title">deck<span class="dot">.</span></div>
         <div class="appbar-actions">
+          <select class="profile-sel" id="profileSel" title="agent-deck profile" hidden></select>
           <button class="icon-btn" id="goRefresh" title="refresh"><span class="gi">↻</span></button>
           <button class="icon-btn" id="goSettings" title="settings"><span class="gi">⚙️</span></button>
         </div>
@@ -399,7 +420,9 @@
         <div class="hero-bell"><span class="gi">🔔</span></div>
         <h2>Get pinged when a session needs you</h2>
         <p>Turns take minutes. Put the phone down — we'll push the moment a session needs approval, finishes, or errors.</p>
+        <div class="push-warn" id="pushWarn" hidden style="margin:8px 0;padding:10px 12px;border-radius:8px;background:rgba(247,118,142,.12);color:var(--red);font-size:13px;line-height:1.4"></div>
         <button class="btn-enable" id="btnEnablePush">Enable notifications</button>
+        <button class="btn-enable" id="btnTestPush" style="margin-top:8px">Send test push</button>
       </div>
 
       <div class="set-section">What we'll push</div>
@@ -421,9 +444,12 @@
       <div class="set-section">Notify me when…</div>
       <div class="set-list">
         <div class="set-row"><span class="gi">🔐</span><span class="lbl">Waiting on approval</span><div class="toggle on" data-pref="approve"><div class="knob"></div></div></div>
-        <div class="set-row"><span class="gi">✅</span><span class="lbl">Turn completed</span><div class="toggle on" data-pref="finished"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">🧊</span><span class="lbl">Stalled / hung turn</span><div class="toggle on" data-pref="stall"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">✅</span><span class="lbl">Turn completed</span><div class="toggle" data-pref="finished"><div class="knob"></div></div></div>
         <div class="set-row"><span class="gi">⛔</span><span class="lbl">Session errored</span><div class="toggle on" data-pref="error"><div class="knob"></div></div></div>
         <div class="set-row"><span class="gi">💤</span><span class="lbl">Went idle</span><div class="toggle" data-pref="idle"><div class="knob"></div></div></div>
+        <div class="set-row"><span class="gi">🌙</span><span class="lbl">Quiet hours</span><div class="toggle" data-pref="quietOn"><div class="knob"></div></div></div>
+        <div class="set-row" id="quietRow" hidden><span class="gi">⏰</span><span class="lbl">From <input type="time" id="quietStart" value="22:00"> to <input type="time" id="quietEnd" value="07:00"></span></div>
       </div>
 
       <div class="set-section">Deck</div>
@@ -433,9 +459,21 @@
 
       <a class="escape" id="escapeTerm" href="#">
         <span class="gi">⌨️</span>
-        <span>Open full web terminal<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">For the rare case structured controls aren't enough</div></span>
+        <span>Open full web terminal<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">For the rare case structured controls aren't enough. Bound to the proxied agent-deck profile — unavailable when a different profile is selected.</div></span>
         <span class="arr gi">↗</span>
       </a>
+
+      <div class="set-section">Devices</div>
+      <div class="set-list">
+        <div class="set-row"><span class="gi">📱</span><span class="lbl">This device<div class="rhint" id="whoamiHint" style="font-size:11px;color:var(--muted);margin-top:2px">…</div></span></div>
+      </div>
+      <!-- Admin-only: mint / list / revoke per-device tokens (shown only when
+           the active token is the shared/admin token). -->
+      <div id="devicesAdmin" hidden>
+        <div class="set-list" id="deviceList"></div>
+        <div class="set-row" id="mintDevice"><span class="gi">➕</span><span class="lbl">Add a device…</span></div>
+        <div class="push-warn" id="mintResult" hidden style="margin:8px 6px;padding:10px 12px;border-radius:8px;background:rgba(122,162,247,.12);font-size:13px;line-height:1.4;word-break:break-all"></div>
+      </div>
 
       <div class="set-section">Account</div>
       <div class="set-list">

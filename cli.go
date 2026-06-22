@@ -5,11 +5,48 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// profileKey scopes a per-request agent-deck profile override on the context.
+// The daemon starts with one default cfg.profile, but the CLI-first /api/rc/*
+// surface lets each request target a different profile via ?profile=<name> (GET)
+// or {profile} (POST). The override is read/write-correct because every adeck()
+// invocation is an independent stock-CLI process scoped by the global -p flag;
+// nothing in the daemon is bound to one profile for the CLI path.
+type profileKey struct{}
+
+// withProfile attaches a profile override to ctx (no-op for the empty string).
+func withProfile(ctx context.Context, p string) context.Context {
+	if p == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, profileKey{}, p)
+}
+
+// profileFrom returns the context's profile override, or def when unset/empty.
+func profileFrom(ctx context.Context, def string) string {
+	if v, ok := ctx.Value(profileKey{}).(string); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+// reqProfile extracts the ?profile= override from a request (trimmed).
+func reqProfile(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("profile"))
+}
+
+// adeckArgs assembles the agent-deck argv: the global -p <profile> flag (before
+// the subcommand) followed by args. Pure helper so the arg ordering is testable
+// without exec.
+func adeckArgs(profile string, args ...string) []string {
+	return append([]string{"-p", profile}, args...)
+}
 
 // ansiRe matches the ANSI escape sequences tmux capture-pane emits (CSI + OSC +
 // stray ESC), so detection/excerpts work on clean text.
@@ -25,7 +62,7 @@ func subtleConstantEq(a, b string) bool {
 // adeck runs the stock agent-deck CLI for the configured profile and returns
 // stdout. The profile is passed as the global -p flag (before the subcommand).
 func (s *server) adeck(ctx context.Context, args ...string) ([]byte, error) {
-	full := append([]string{"-p", s.cfg.profile}, args...)
+	full := adeckArgs(profileFrom(ctx, s.cfg.profile), args...)
 	cmd := exec.CommandContext(ctx, s.cfg.bin, full...)
 	out, err := cmd.Output()
 	if err != nil {
@@ -77,6 +114,27 @@ type sessionInfo struct {
 	Working     bool   `json:"working,omitempty"`     // agent is actively processing
 	Activity    string `json:"activity,omitempty"`    // the thinking line, e.g. "Channelling… (1m 12s · ↓ 2.1k tokens)"
 	CurrentTool string `json:"currentTool,omitempty"` // in-progress tool, e.g. "Bash(…)" / "Task(…)" (Task = subagent)
+	Stalled     bool   `json:"stalled,omitempty"`     // working, but the spinner has been frozen across polls (stall detection)
+}
+
+// profileEntry / profilesResp mirror `agent-deck profile list --json`. The
+// profile subcommand is global (profile-independent); the prepended -p flag is
+// benign and does not filter the returned set (verified against v1.9.68).
+type profileEntry struct {
+	Name      string `json:"name"`
+	IsDefault bool   `json:"is_default"`
+}
+
+type profilesResp struct {
+	Profiles       []profileEntry `json:"profiles"`
+	DefaultProfile string         `json:"default_profile"`
+}
+
+// listProfiles returns the available agent-deck profiles via the stock CLI.
+func (s *server) listProfiles(ctx context.Context) (profilesResp, error) {
+	var p profilesResp
+	err := s.adeckJSON(ctx, &p, "profile", "list", "--json")
+	return p, err
 }
 
 // replyOutput mirrors `agent-deck session output <id> --json`.
@@ -106,8 +164,8 @@ func (s *server) sessionReply(ctx context.Context, id string) (replyOutput, erro
 	return out, err
 }
 
-// sessionPane returns the raw tmux pane text (ANSI-stripped) for a session,
-// used to confirm a permission dialog is on screen before approving.
+// sessionPane returns the raw tmux pane text (callers strip ANSI as needed) for
+// a session, used to confirm a permission dialog is on screen before approving.
 func (s *server) sessionPane(ctx context.Context, id string) (string, error) {
 	out, err := s.adeck(ctx, "session", "output", id, "--pane")
 	return string(out), err

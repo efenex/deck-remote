@@ -33,6 +33,14 @@
   const TOKEN_KEY = 'deck_remote_token';
   const PREFS_KEY = 'deck_remote_prefs';
   const COLLAPSE_KEY = 'deck_remote_group_collapse'; // {groupName: bool} manual overrides
+  const PROFILE_KEY = 'deck_remote_profile'; // selected agent-deck profile (empty = daemon default)
+
+  // Multi-profile state. The CLI-first /api/rc/* surface is per-call profile-
+  // switchable; the proxied terminal + Web Push stay bound to PROXY_PROFILE
+  // (one agent-deck web instance). See /api/rc/profiles + main.go.
+  let CURRENT_PROFILE = localStorage.getItem(PROFILE_KEY) || '';
+  let PROXY_PROFILE = '';
+  let PROFILES = [];
 
   function readToken() {
     const url = new URL(location.href);
@@ -60,13 +68,22 @@
     return u.toString();
   }
 
+  // withProfileParam scopes a /api/rc/* GET path to the selected profile, except
+  // for profile-independent endpoints (profiles list, push, events stream).
+  function withProfileParam(path) {
+    if (!CURRENT_PROFILE) return path;
+    if (!path.startsWith('/api/rc/')) return path;
+    if (path.startsWith('/api/rc/profiles') || path.startsWith('/api/rc/push') || path.startsWith('/api/rc/events')) return path;
+    return path + (path.includes('?') ? '&' : '?') + 'profile=' + encodeURIComponent(CURRENT_PROFILE);
+  }
+
   async function api(method, path, body) {
     const opts = { method, headers: authHeaders() };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    const res = await fetch(path, opts);
+    const res = await fetch(withProfileParam(path), opts);
     if (res.status === 401) {
       forgetToken('Token rejected — re-enter it.');
       throw new Error('unauthorized');
@@ -115,9 +132,11 @@
   function loadPrefs() {
     let p = {};
     try { p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch (_) {}
-    // decision #4: idle OFF by default; approve/finished/error ON.
+    // Default to "only notify when a session needs you": approve (waiting on a
+    // permission prompt) + stall (a frozen/hung spinner) + error ON; finished
+    // (every completed turn) and idle OFF — turn-completion pings are opt-in.
     // sortGroupsByActivity ON by default (most-recent/working groups float up).
-    return Object.assign({ approve: true, finished: true, error: true, idle: false, sortGroupsByActivity: true }, p);
+    return Object.assign({ approve: true, finished: false, stall: true, error: true, idle: false, quietOn: false, quietStart: '22:00', quietEnd: '07:00', sortGroupsByActivity: true }, p);
   }
   function savePrefs(p) { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); }
   let prefs = loadPrefs();
@@ -198,7 +217,7 @@
     $('#screenDeck').hidden = tab !== 'deck';
     $('#screenSettings').hidden = tab !== 'settings';
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
-    if (tab === 'settings') refreshPushUI();
+    if (tab === 'settings') { refreshPushUI(); refreshDevicesUI(); }
   }
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
   $('#goSettings').addEventListener('click', () => showTab('settings'));
@@ -259,6 +278,34 @@
     const t = String(s || '').replace(/\s+/g, ' ').trim();
     const m = max || 64;
     return t.length > m ? t.slice(0, m - 1) + '…' : t;
+  }
+
+  // Defensive client guard: the server sanitizes reply content (cleanReplyContent),
+  // but if a raw/structured payload (a serialized tool_use block or a literal JSON
+  // array of content blocks) ever slips through, never render it verbatim. Only an
+  // Anthropic content-block payload (typed blocks) is reduced to its text (or ''
+  // when text-less); plain text, malformed JSON, and genuine JSON the model itself
+  // produced ([1,2,3], {"foo":"bar"}) are returned unchanged so a real answer is
+  // never blanked.
+  function looksLikeContentBlocks(v) {
+    if (Array.isArray(v)) {
+      return v.length > 0 && v.every((el) => el && typeof el === 'object' && !Array.isArray(el) && 'type' in el);
+    }
+    return !!v && typeof v === 'object' && 'type' in v;
+  }
+  function cleanReplyContent(s) {
+    const str = String(s || '');
+    const t = str.trim();
+    if (!t || (t[0] !== '{' && t[0] !== '[')) return str;
+    let v;
+    try { v = JSON.parse(t); } catch (e) { return str; } // malformed: leave as-is
+    if (!looksLikeContentBlocks(v)) return str; // genuine JSON answer — keep verbatim
+    const blocks = Array.isArray(v) ? v : [v];
+    const out = [];
+    for (const b of blocks) {
+      if (b && typeof b === 'object' && b.type === 'text' && b.text) out.push(b.text);
+    }
+    return out.join('\n').trim();
   }
 
   const STALE_S = 86400; // 24h — older groups default to collapsed.
@@ -401,9 +448,13 @@
     // Live activity takes over the hero detail while the agent is working;
     // otherwise we fall back to the dim one-line last-reply preview.
     if (s.working) {
-      const act = el('div', 'card-activity');
-      act.innerHTML = '<span class="spin"></span><span class="act-text">' +
-        esc(s.activity || 'Working…') + '</span>';
+      const act = el('div', 'card-activity' + (s.stalled ? ' stalled' : ''));
+      // Stalled: the spinner is frozen (no progress across polls). Keep showing
+      // it's "working" but mark it so a frozen agent doesn't read as live.
+      const spin = s.stalled ? '<span class="stall-dot">⚠</span>' : '<span class="spin"></span>';
+      const label = s.stalled ? (esc(s.activity || 'Working…') + ' <span class="stall-tag">stalled</span>')
+                              : esc(s.activity || 'Working…');
+      act.innerHTML = spin + '<span class="act-text">' + label + '</span>';
       card.appendChild(act);
       const toolText = toolLabel(s.currentTool);
       if (toolText) card.appendChild(el('div', 'card-tool', oneLine(toolText, 72)));
@@ -478,6 +529,14 @@
     // read from localStorage by terminal.html — we deliberately do NOT put it
     // in the URL (avoids leaking it into history / target=_blank referrers).
     const termURL = '/terminal.html?id=' + encodeURIComponent(s.id);
+    // The terminal is reverse-proxied to ONE agent-deck web bound to PROXY_PROFILE,
+    // so it can't follow the profile selector. Disable + annotate it honestly when
+    // the selected profile differs (rather than opening a terminal for a session
+    // the proxy can't see).
+    const termOff = CURRENT_PROFILE && PROXY_PROFILE && CURRENT_PROFILE !== PROXY_PROFILE;
+    const termLink = termOff
+      ? '<a class="sheet-term disabled" title="Terminal only available for the \'' + esc(PROXY_PROFILE) + '\' profile" aria-disabled="true">⧉</a>'
+      : '<a class="sheet-term" title="Open full web terminal" target="_blank" rel="noopener" href="' + termURL + '">⧉</a>';
     // grabber + header are wrapped in .sheet-handle: this whole region (which
     // sits ABOVE the scrolling convo and never scrolls) is the swipe-down
     // dismiss target, keeping it cleanly separate from the convo's scroll-up
@@ -493,7 +552,7 @@
             '<span>' + esc(groupKey(s)) + '</span></div>' +
         '</div>' +
         '<button class="icon-btn sheet-check" id="sheetCheckPerm" title="Check for approval"><span class="gi">🔐</span></button>' +
-        '<a class="sheet-term" title="Open full web terminal" target="_blank" rel="noopener" href="' + termURL + '">⧉</a>' +
+        termLink +
       '</div></div>' +
       '</div>'
     );
@@ -592,7 +651,7 @@
     wireSwipeDismiss(sheet);
 
     // Seed the live area from the list snapshot, then poll for fresh state.
-    renderLiveActivity(s.id, { working: s.working, activity: s.activity, currentTool: s.currentTool });
+    renderLiveActivity(s.id, { working: s.working, activity: s.activity, currentTool: s.currentTool, stalled: s.stalled });
     startActivityPoll(s.id);
 
     renderConvo(s.id);
@@ -767,11 +826,16 @@
     const live = $('#liveActivity');
     if (!live) return;
     if (a && a.working) {
-      live.className = 'live-activity working';
+      const stalled = !!(a && a.stalled);
+      live.className = 'live-activity working' + (stalled ? ' stalled' : '');
       const toolText = toolLabel(a.currentTool);
+      // Stalled: spinner frozen across polls. Still "working", but flagged so a
+      // hung agent doesn't masquerade as live.
+      const lead = stalled ? '<span class="stall-dot">⚠</span>' : '<span class="spin"></span>';
+      const tag = stalled ? ' <span class="stall-tag">stalled</span>' : '';
       live.innerHTML =
-        '<div class="la-row"><span class="spin"></span>' +
-          '<span class="la-text">' + esc(a.activity || 'Working…') + '</span></div>' +
+        '<div class="la-row">' + lead +
+          '<span class="la-text">' + esc(a.activity || 'Working…') + tag + '</span></div>' +
         (toolText ? '<div class="la-tool">' + esc(oneLine(toolText, 90)) + '</div>' : '');
     } else {
       live.className = 'live-activity idle';
@@ -795,24 +859,17 @@
           s.working = !!(a && a.working);
           s.activity = (a && a.activity) || '';
           s.currentTool = (a && a.currentTool) || '';
+          s.stalled = !!(a && a.stalled);
         }
-        // Live thread sync (catch-all for turns NOT originated by this PWA, e.g.
-        // prompts entered in the agent-deck TUI). The SSE reply fast-path stays
-        // as-is; dedup in reconcileTranscriptTail prevents double messages.
-        const now = !!(a && a.working);
-        const prev = state.lastWorking.get(id);
-        state.lastWorking.set(id, now);
-        // A turn just finished (working true→false). Pull the transcript tail and
-        // append anything new. Also reconcile on any observed change (covers a
-        // very fast turn that flipped back to idle between two 3s polls); the
-        // dedup makes the extra call a cheap no-op when nothing is new.
-        if (prev !== undefined && prev !== now && !now) {
-          reconcileTranscriptTail(id);
-        } else if (prev !== undefined && prev !== now && now) {
-          // idle→working: a new turn began; reconcile so any message that landed
-          // between polls (or just before this turn) is captured promptly.
-          reconcileTranscriptTail(id);
-        }
+        // Live thread sync (catch-all for turns NOT originated by this PWA — e.g.
+        // prompts entered in the agent-deck TUI, or back-to-back turns where the
+        // working flag never visibly toggles between two 3s polls). Reconcile on
+        // EVERY probe: reconcileTranscriptTail coalesces overlapping calls and
+        // dedups by content, so it's a cheap no-op when nothing new landed, and the
+        // thread stays within one poll (~3s) of the transcript. (A transition-only
+        // trigger missed turns that completed during a continuous "working" run.)
+        state.lastWorking.set(id, !!(a && a.working));
+        reconcileTranscriptTail(id);
       } catch (_) {
         // Graceful: on error just fall back to idle, don't spam.
         if (state.openSheetId === id) renderLiveActivity(id, { working: false });
@@ -834,12 +891,13 @@
   async function loadReply(id) {
     try {
       const r = await api('GET', '/api/rc/reply?id=' + encodeURIComponent(id));
-      if (r && r.content) {
+      const content = r ? cleanReplyContent(r.content) : '';
+      if (content) {
         const conv = ensureConvo(id);
         // Only seed if we don't already have this as the latest reply.
-        const hasReply = conv.some((e) => e.role === 'reply' && e.content === r.content);
+        const hasReply = conv.some((e) => e.role === 'reply' && e.content === content);
         if (!hasReply) {
-          conv.push({ role: 'reply', content: r.content, ts: r.timestamp });
+          conv.push({ role: 'reply', content, ts: r.timestamp });
           renderConvo(id);
         }
       }
@@ -858,7 +916,8 @@
   // Map a history entry (role "user"|"reply", unix-seconds ts) onto a convo turn.
   function historyToTurn(m) {
     const role = m.role === 'user' ? 'me' : 'reply';
-    return { role, content: m.content || '', ts: m.ts };
+    const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
+    return { role, content, ts: m.ts };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
@@ -1090,6 +1149,18 @@
         const b = el('div', 'pending');
         b.innerHTML = '<span>' + esc(e.content) + '</span>';
         convo.appendChild(b);
+      } else if (e.role === 'slash-out') {
+        // Collapsible captured output for a printing slash command. Open by
+        // default so the freshly-requested output is visible without a tap.
+        const d = el('details', 'slash-out');
+        d.open = true;
+        const sum = el('summary', null, '✓ ' + (e.command || 'command') + ' output');
+        d.appendChild(sum);
+        const pre = el('pre', 'slash-out-text');
+        pre.textContent = e.content;
+        d.appendChild(pre);
+        convo.appendChild(d);
+        convo.appendChild(el('div', 'ts', fmtTime(e.ts)));
       }
     });
 
@@ -1144,7 +1215,7 @@
 
     try {
       const path = slash ? '/api/rc/slash' : '/api/rc/ask';
-      const r = await api('POST', path, { sessionId: id, text });
+      const r = await api('POST', path, { sessionId: id, text, profile: CURRENT_PROFILE });
       if (r && r.requestId) {
         // tag the pending row so the matching reply event resolves it
         const pend = state.pending.get(id) || {};
@@ -1276,7 +1347,7 @@
 
   async function doApprove(s) {
     try {
-      const r = await api('POST', '/api/rc/approve', { sessionId: s.id });
+      const r = await api('POST', '/api/rc/approve', { sessionId: s.id, profile: CURRENT_PROFILE });
       if (r && r.approved) {
         const conv = ensureConvo(s.id);
         conv.push({
@@ -1349,8 +1420,9 @@
         conv.push({ role: 'error', content: ev.error, ts: ev.ts });
         notifyForeground(id, 'error', 'Turn failed', ev.error);
       } else {
-        conv.push({ role: 'reply', content: ev.content || '', ts: ev.ts });
-        notifyForeground(id, 'finished', titleFor(id) + ' replied', oneLine(ev.content, 90));
+        const content = cleanReplyContent(ev.content);
+        conv.push({ role: 'reply', content, ts: ev.ts });
+        notifyForeground(id, 'finished', titleFor(id) + ' replied', oneLine(content, 90));
       }
       renderConvo(id);
       renderDeck();
@@ -1361,6 +1433,10 @@
       conv.forEach((e) => { if (e.role === 'me') e.queued = false; });
       if (ev.error) {
         conv.push({ role: 'error', content: (ev.command || 'command') + ' failed: ' + ev.error, ts: ev.ts });
+      } else if (ev.output) {
+        // Printing slash (/context, /cost, …): show the captured pane output in
+        // a collapsible block alongside the sent confirmation.
+        conv.push({ role: 'slash-out', command: ev.command || 'command', content: ev.output, ts: ev.ts });
       } else {
         conv.push({ role: 'note', content: '✓ ' + (ev.command || 'command') + ' sent', ts: ev.ts });
       }
@@ -1451,6 +1527,28 @@
     mark($('#reqSupport'), pushSupported());
     mark($('#reqPerm'), 'Notification' in window && Notification.permission === 'granted');
 
+    // Pre-opt-in warning: the two preconditions that silently break push.
+    const warn = $('#pushWarn');
+    if (warn) {
+      const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+      if (isIOS && !isStandalone()) {
+        warn.hidden = false;
+        warn.textContent = "Open deck-remote from its Home-Screen icon — Safari/Brave tabs can't receive notifications.";
+      } else if ('Notification' in window && Notification.permission === 'denied') {
+        warn.hidden = false;
+        warn.textContent = 'Notifications are blocked for this app. Enable them in iOS Settings ▸ deck-remote ▸ Notifications.';
+      } else {
+        warn.hidden = true;
+      }
+    }
+
+    // Quiet-hours row visibility + values follow the prefs.
+    const qr = $('#quietRow');
+    if (qr) qr.hidden = !prefs.quietOn;
+    const qs = $('#quietStart'), qe = $('#quietEnd');
+    if (qs && prefs.quietStart) qs.value = prefs.quietStart;
+    if (qe && prefs.quietEnd) qe.value = prefs.quietEnd;
+
     // fetch config (graceful enabled:false)
     if (!state.pushConfig) {
       try { state.pushConfig = await api('GET', '/api/rc/push/config'); }
@@ -1468,6 +1566,12 @@
         if (reg) existing = await reg.pushManager.getSubscription();
       } catch (_) {}
     }
+
+    // Re-sync client prefs to the server whenever we're already subscribed. The
+    // persisted server prefs file predates any newly-added pref (e.g. `stall`),
+    // which JSON-decodes to false; pushing the current client prefs on load makes
+    // new defaults take effect without requiring a manual toggle.
+    if (existing) pushPrefsToServer();
 
     // iOS exposes PushManager ONLY in an installed (home-screen) PWA, so on iOS
     // a Safari/Brave TAB always fails pushSupported(). Check install state FIRST
@@ -1501,6 +1605,23 @@
     subText.innerHTML = html;
   }
 
+  // Push the server-honored prefs (per-event approve/finished + quiet-hours) to
+  // the daemon. Times are sent as minutes-from-midnight (local). Best-effort.
+  async function pushPrefsToServer() {
+    const [sh, sm] = (prefs.quietStart || '22:00').split(':').map(Number);
+    const [eh, em] = (prefs.quietEnd || '07:00').split(':').map(Number);
+    try {
+      await api('POST', '/api/rc/push/prefs', {
+        approve: !!prefs.approve,
+        finished: !!prefs.finished,
+        stall: !!prefs.stall,
+        quietOn: !!prefs.quietOn,
+        quietStart: sh * 60 + sm,
+        quietEnd: eh * 60 + em,
+      });
+    } catch (_) {}
+  }
+
   async function enablePush() {
     if (!pushSupported()) return;
     const cfg = state.pushConfig;
@@ -1523,6 +1644,7 @@
         applicationServerKey: urlBase64ToUint8Array((cfg.vapidPublicKey || cfg.publicKey)),
       });
       await api('POST', '/api/rc/push/subscribe', sub.toJSON());
+      await pushPrefsToServer();
       toast('Notifications on', 'You\'ll get pushed when a session needs you.');
     } catch (e) {
       toast('Could not enable push', e.message);
@@ -1535,14 +1657,124 @@
   $$('.toggle[data-pref]').forEach((tg) => {
     tg.classList.toggle('on', !!prefs[tg.dataset.pref]);
     tg.addEventListener('click', () => {
-      prefs[tg.dataset.pref] = !prefs[tg.dataset.pref];
-      tg.classList.toggle('on', prefs[tg.dataset.pref]);
+      const key = tg.dataset.pref;
+      prefs[key] = !prefs[key];
+      tg.classList.toggle('on', prefs[key]);
       savePrefs(prefs);
+      if (key === 'quietOn') { const qr = $('#quietRow'); if (qr) qr.hidden = !prefs.quietOn; }
+      // Sync the server-honored prefs (cheap; harmless before any subscription).
+      if (key === 'approve' || key === 'finished' || key === 'stall' || key === 'quietOn') pushPrefsToServer();
+    });
+  });
+  // Quiet-hours time inputs.
+  ['#quietStart', '#quietEnd'].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      if (sel === '#quietStart') prefs.quietStart = el.value;
+      else prefs.quietEnd = el.value;
+      savePrefs(prefs);
+      pushPrefsToServer();
     });
   });
   $('#btnEnablePush').addEventListener('click', enablePush);
+  $('#btnTestPush').addEventListener('click', async () => {
+    const b = $('#btnTestPush');
+    b.disabled = true;
+    const old = b.textContent;
+    b.textContent = 'Sending…';
+    try {
+      const r = await api('POST', '/api/rc/push/test');
+      const n = (r && r.sent) || 0;
+      const results = (r && r.results) || [];
+      const oks = results.filter((x) => x.status >= 200 && x.status < 300).length;
+      const fails = results.filter((x) => !(x.status >= 200 && x.status < 300));
+      if (n === 0) toast('No subscriptions', 'Enable notifications on this device first.');
+      else if (fails.length === 0) toast('Test push sent', oks + '/' + n + ' delivered. Check your lock screen.');
+      else toast('Push had errors', fails.map((f) => (f.status || 'ERR') + (f.error ? (' ' + f.error) : '')).join(' · '));
+    } catch (e) {
+      toast('Test push failed', e.message);
+    } finally {
+      b.disabled = false;
+      b.textContent = old;
+    }
+  });
   $('#forgetToken').addEventListener('click', () => {
     if (confirm('Forget the token on this device?')) forgetToken('Token cleared.');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Per-device tokens (additive). whoami identifies the active token; the admin
+  // (shared-token) UI mints/lists/revokes device tokens. Device tokens never see
+  // the admin section (the endpoints 403 anyway — UI just hides it).
+  // ---------------------------------------------------------------------------
+  let DEVICE_ADMIN = false;
+  async function refreshDevicesUI() {
+    const hint = $('#whoamiHint');
+    try {
+      const who = await api('GET', '/api/rc/devices/whoami');
+      DEVICE_ADMIN = !!(who && who.admin);
+      if (hint) {
+        hint.textContent = who && who.kind === 'device'
+          ? ('Device token: ' + (who.name || who.id))
+          : 'Shared (admin) token';
+      }
+    } catch (_) {
+      DEVICE_ADMIN = false;
+      if (hint) hint.textContent = '';
+    }
+    const admin = $('#devicesAdmin');
+    if (admin) admin.hidden = !DEVICE_ADMIN;
+    if (DEVICE_ADMIN) loadDeviceList();
+  }
+
+  async function loadDeviceList() {
+    const list = $('#deviceList');
+    if (!list) return;
+    list.innerHTML = '';
+    let devices = [];
+    try { const r = await api('GET', '/api/rc/devices'); devices = (r && r.devices) || []; }
+    catch (_) { return; }
+    if (!devices.length) {
+      const row = el('div', 'set-row');
+      row.innerHTML = '<span class="gi">—</span><span class="lbl" style="color:var(--muted)">No device tokens yet</span>';
+      list.appendChild(row);
+      return;
+    }
+    devices.forEach((d) => {
+      const row = el('div', 'set-row');
+      const when = d.created ? new Date(d.created * 1000).toLocaleDateString() : '';
+      row.innerHTML = '<span class="gi">📲</span><span class="lbl">' + esc(d.name || d.id) +
+        '<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">added ' + esc(when) + '</div></span>';
+      const revoke = el('span', 'lbl', 'Revoke');
+      revoke.style.color = 'var(--red)';
+      revoke.style.flex = '0 0 auto';
+      revoke.style.cursor = 'pointer';
+      revoke.addEventListener('click', async () => {
+        if (!confirm('Revoke "' + (d.name || d.id) + '"? That device must re-enroll.')) return;
+        try { await api('POST', '/api/rc/devices/revoke', { id: d.id }); toast('Revoked', d.name || d.id); loadDeviceList(); }
+        catch (e) { toast('Revoke failed', e.message); }
+      });
+      row.appendChild(revoke);
+      list.appendChild(row);
+    });
+  }
+
+  const mintBtn = $('#mintDevice');
+  if (mintBtn) mintBtn.addEventListener('click', async () => {
+    const name = (prompt('Name for the new device (e.g. ruben-iphone):') || '').trim();
+    if (!name) return;
+    try {
+      const r = await api('POST', '/api/rc/devices/mint', { name });
+      const out = $('#mintResult');
+      if (out) {
+        out.hidden = false;
+        out.innerHTML = 'Token for <b>' + esc(r.name) + '</b> (shown once):<br>' +
+          '<code>' + esc(r.token) + '</code><br>' +
+          'Open this on the device:<br><code>' + esc(r.phoneUrl) + '</code>';
+      }
+      loadDeviceList();
+    } catch (e) { toast('Mint failed', e.message); }
   });
 
   // Escape hatch → embedded xterm.js terminal page. We deep-link to the open
@@ -1551,6 +1783,12 @@
   // (same origin), so it stays out of the URL.
   $('#escapeTerm').addEventListener('click', (e) => {
     e.preventDefault();
+    // The terminal is bound to PROXY_PROFILE (single proxied agent-deck web), so
+    // it can't open a session that lives in a different selected profile.
+    if (CURRENT_PROFILE && PROXY_PROFILE && CURRENT_PROFILE !== PROXY_PROFILE) {
+      toast('Terminal', 'Only available for the \'' + PROXY_PROFILE + '\' profile.');
+      return;
+    }
     const id = state.openSheetId || (Array.from(state.sessions.keys())[0]);
     const url = id ? '/terminal.html?id=' + encodeURIComponent(id) : tokenURL('/');
     window.open(url, '_blank', 'noopener');
@@ -1608,17 +1846,71 @@
     }, REFRESH_MS);
   }
 
+  // ---------------------------------------------------------------------------
+  // Multi-profile selector
+  // ---------------------------------------------------------------------------
+  // loadProfiles fetches the available profiles, the daemon default, and the
+  // proxy-bound profile, then renders the header selector (hidden when <=1).
+  async function loadProfiles() {
+    try {
+      const r = await api('GET', '/api/rc/profiles');
+      PROFILES = (r && r.profiles) || [];
+      PROXY_PROFILE = (r && r.proxyProfile) || '';
+      // Default the selection to the daemon's current profile on first run, and
+      // reset if a stored profile no longer exists.
+      const names = PROFILES.map((p) => p.name);
+      if (!CURRENT_PROFILE || !names.includes(CURRENT_PROFILE)) {
+        CURRENT_PROFILE = (r && r.current) || '';
+        localStorage.setItem(PROFILE_KEY, CURRENT_PROFILE);
+      }
+    } catch (_) {
+      PROFILES = []; // endpoint unavailable: behave as single-profile
+    }
+    renderProfileSelector();
+  }
+
+  function renderProfileSelector() {
+    const sel = $('#profileSel');
+    if (!sel) return;
+    if (PROFILES.length <= 1) { sel.hidden = true; sel.innerHTML = ''; return; }
+    sel.hidden = false;
+    sel.innerHTML = PROFILES.map((p) =>
+      '<option value="' + esc(p.name) + '"' + (p.name === CURRENT_PROFILE ? ' selected' : '') + '>' +
+      esc(p.name) + (p.isDefault ? ' (default)' : '') + '</option>'
+    ).join('');
+  }
+
+  function onProfileChange(name) {
+    if (name === CURRENT_PROFILE) return;
+    CURRENT_PROFILE = name;
+    localStorage.setItem(PROFILE_KEY, name);
+    if ($('#sheet')) closeSheet(); // the open session belongs to the old profile
+    state.sessions.clear();
+    state.convos.clear();
+    state.pending.clear();
+    state.history.clear();
+    renderDeck();
+    loadSessions(false);
+  }
+
+  (function wireProfileSelector() {
+    const sel = $('#profileSel');
+    if (sel) sel.addEventListener('change', (e) => onProfileChange(e.target.value));
+  })();
+
   async function boot() {
     showTab('deck');
     registerSW();
     wirePresence();
     startStreams();
+    await loadProfiles();
     await loadSessions(true);
     startRefresh();
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') loadSessions(false);
     });
     refreshPushUI();
+    pushPrefsToServer(); // sync server-honored prefs once on launch
   }
 
   // Entry point.

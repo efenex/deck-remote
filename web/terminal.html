@@ -200,6 +200,9 @@
   var reconnectAttempt = 0;
   var wsReconnectEnabled = true;
   var manuallyClosed = false;
+  // Give up after a few auto-retries and offer a manual Reconnect, so a dead
+  // backend doesn't leave us spinning forever.
+  var MAX_RECONNECT_ATTEMPTS = 6;
 
   function doFit() {
     if (!$term.offsetWidth || !$term.offsetHeight) return;
@@ -248,11 +251,21 @@
     return Math.min(8000, Math.round(350 * Math.pow(1.8, capped - 1)));
   }
 
+  function giveUpReconnect() {
+    setConn('bad', 'disconnected');
+    showNotice('Disconnected',
+      'Could not reach the terminal after several attempts.',
+      '<span class="btn" id="reconnectBtn">Reconnect</span>' +
+      '<a class="btn ghost" href="/">Back to deck</a>');
+    wireReconnect();
+  }
+
   function scheduleReconnect() {
     if (!wsReconnectEnabled || manuallyClosed) return;
     if (reconnectTimer || ws) return;
+    if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) { giveUpReconnect(); return; }
     reconnectAttempt += 1;
-    setConn('', 'reconnecting…');
+    setConn('', 'reconnecting… (' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')');
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       connect();
