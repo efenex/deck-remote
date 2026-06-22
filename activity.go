@@ -95,22 +95,28 @@ func parseActivity(pane string) activityInfo {
 	return a
 }
 
-// liveActivity returns the session's parsed live activity. It reads the watcher's
-// activity cache (the single pane-reader) and, on a cold miss (no tick yet for
-// this session), falls back to an on-demand capture+parse so endpoints never
-// return empty for a fresh session. The on-demand path also seeds the cache so
-// stall detection starts accumulating immediately.
+// activityFreshFor bounds how long a cached activity entry is served before a
+// read re-scrapes. The watcher refreshes every watchInterval (6s); past this
+// window we assume it fell behind (a slow sweep, a session it skipped, a churned
+// tmux id) and capture on demand, so a read never serves indefinitely-stale
+// state — this is what surfaces the current activity when the PWA (re)opens.
+const activityFreshFor = 10 * time.Second
+
+// liveActivity returns the session's parsed live activity. It serves the watcher's
+// activity cache (the single pane-reader) while fresh, and otherwise — a cold miss
+// OR a stale entry — does an on-demand capture+parse so the value reflects reality
+// at read time. The on-demand path reseeds the cache so stall detection keeps
+// accumulating. A scrape failure falls back to the last cached value (stale beats
+// empty) rather than blanking the session.
 func (s *server) liveActivity(ctx context.Context, id string) activityInfo {
-	if st, ok := s.acts.get(id); ok {
-		return activityInfo{
-			Working:     st.Working,
-			Activity:    st.Activity,
-			CurrentTool: st.CurrentTool,
-			Stalled:     st.Stalled,
-		}
+	if st, ok := s.acts.get(id); ok && time.Since(st.updatedAt) < activityFreshFor {
+		return st.info()
 	}
 	pane, err := s.sessionPane(ctx, id)
 	if err != nil {
+		if st, ok := s.acts.get(id); ok {
+			return st.info()
+		}
 		return activityInfo{}
 	}
 	parsed := parseActivity(pane)

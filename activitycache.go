@@ -90,3 +90,13 @@ func (c *activityCache) get(id string) (activityState, bool) {
 	st, ok := c.m[id]
 	return st, ok
 }
+
+// info projects the cached state onto the wire shape the endpoints return.
+func (st activityState) info() activityInfo {
+	return activityInfo{
+		Working:     st.Working,
+		Activity:    st.Activity,
+		CurrentTool: st.CurrentTool,
+		Stalled:     st.Stalled,
+	}
+}

@@ -1906,9 +1906,18 @@
     await loadProfiles();
     await loadSessions(true);
     startRefresh();
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') loadSessions(false);
-    });
+    // Re-pull on resume. iOS standalone PWAs resume from bfcache without a reload
+    // and don't reliably fire visibilitychange, so listen for pageshow too. On
+    // resume, refresh the deck (fresh activity/status is scraped server-side) and,
+    // if a sheet is open, immediately reconcile its transcript tail — otherwise the
+    // view is stuck on whatever it had when the app was last foregrounded.
+    function onResume() {
+      if (document.visibilityState !== 'visible') return;
+      loadSessions(false);
+      if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
+    }
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', onResume);
     refreshPushUI();
     pushPrefsToServer(); // sync server-honored prefs once on launch
   }
