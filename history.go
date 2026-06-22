@@ -57,10 +57,14 @@ type jsonlLine struct {
 	} `json:"message"`
 }
 
-// syntheticUserPrefixes mark user entries that are not human messages.
+// syntheticUserPrefixes mark user entries that are not human messages. These are
+// strings the harness injects as user turns (command wrappers, system reminders,
+// and background-task completions) — not something the human typed, so they must
+// not render in the thread.
 var syntheticUserPrefixes = []string{
 	"<local-command", "<command-name", "<command-message", "<command-args",
 	"<command-stdout", "<system-reminder", "caveat:", "[request interrupted",
+	"<task-notification", "<task-prompt",
 }
 
 var reminderBlockRE = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
