@@ -1410,6 +1410,15 @@
       // already reflected locally on send; ensure pending exists
       if (id && !state.pending.has(id)) state.pending.set(id, { ctx: 'thinking', requestId: ev.requestId });
       renderConvo(id);
+    } else if (ev.type === 'ask-state' && ev.state === 'queued') {
+      // Busy-session delivery: the message was injected into Claude's live composer
+      // and queued natively (runs after the current turn). No "reply" event follows
+      // this requestId — the reply arrives via the transcript reconcile — so clear
+      // the per-message pending to avoid a perpetual "thinking" spinner.
+      state.pending.delete(id);
+      renderConvo(id);
+      renderDeck();
+      if (state.openSheetId === id) toast('Queued', 'Claude will run it after the current turn.');
     } else if (ev.type === 'reply') {
       const conv = ensureConvo(id);
       const pend = state.pending.get(id);

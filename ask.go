@@ -134,6 +134,32 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 	ctx, cancel := context.WithTimeout(withProfile(context.Background(), prof), maxTurn)
 	defer cancel()
 
+	// If the session is mid-turn, deliver with --no-wait: agent-deck injects the
+	// text into Claude's live composer immediately and Claude QUEUES it natively
+	// (runs it after the current turn). The alternative (--wait) gates on the
+	// session going idle first (waitForAgentReady), which stalls indefinitely when
+	// the session is driven elsewhere (e.g. the laptop) and also blocks this
+	// session's queue. --no-wait still verifies delivery (agent-deck #876), and the
+	// reply surfaces via the watcher reply-settle + transcript reconcile.
+	if s.sessionBusy(ctx, se.ID) {
+		dctx, dcancel := context.WithTimeout(withProfile(context.Background(), prof), 30*time.Second)
+		defer dcancel()
+		log.Printf("ask: runTurn QUEUE (busy) session=%s req=%s text=%q", se.ID, reqID, text)
+		if err := s.sendNoWait(dctx, se.ID, text); err != nil {
+			log.Printf("ask: runTurn QUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
+			s.hub.publish(map[string]any{
+				"type": "reply", "requestId": reqID, "sessionId": se.ID,
+				"error": "couldn't deliver while busy: " + err.Error(), "ts": time.Now().Unix(),
+			})
+			return
+		}
+		s.hub.publish(map[string]any{
+			"type": "ask-state", "state": "queued",
+			"requestId": reqID, "sessionId": se.ID, "ts": time.Now().Unix(),
+		})
+		return
+	}
+
 	log.Printf("ask: runTurn START session=%s req=%s text=%q", se.ID, reqID, text)
 	out, err := s.adeck(ctx, "session", "send", se.ID, text,
 		"--wait", "--timeout", fmt.Sprintf("%.0fs", maxTurn.Seconds()))
@@ -151,6 +177,25 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 		"type": "reply", "requestId": reqID, "sessionId": se.ID,
 		"content": reply, "ts": time.Now().Unix(),
 	})
+}
+
+// sessionBusy reports whether the session is mid-turn, to choose the delivery
+// mode for runTurn. It reads the pane FRESH (not just the activity cache) so a
+// stale entry can't misroute delivery; on a read failure it falls back to the
+// cache, else assumes idle (the --wait path, which gates for readiness anyway).
+func (s *server) sessionBusy(ctx context.Context, id string) bool {
+	pctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	pane, err := s.sessionPane(pctx, id)
+	if err != nil {
+		if st, ok := s.acts.get(id); ok {
+			return st.Working
+		}
+		return false
+	}
+	parsed := parseActivity(pane)
+	s.acts.update(id, parsed) // keep the cache warm with this read
+	return parsed.Working
 }
 
 // printingSlashes are slash commands that render output INTO the pane (rather
