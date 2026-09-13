@@ -28,15 +28,29 @@ ENV_FILE="${DECK_REMOTE_LANDNS_ENV:-$HOME/.config/deck-remote/landns.env}"
 
 ROUTER="${DECK_REMOTE_ROUTER:?set DECK_REMOTE_ROUTER (router LAN IP)}"
 SSH_PORT="${DECK_REMOTE_ROUTER_SSH_PORT:-22}"
-SSH_KEY="${DECK_REMOTE_ROUTER_KEY:-$HOME/.ssh/id_ed25519}"
+SSH_USER="${DECK_REMOTE_ROUTER_USER:-${USER:-$(id -un)}}"
+# A dedicated, passphrase-less key used only by this keeper. launchd has no
+# ssh-agent / gpg-agent, so a passphrase-protected key cannot be unlocked there
+# and the router answers "Permission denied". Restrict it on the router side
+# (authorized_keys command=/no-pty options) since it is unencrypted at rest.
+SSH_KEY="${DECK_REMOTE_ROUTER_KEY:-$HOME/.ssh/deck-remote-landns_ed25519}"
 HOST="${DECK_REMOTE_HOST:?set DECK_REMOTE_HOST (<host>.<tailnet>.ts.net)}"
-TARGET="${DECK_REMOTE_LAN_IP:?set DECK_REMOTE_LAN_IP (this Mac's LAN IP)}"
+TARGET="${DECK_REMOTE_LAN_IP:?set DECK_REMOTE_LAN_IP (LAN IP of this Mac)}"
 MARKER="deck-remote-lan-fallback"
 
 log() { print -r -- "$(date '+%Y-%m-%dT%H:%M:%S%z') lan-dns-keeper: $*"; }
 
-rsh() { ssh -i "$SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=8 \
-            -o StrictHostKeyChecking=accept-new "$ROUTER" "$@"; }
+# Deterministic under launchd: -F /dev/null skips ~/.ssh/config (whose Match
+# exec hooks, e.g. gpg-connect-agent, aren't on launchd's PATH), and the agent
+# is never consulted. Host-key checking stays on against ~/.ssh/known_hosts.
+rsh() {
+  [ -r "$SSH_KEY" ] || { log "!! ssh key not readable: $SSH_KEY"; return 1; }
+  ssh -F /dev/null -i "$SSH_KEY" -o IdentitiesOnly=yes -o IdentityAgent=none \
+      -o BatchMode=yes -o ConnectTimeout=8 \
+      -o StrictHostKeyChecking=accept-new \
+      -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+      -p "$SSH_PORT" -l "$SSH_USER" "$ROUTER" "$@"
+}
 
 # What the router currently hands out for the name.
 resolved() { dig +short +time=3 +tries=1 "@$ROUTER" "$HOST" 2>/dev/null | head -1; }
