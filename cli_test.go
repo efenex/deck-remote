@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -73,5 +75,35 @@ func TestReqProfile(t *testing.T) {
 				t.Errorf("reqProfile(%q) = %q, want %q", c.url, got, c.want)
 			}
 		})
+	}
+}
+
+func TestCLIListSessionsEmptyProfileSentinel(t *testing.T) {
+	for name, stdout := range map[string]string{
+		"sentinel": "No sessions found in profile 'default'.",
+		"empty":    "",
+		"json":     "[]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeBin := filepath.Join(t.TempDir(), "agent-deck")
+			script := "#!/bin/sh\nprintf '%s\\n' \"" + stdout + "\"\n"
+			if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s := testServer(t, config{bin: fakeBin, token: "tok"})
+			out, err := s.cliListSessions(context.Background())
+			if err != nil || len(out) != 0 {
+				t.Fatalf("want empty list, got %v %+v", err, out)
+			}
+		})
+	}
+
+	fakeBin := filepath.Join(t.TempDir(), "agent-deck")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\necho 'Error: failed to load sessions'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t, config{bin: fakeBin, token: "tok"})
+	if _, err := s.cliListSessions(context.Background()); err == nil {
+		t.Fatal("non-JSON output other than the empty sentinel must stay an error")
 	}
 }

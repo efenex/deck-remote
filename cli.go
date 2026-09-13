@@ -172,9 +172,23 @@ type replyOutput struct {
 // title/group/tool here; the (possibly stale) status field is ignored — the PWA
 // is detail-first and shows the real last reply instead.
 func (s *server) cliListSessions(ctx context.Context) ([]sessionInfo, error) {
-	var out []sessionInfo
-	if err := s.adeckJSON(ctx, &out, "list", "--json"); err != nil {
+	raw, err := s.adeck(ctx, "list", "--json")
+	if err != nil {
 		return nil, err
+	}
+	// An empty profile prints "No sessions found in profile '<p>'." even under
+	// --json (exit 0, through at least agent-deck v1.16.10). That is an empty
+	// list, not a decode error; agent-deck's own remote client reads it the
+	// same way (internal/session/ssh.go parseRemoteSessions).
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte("No sessions found")) {
+			return []sessionInfo{}, nil
+		}
+	}
+	var out []sessionInfo
+	if err := json.Unmarshal(trimmed, &out); err != nil {
+		return nil, fmt.Errorf("decode JSON from %q: %w", "list --json", err)
 	}
 	return out, nil
 }
