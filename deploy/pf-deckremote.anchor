@@ -1,0 +1,22 @@
+# pf anchor: reach deck-remote on ONE origin whether or not Tailscale is up.
+#
+# deck-remote terminates TLS itself on 127.0.0.1:8443 (a *.ts.net cert), which
+# keeps it an unprivileged user agent. These rules redirect :443 to it so the
+# phone always uses https://<host>.ts.net with NO port — the service worker and
+# the Web Push subscription are bound to that exact origin, so a port change
+# would mean a fresh PWA install and a fresh subscription.
+#
+# The source tables ARE the access control: a client outside them does not match
+# the rdr, so it reaches :443 where nothing listens and the connection is
+# refused. The bearer token remains the second gate.
+#
+# NOTE: pf rdr does not apply to traffic the host originates to itself, so
+# curling https://<host>.ts.net/healthz FROM this Mac will not hit :8443 —
+# test with `curl -k https://127.0.0.1:8443/healthz` locally and from the phone
+# for the real path.
+
+table <deckremote_ok> const { 100.64.0.0/10, 192.168.50.0/24 }
+table <deckremote_ok6> const { fd7a:115c:a1e0::/48 }
+
+rdr pass on ! lo0 inet  proto tcp from <deckremote_ok>  to any port 443 -> 127.0.0.1 port 8443
+rdr pass on ! lo0 inet6 proto tcp from <deckremote_ok6> to any port 443 -> ::1       port 8443

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Daily `tailscale cert` refresh for the pair deck-remote serves. Install to
+     ~/Library/LaunchAgents/ and edit the script path. No restart of
+     deck-remote is needed: certReloader (tls.go) re-reads on mtime change. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.lunascens.deck-remote-cert</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Users/CHANGEME/path/to/deck-remote/scripts/tls-renew.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>17</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/CHANGEME/.agent-deck/logs/deck-remote-cert.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/CHANGEME/.agent-deck/logs/deck-remote-cert.log</string>
+</dict>
+</plist>

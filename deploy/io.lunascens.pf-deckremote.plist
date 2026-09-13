@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- LaunchDaemon: macOS ships pf DISABLED, so enable + load it at every boot.
+     Install to /Library/LaunchDaemons/ (root:wheel 0644). Pairs with the
+     rdr-anchor/anchor lines scripts/lan-fallback.sh adds to /etc/pf.conf. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.lunascens.pf-deckremote</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/sbin/pfctl</string>
+		<string>-E</string>
+		<string>-f</string>
+		<string>/etc/pf.conf</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/log/pf-deckremote.log</string>
+</dict>
+</plist>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Re-applies the router's DNS override after a router reboot / firmware
+     update, which wipe it (stock ASUSWRT has no persistence hook). Normal tick
+     is one DNS query; it only SSHes when the record is actually gone.
+     Install to ~/Library/LaunchAgents/ and fix the paths. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.lunascens.deck-remote-landns</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/zsh</string>
+		<string>/Users/CHANGEME/path/to/deck-remote/scripts/lan-dns-keeper.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/CHANGEME/.agent-deck/logs/deck-remote-landns.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/CHANGEME/.agent-deck/logs/deck-remote-landns.log</string>
+</dict>
+</plist>

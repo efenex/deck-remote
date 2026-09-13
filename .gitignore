@@ -8,3 +8,7 @@ mockups/
 # local-only working notes (machine specifics / handoff) — never published
 /TODO.md
 /HANDOFF.md
+
+# local install runbooks (machine specifics) and macOS cruft
+/INSTALL-RUNBOOK-*.md
+.DS_Store
