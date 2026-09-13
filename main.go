@@ -119,6 +119,9 @@ func main() {
 		log.Fatalf("push init: %v", err)
 	}
 	srv.push = pm
+	pm.onNotify = func(n notification) {
+		srv.hub.publish(map[string]any{"type": "notification", "notification": n})
+	}
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
 	go srv.runWatcher(watchCtx)
@@ -250,6 +253,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/rc/push/test", s.auth(http.HandlerFunc(s.handlePushTest)))
 	mux.Handle("POST /api/rc/push/notify", s.auth(http.HandlerFunc(s.handlePushNotify)))
 	mux.Handle("POST /api/rc/push/prefs", s.auth(http.HandlerFunc(s.handlePushPrefs)))
+	mux.Handle("GET /api/rc/notifications", s.auth(http.HandlerFunc(s.handleNotifications)))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and
 	// reports whether the caller is the shared (admin) token or a device token.

@@ -63,6 +63,10 @@ type pushManager struct {
 	prefs     pushPrefs
 	prefsPath string
 	lastFocus time.Time // last time any client reported foreground (suppress window)
+	// Inbox (notifications.go).
+	notifPath string
+	notifs    []notification
+	onNotify  func(notification)
 }
 
 func newPushManager(dir, subject string) (*pushManager, error) {
@@ -75,6 +79,7 @@ func newPushManager(dir, subject string) (*pushManager, error) {
 		subsPath:  filepath.Join(dir, "deck-remote-subs.json"),
 		prefs:     defaultPushPrefs(),
 		prefsPath: filepath.Join(dir, "deck-remote-push-prefs.json"),
+		notifPath: filepath.Join(dir, "deck-remote-notifications.json"),
 	}
 	if b, err := os.ReadFile(pm.prefsPath); err == nil {
 		var p pushPrefs
@@ -108,6 +113,7 @@ func newPushManager(dir, subject string) (*pushManager, error) {
 			}
 		}
 	}
+	pm.loadNotifs()
 	return pm, nil
 }
 
@@ -220,6 +226,9 @@ type pushPayload struct {
 	Body      string `json:"body"`
 	SessionID string `json:"sessionId"`
 	Kind      string `json:"kind"` // "reply" | "approval" | "question" | "stall"
+	// ID is the inbox entry this push records; URL deep-links a tap to it.
+	ID  string `json:"id,omitempty"`
+	URL string `json:"url,omitempty"`
 }
 
 // sendResult is the per-subscription outcome of a delivery attempt, surfaced by
@@ -235,10 +244,14 @@ type sendResult struct {
 // and per-sub logging/pruning live in sendTo, which the test endpoint calls
 // directly to BYPASS both gates (so the user can test while foregrounded).
 func (pm *pushManager) send(p pushPayload) {
-	if pm.suppressed() {
+	if !pm.allow(p.Kind) {
 		return
 	}
-	if !pm.allow(p.Kind) {
+	// Into the inbox first, full body intact: foreground suppression only
+	// skips the OS notification, not the record.
+	n := pm.record(p)
+	p.ID, p.URL = n.ID, "/?notif="+n.ID
+	if pm.suppressed() {
 		return
 	}
 	_ = pm.sendTo(p)
@@ -249,6 +262,9 @@ func (pm *pushManager) send(p pushPayload) {
 // status + body and every transport error via the std logger. It returns the
 // per-subscription results.
 func (pm *pushManager) sendTo(p pushPayload) []sendResult {
+	// The wire copy is a preview: push services cap payloads (~4 KB) and the OS
+	// truncates the text anyway. The full body is in the inbox.
+	p.Body = preview(p.Body, 140)
 	body, _ := json.Marshal(p)
 	pm.mu.Lock()
 	subs := make([]*webpush.Subscription, 0, len(pm.subs))
@@ -346,7 +362,7 @@ func (s *server) handlePushNotify(w http.ResponseWriter, r *http.Request) {
 	if b.Kind == "" {
 		b.Kind = "notify"
 	}
-	s.push.send(pushPayload{Title: b.Title, Body: preview(b.Body, 140), SessionID: b.SessionID, Kind: b.Kind})
+	s.push.send(pushPayload{Title: b.Title, Body: b.Body, SessionID: b.SessionID, Kind: b.Kind})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

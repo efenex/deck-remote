@@ -9,7 +9,7 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v3';
+const CACHE = 'deck-remote-v4';
 const SHELL = [
   '/',
   '/index.html',
@@ -76,7 +76,8 @@ self.addEventListener('fetch', (event) => {
 /* Push: render a notification from the server payload.
  *
  * Expected payload (best-effort; tolerant of partial/plain-text bodies):
- *   { title, body, sessionId, tag, kind }
+ *   { title, body, sessionId, tag, kind, id, url }
+ * id is the server's inbox entry; url deep-links a tap to it (/?notif=<id>).
  * kind ∈ reply | approval | question | stall | test.
  */
 self.addEventListener('push', (event) => {
@@ -100,25 +101,31 @@ self.addEventListener('push', (event) => {
     renotify: true,
     icon: ICON,
     badge: ICON,
-    data: { sessionId, kind: data.kind || '', url: data.url || '/' },
+    data: { sessionId, id: data.id || '', kind: data.kind || '', url: data.url || '/' },
     requireInteraction: data.kind === 'approval' || data.kind === 'question',
   };
 
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
-/* notificationclick: focus an existing window (and deep-link it to the session)
- * or open a new one at a URL that carries the session id. */
+/* notificationclick: focus an existing window and deep-link it to the inbox
+ * entry (the full text), or open a new one at a URL that carries it. Pushes from
+ * servers without an inbox id fall back to the session. */
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const sessionId = (event.notification.data && event.notification.data.sessionId) || '';
-  const target = sessionId ? '/?session=' + encodeURIComponent(sessionId) : '/';
+  const d = event.notification.data || {};
+  const sessionId = d.sessionId || '';
+  const notifId = d.id || '';
+  const target = notifId
+    ? '/?notif=' + encodeURIComponent(notifId)
+    : sessionId ? '/?session=' + encodeURIComponent(sessionId) : '/';
+  const msg = notifId ? { type: 'open-notification', id: notifId, sessionId } : { type: 'open-session', sessionId };
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
       for (const client of clients) {
         if ('focus' in client) {
-          client.postMessage({ type: 'open-session', sessionId });
+          client.postMessage(msg);
           return client.focus();
         }
       }

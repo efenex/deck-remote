@@ -122,6 +122,24 @@
     background:none;border:none;height:100%}
   .tab .gi{font-size:20px}
   .tab.active{color:var(--accent)}
+  .tab{position:relative}
+  .tab .badge{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;
+    background:var(--red);color:#fff;font-size:10px;line-height:16px;font-weight:700;text-align:center}
+
+  /* ---------- inbox ---------- */
+  .inbox{padding:8px 16px calc(40px + var(--safe-bottom));display:flex;flex-direction:column;gap:10px}
+  .inbox-empty{color:var(--muted);text-align:center;padding:48px 0;font-size:14px}
+  .notif{cursor:pointer}
+  .notif.unread{border-color:var(--accent)}
+  .notif.flash{box-shadow:0 0 0 2px var(--accent)}
+  .notif-kind{margin-top:4px}
+  .notif-body{margin-top:8px;font-size:13px;line-height:1.45;color:var(--fg);overflow-wrap:anywhere}
+  .notif:not(.open) .notif-body{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .notif-body pre{white-space:pre-wrap;background:rgba(0,0,0,.25);padding:8px;border-radius:6px;font-size:12px}
+  .notif-body code{font-family:var(--mono);font-size:12px}
+  .notif-actions{margin-top:10px;display:flex;gap:8px}
+  .notif-open{background:none;border:1px solid var(--border);color:var(--accent);border-radius:8px;padding:6px 10px;font-size:13px;font-weight:600}
+  .notif-open:disabled{color:var(--muted)}
 
   /* ===== session detail sheet (full-height flex column over dimmed deck) ===== */
   .scrim{position:fixed;inset:0;background:rgba(5,6,12,.55);z-index:70;animation:fade .18s ease}
@@ -507,9 +525,17 @@
     </div>
   </div>
 
+  <!-- INBOX tab: every notification the server recorded, full text -->
+  <div class="screen" id="screenInbox" hidden>
+    <div class="appbar"><div class="appbar-row"><div class="appbar-title">Inbox</div>
+      <button class="icon-btn" id="inboxRefresh" title="refresh"><span class="gi">↻</span></button></div></div>
+    <div class="inbox" id="inboxList"></div>
+  </div>
+
   <!-- bottom tabs -->
   <div class="tabbar">
     <button class="tab active" data-tab="deck"><span class="gi">▦</span>Deck</button>
+    <button class="tab" data-tab="inbox"><span class="gi">🔔</span>Inbox<span class="badge" id="inboxBadge" hidden></span></button>
     <button class="tab" data-tab="settings"><span class="gi">⚙️</span>Settings</button>
   </div>
 </div>

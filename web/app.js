@@ -216,9 +216,11 @@
   // ---------------------------------------------------------------------------
   function showTab(tab) {
     $('#screenDeck').hidden = tab !== 'deck';
+    $('#screenInbox').hidden = tab !== 'inbox';
     $('#screenSettings').hidden = tab !== 'settings';
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
     if (tab === 'settings') { refreshPushUI(); refreshDevicesUI(); }
+    if (tab === 'inbox') { renderInbox(); loadInbox(); }
   }
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
   $('#goSettings').addEventListener('click', () => showTab('settings'));
@@ -227,6 +229,116 @@
     b.classList.add('busy');
     try { await loadSessions(false); } finally { b.classList.remove('busy'); }
   });
+
+  // ---------------------------------------------------------------------------
+  // Inbox: every notification the server recorded, with its full text (the OS
+  // notification is a truncated preview). A tapped notification lands on its
+  // entry here. Read state is per device: the newest timestamp seen.
+  // ---------------------------------------------------------------------------
+  const INBOX_SEEN_KEY = 'dr-inbox-seen-at';
+  const INBOX_KIND = { approval: '🔐 Approval', question: '❓ Question', reply: '✅ Reply', stall: '🧊 Stalled', test: '🧪 Test' };
+  const inbox = { items: [], loaded: false, focusId: null, openIds: new Set() };
+
+  function inboxSeenAt() { return Number(localStorage.getItem(INBOX_SEEN_KEY) || 0); }
+  function renderInboxBadge() {
+    const b = $('#inboxBadge');
+    if (!b) return;
+    const seen = inboxSeenAt();
+    const n = inbox.items.filter((x) => x.at > seen).length;
+    b.hidden = n === 0;
+    b.textContent = n > 99 ? '99+' : String(n);
+  }
+  function markInboxSeen() {
+    const newest = inbox.items.length ? inbox.items[0].at : 0;
+    if (newest > inboxSeenAt()) localStorage.setItem(INBOX_SEEN_KEY, String(newest));
+    renderInboxBadge();
+  }
+  async function loadInbox() {
+    try {
+      const r = await api('GET', '/api/rc/notifications?limit=200');
+      inbox.items = (r && r.notifications) || [];
+      inbox.loaded = true;
+    } catch (_) { /* keep what we have; api() already surfaced auth problems */ }
+    renderInboxBadge();
+    if (!$('#screenInbox').hidden) renderInbox();
+  }
+  function addInboxItem(n) {
+    if (!n || !n.id || inbox.items.some((x) => x.id === n.id)) return;
+    inbox.items.unshift(n);
+    if (inbox.items.length > 200) inbox.items.length = 200;
+    renderInboxBadge();
+    if (!$('#screenInbox').hidden) renderInbox();
+  }
+  function fmtWhen(ms) {
+    const d = new Date(ms);
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toDateString() === new Date().toDateString()
+      ? time
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+  }
+  function renderInbox() {
+    const list = $('#inboxList');
+    if (!list) return;
+    if (!inbox.items.length) {
+      list.innerHTML = '<div class="inbox-empty">' + (inbox.loaded ? 'No notifications yet.' : 'Loading…') + '</div>';
+      return;
+    }
+    const seen = inboxSeenAt();
+    const focus = inbox.focusId;
+    if (focus) inbox.openIds.add(focus);
+    list.innerHTML = '';
+    let focusCard = null;
+    for (const n of inbox.items) {
+      const cls = 'card notif' + (n.at > seen ? ' unread' : '') + (inbox.openIds.has(n.id) ? ' open' : '') + (focus === n.id ? ' flash' : '');
+      const card = el('div', cls);
+      card.dataset.id = n.id;
+      const known = !n.sessionId || !state.sessions.size || state.sessions.has(n.sessionId);
+      card.innerHTML =
+        '<div class="card-top"><div class="card-title">' + esc(n.title || 'deck-remote') + '</div>' +
+        '<div class="card-meta">' + esc(fmtWhen(n.at)) + '</div></div>' +
+        '<div class="card-meta notif-kind">' + esc(INBOX_KIND[n.kind] || n.kind || '') + '</div>' +
+        '<div class="notif-body">' + renderMarkdown(n.body || '') + '</div>' +
+        (n.sessionId
+          ? '<div class="notif-actions"><button class="notif-open" data-open="' + esc(n.sessionId) + '"' + (known ? '' : ' disabled') + '>' +
+            (known ? 'Open session' : 'Session no longer listed') + '</button></div>'
+          : '');
+      card.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-open]');
+        if (btn) { e.stopPropagation(); openSession(btn.dataset.open); return; }
+        if (inbox.openIds.has(n.id)) inbox.openIds.delete(n.id); else inbox.openIds.add(n.id);
+        card.classList.toggle('open');
+      });
+      if (focus === n.id) focusCard = card;
+      list.appendChild(card);
+    }
+    if (focusCard) {
+      focusCard.scrollIntoView({ block: 'center' });
+      inbox.focusId = null;
+    } else if (focus && inbox.loaded) {
+      inbox.focusId = null; // not in the recorded window (older than the last 200)
+    }
+    markInboxSeen();
+  }
+  // A tapped notification: show its inbox entry, expanded and highlighted.
+  function openNotification(id) {
+    inbox.focusId = id || null;
+    showTab('inbox');
+  }
+  // Open a session's sheet, loading the session list first when the app was
+  // cold-started from a notification (openSheet is a no-op for unknown ids).
+  async function openSession(id) {
+    if (!id) return;
+    if (!state.sessions.has(id)) {
+      try { await loadSessions(false); } catch (_) {}
+    }
+    if (!state.sessions.has(id)) {
+      toast('Session not found', 'It may have been removed, or it belongs to another profile.');
+      return;
+    }
+    showTab('deck');
+    openSheet(id);
+  }
+  $('#inboxRefresh').addEventListener('click', () => loadInbox());
 
   // ---------------------------------------------------------------------------
   // Toast (foreground notify + errors)
@@ -1481,6 +1593,7 @@
 
   function handleRCEvent(ev) {
     if (!ev || !ev.type) return;
+    if (ev.type === 'notification') { addInboxItem(ev.notification); return; }
     const id = ev.sessionId;
     if (ev.type === 'ask-state' && (ev.state === 'sent' || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
@@ -1887,9 +2000,10 @@
   // ---------------------------------------------------------------------------
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (e) => {
-      if (e.data && e.data.type === 'open-session' && e.data.sessionId) {
-        showTab('deck');
-        openSheet(e.data.sessionId);
+      if (e.data && e.data.type === 'open-notification' && e.data.id) {
+        openNotification(e.data.id);
+      } else if (e.data && e.data.type === 'open-session' && e.data.sessionId) {
+        openSession(e.data.sessionId);
       }
     });
   }
@@ -1994,6 +2108,18 @@
     await loadProfiles();
     await loadSessions(true);
     startRefresh();
+    loadInbox();
+    // Deep links from a tapped notification on a cold start (the service worker
+    // opens /?notif=<id>, or /?session=<id> for pushes from older servers).
+    const params = new URL(location.href).searchParams;
+    if (params.has('notif')) {
+      const u = new URL(location.href);
+      u.searchParams.delete('notif');
+      history.replaceState(null, '', u.pathname + u.search + u.hash);
+      openNotification(params.get('notif'));
+    } else if (params.has('session')) {
+      openSession(params.get('session'));
+    }
     // Re-pull on resume. iOS standalone PWAs resume from bfcache without a reload
     // and don't reliably fire visibilitychange, so listen for pageshow too. On
     // resume, refresh the deck (fresh activity/status is scraped server-side) and,
@@ -2002,6 +2128,7 @@
     function onResume() {
       if (document.visibilityState !== 'visible') return;
       loadSessions(false);
+      loadInbox(); // pushes that arrived while backgrounded (no SSE then)
       if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
     }
     document.addEventListener('visibilitychange', onResume);

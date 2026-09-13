@@ -182,7 +182,7 @@ func (s *server) watchSnapshotReply(se sessionInfo, sw *sessWatch, isNew bool, s
 		return
 	}
 	sw.replyHash, sw.notifiedHash = h, h
-	s.push.send(pushPayload{Title: se.Title, Body: preview(content, 140), SessionID: se.ID, Kind: "reply"})
+	s.push.send(pushPayload{Title: se.Title, Body: content, SessionID: se.ID, Kind: "reply"})
 }
 
 func (s *server) watchAttention(se sessionInfo, sw *sessWatch, isNew bool, info attentionInfo) {
@@ -194,7 +194,7 @@ func (s *server) watchAttention(se sessionInfo, sw *sessWatch, isNew bool, info 
 	if info.Kind == "question" {
 		body, kind = "Question waiting — tap to answer", "question"
 		if len(info.Questions) > 0 {
-			body = preview(info.Questions[0].Question, 140)
+			body = info.Questions[0].Question
 		}
 	}
 	s.push.send(pushPayload{Title: se.Title, Body: body, SessionID: se.ID, Kind: kind})
@@ -245,7 +245,7 @@ func (s *server) watchReply(ctx context.Context, se sessionInfo, sw *sessWatch, 
 		log.Printf("watcher: reply settled session=%s", se.ID)
 		s.push.send(pushPayload{
 			Title:     se.Title,
-			Body:      preview(content, 140),
+			Body:      content,
 			SessionID: se.ID,
 			Kind:      "reply",
 		})
