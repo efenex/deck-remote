@@ -12,3 +12,6 @@ mockups/
 # local install runbooks (machine specifics) and macOS cruft
 /INSTALL-RUNBOOK-*.md
 .DS_Store
+
+# bd workspace gate file (beside .beads)
+.beads.gate.lock
