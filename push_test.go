@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 // TestInQuiet exercises the pure quiet-hours window logic (no clock).
 func TestInQuiet(t *testing.T) {
@@ -55,6 +59,7 @@ func TestAllowPerEvent(t *testing.T) {
 		{"stall off suppresses stall", pushPrefs{Stall: false, QuietStart: -1, QuietEnd: -1}, "stall", false},
 		{"stall off allows approval", pushPrefs{Approve: true, Stall: false, QuietStart: -1, QuietEnd: -1}, "approval", true},
 		{"test always passes per-event", pushPrefs{Approve: false, Finished: false, QuietStart: -1, QuietEnd: -1}, "test", true},
+		{"notify passes with all toggles off", pushPrefs{Approve: false, Finished: false, Stall: false, QuietStart: -1, QuietEnd: -1}, "notify", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,5 +121,39 @@ func TestShortEndpoint(t *testing.T) {
 	}
 	if shortEndpoint("not a url with spaces and a very long body that should truncate cleanly here") == "" {
 		t.Fatalf("shortEndpoint fallback returned empty")
+	}
+}
+
+// TestHandlePushNotify covers the external-notify endpoint: a valid payload is
+// accepted (and is a no-op with zero subscriptions), a missing title 400s, and
+// garbage JSON 400s.
+func TestHandlePushNotify(t *testing.T) {
+	pm, err := newPushManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("newPushManager: %v", err)
+	}
+	pm.prefs = pushPrefs{QuietStart: -1, QuietEnd: -1}
+	s := &server{push: pm}
+
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"valid default kind", `{"title":"E2E run done","body":"iter-96 finished: 12 proposals"}`, 200},
+		{"valid explicit kind", `{"title":"run stalled","kind":"stall"}`, 200},
+		{"missing title", `{"body":"no title"}`, 400},
+		{"blank title", `{"title":"   "}`, 400},
+		{"garbage", `{not json`, 400},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/api/rc/push/notify", strings.NewReader(tc.body))
+			w := httptest.NewRecorder()
+			s.handlePushNotify(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", w.Code, tc.want, w.Body.String())
+			}
+		})
 	}
 }

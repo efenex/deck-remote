@@ -29,7 +29,7 @@ func (s *server) handlePermission(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" {
+	if se.Tool != "claude" && se.Tool != "codex" {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": false})
 		return
 	}
@@ -38,11 +38,16 @@ func (s *server) handlePermission(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "unavailable": true})
 		return
 	}
-	if !isClaudePermissionPrompt(pane) {
+	info, infoErr := s.adapterFor(se).Attention(ctx, se, pane, true)
+	if infoErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "unavailable": true})
+		return
+	}
+	if !info.Pending || info.Kind != "approval" {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pending": true, "text": dialogExcerpt(pane)})
+	writeJSON(w, http.StatusOK, map[string]any{"pending": true, "text": info.Text, "attentionId": info.ID, "actions": info.Actions})
 }
 
 // dialogExcerpt returns the trailing non-empty lines of the pane, which for a

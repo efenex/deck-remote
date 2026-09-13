@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +16,8 @@ import (
 const (
 	watchInterval = 6 * time.Second
 	replySettle   = 8 * time.Second
+	// execStatsEvery paces the subprocess-counter log line (see runWatcher).
+	execStatsEvery = 10 * time.Minute
 )
 
 type sessWatch struct {
@@ -23,6 +26,7 @@ type sessWatch struct {
 	notifiedHash  uint64    // hash we last pushed for (dedupe)
 	permNotified  bool      // a permission push is outstanding for the current dialog
 	stallNotified bool      // a stall push is outstanding for the current frozen run
+	attentionID   string    // pending approval/question already pushed
 }
 
 func hashStr(s string) uint64 {
@@ -52,10 +56,22 @@ func (s *server) runWatcher(ctx context.Context) {
 	seen := map[string]*sessWatch{}
 	t := time.NewTicker(watchInterval)
 	defer t.Stop()
+	stats := time.NewTicker(execStatsEvery)
+	defer stats.Stop()
+	var lastAdeck, lastTmux int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-stats.C:
+			// Subprocess budget log: agent-deck execs at steady state should be
+			// ~0 (writes + rare fallbacks only). A climbing count here is the
+			// CLI polling burn coming back — catch it in the log, not in
+			// powermetrics DEAD_TASKS.
+			a, tm := s.execAdeck.Load(), s.execTmux.Load()
+			log.Printf("exec stats: agent-deck=%d tmux=%d (last %s)", a-lastAdeck, tm-lastTmux, execStatsEvery)
+			lastAdeck, lastTmux = a, tm
+			continue
 		case <-t.C:
 		}
 		// Always refresh the activity cache (single pane-reader): endpoints read
@@ -78,7 +94,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 	sem := make(chan struct{}, 4)
 	var mu sync.Mutex // guards `seen`
 	for _, se := range sessions {
-		if se.Tool != "claude" {
+		if se.Tool != "claude" && se.Tool != "codex" {
 			continue
 		}
 		wg.Add(1)
@@ -88,13 +104,40 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			defer func() { <-sem }()
 
 			// Single capture-pane for this session, shared by activity caching and
-			// (best-effort) permission/stall detection.
+			// (best-effort) permission/stall detection. paneFor (tmux-direct) —
+			// the sweep already holds the resolved session.
 			pctx, pc := context.WithTimeout(sctx, 5*time.Second)
-			pane, paneErr := s.sessionPane(pctx, se.ID)
+			pane, paneErr := s.paneFor(pctx, se)
 			pc()
+			adapter := s.adapterFor(se)
+			snap, snapErr := adapter.Snapshot(sctx, se, pane, paneErr == nil)
+			if snapErr != nil || snap.DegradedReason != "" {
+				s.attn.set(se.ID, attentionInfo{})
+				return
+			}
 			var st activityState
-			if paneErr == nil {
-				st = s.acts.update(se.ID, parseActivity(pane))
+			if se.Tool == "claude" {
+				if cached, ok := s.acts.get(se.ID); ok {
+					st = cached // claudeAdapter.Snapshot updated it from this same pane
+				}
+			} else {
+				snap.Activity.stallKeySet = true
+				if paneErr == nil && !snap.Attention.Pending {
+					snap.Activity.stallKey = codexPaneProgressKey(pane)
+				}
+				st = s.acts.update(se.ID, snap.Activity)
+				snap.Activity.Stalled = st.Stalled
+			}
+			s.attn.set(se.ID, snap.Attention)
+
+			// Request/reply correlation is useful even without push subscribers.
+			if se.Tool == "codex" {
+				for _, reply := range s.codexReqs.reconcile(se.ID, snap) {
+					s.hub.publish(map[string]any{
+						"type": "reply", "requestId": reply.RequestID, "sessionId": se.ID,
+						"content": reply.Message.Content, "ts": reply.Message.Ts,
+					})
+				}
 			}
 
 			if !notify {
@@ -108,20 +151,74 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 				isNew = true
 			}
 			mu.Unlock()
-			s.watchReply(sctx, se, sw, isNew)
-			if paneErr == nil {
-				s.watchPermissionPane(se, sw, isNew, pane)
-				s.watchStall(se, sw, isNew, st)
+			if se.Tool == "claude" {
+				s.watchReply(sctx, se, sw, isNew)
+			} else {
+				s.watchSnapshotReply(se, sw, isNew, snap)
 			}
+			if se.Tool == "claude" && paneErr == nil {
+				s.watchPermissionPane(se, sw, isNew, pane)
+			}
+			if se.Tool == "codex" {
+				s.watchAttention(se, sw, isNew, snap.Attention)
+			}
+			s.watchStall(se, sw, isNew, st)
 		}(se)
 	}
 	wg.Wait()
 }
 
+func (s *server) watchSnapshotReply(se sessionInfo, sw *sessWatch, isNew bool, snap harnessSnapshot) {
+	content := strings.TrimSpace(snap.LastReply)
+	if content == "" {
+		return
+	}
+	h := hashStr(content)
+	if isNew {
+		sw.replyHash, sw.notifiedHash = h, h
+		return
+	}
+	if h == sw.notifiedHash {
+		return
+	}
+	sw.replyHash, sw.notifiedHash = h, h
+	s.push.send(pushPayload{Title: se.Title, Body: preview(content, 140), SessionID: se.ID, Kind: "reply"})
+}
+
+func (s *server) watchAttention(se sessionInfo, sw *sessWatch, isNew bool, info attentionInfo) {
+	if !stepAttentionNotification(sw, isNew, info) {
+		return
+	}
+	body := "Permission requested — tap to review"
+	kind := "approval"
+	if info.Kind == "question" {
+		body, kind = "Question waiting — tap to answer", "question"
+		if len(info.Questions) > 0 {
+			body = preview(info.Questions[0].Question, 140)
+		}
+	}
+	s.push.send(pushPayload{Title: se.Title, Body: body, SessionID: se.ID, Kind: kind})
+}
+
+func stepAttentionNotification(sw *sessWatch, isNew bool, info attentionInfo) bool {
+	if !info.Pending {
+		sw.attentionID = ""
+		return false
+	}
+	if sw.attentionID == info.ID {
+		return false
+	}
+	sw.attentionID = info.ID
+	if isNew {
+		return false
+	}
+	return true
+}
+
 func (s *server) watchReply(ctx context.Context, se sessionInfo, sw *sessWatch, isNew bool) {
 	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := s.sessionReply(rctx, se.ID)
+	out, err := s.claudeReply(rctx, se)
 	if err != nil {
 		return
 	}
@@ -176,25 +273,45 @@ func (s *server) watchPermissionPane(se sessionInfo, sw *sessWatch, isNew bool, 
 	}
 }
 
-// watchStall pushes once when a session transitions INTO the stalled state (a
-// spinner whose label has been frozen across >=stallThreshold polls; see
-// stepStall). A pre-existing stall on first sight is baselined (no push) so a
-// daemon restart doesn't fire for every already-frozen session. The body carries
-// the frozen label + how long it has been frozen so a FALSE stall is easy to spot
-// — stall detection is still best-effort and this surfaces its mistakes.
-func (s *server) watchStall(se sessionInfo, sw *sessWatch, isNew bool, st activityState) {
-	if !st.Stalled {
-		sw.stallNotified = false
-		return
+// stallNotifyAfter is how long a spinner label must stay frozen before we push a
+// stall alert. The Stalled flag itself trips much sooner (>=stallThreshold polls,
+// ~12s) and still drives the UI; short stalls typically resolve on their own, so
+// we hold the notification back until the freeze has persisted this long to keep
+// the alerts from being noise.
+const stallNotifyAfter = 60 * time.Second
+
+// stallShouldNotify is the PURE decision for watchStall: given the current stall
+// signal and how long the label has been frozen, it returns whether to push now
+// and the next value of the stallNotified latch. Kept side-effect-free and
+// duration-injected so the 60s gate is unit-testable without a clock or a push.
+func stallShouldNotify(stalled, isNew, notified bool, frozen time.Duration) (push, nextNotified bool) {
+	if !stalled {
+		return false, false // run ended (or never stalled) — clear the latch for next time
 	}
 	if isNew {
-		sw.stallNotified = true // baseline a pre-existing stall; don't fire on first sight
+		return false, true // baseline a pre-existing stall; don't fire on first sight
+	}
+	if notified {
+		return false, true // already pushed for this frozen run
+	}
+	if frozen < stallNotifyAfter {
+		return false, false // frozen, but not long enough yet — re-check next poll, don't latch
+	}
+	return true, true
+}
+
+// watchStall pushes once when a session has been stalled (a spinner whose label
+// has been frozen; see stepStall) for at least stallNotifyAfter. A pre-existing
+// stall on first sight is baselined (no push) so a daemon restart doesn't fire for
+// every already-frozen session. The body carries the frozen label + how long it
+// has been frozen so a FALSE stall is easy to spot — stall detection is still
+// best-effort and this surfaces its mistakes.
+func (s *server) watchStall(se sessionInfo, sw *sessWatch, isNew bool, st activityState) {
+	push, next := stallShouldNotify(st.Stalled, isNew, sw.stallNotified, time.Since(st.lastChangeAt))
+	sw.stallNotified = next
+	if !push {
 		return
 	}
-	if sw.stallNotified {
-		return // already pushed for this frozen run
-	}
-	sw.stallNotified = true
 	log.Printf("watcher: stall detected session=%s activity=%q", se.ID, st.Activity)
 	s.push.send(pushPayload{
 		Title:     se.Title,

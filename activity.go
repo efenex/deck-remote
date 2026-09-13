@@ -21,6 +21,24 @@ type activityInfo struct {
 	// agent still reports working=true, but the spinner label has been frozen
 	// across consecutive polls — a "frozen/stalled spinner", not live work.
 	Stalled bool `json:"stalled,omitempty"`
+	// Optional harness-specific progress identity used only by stepStall.
+	stallKey    string
+	stallKeySet bool
+}
+
+func codexPaneProgressKey(pane string) string {
+	lines := strings.Split(stripANSI(pane), "\n")
+	start := len(lines) - 14
+	if start < 0 {
+		start = 0
+	}
+	for i := len(lines) - 1; i >= start; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(strings.ToLower(line), "esc to interrupt") {
+			return line
+		}
+	}
+	return ""
 }
 
 // spinnerLineRe matches Claude's live "thinking" status line by its PARENTHESIZED
@@ -145,9 +163,18 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" {
+	if se.Tool != "claude" && se.Tool != "codex" {
 		writeJSON(w, http.StatusOK, activityInfo{})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.liveActivity(ctx, se.ID))
+	if se.Tool == "claude" {
+		writeJSON(w, http.StatusOK, s.liveActivity(ctx, se.ID))
+		return
+	}
+	snap, snapErr := s.adapterFor(se).Snapshot(ctx, se, "", false)
+	if snapErr != nil || snap.DegradedReason != "" {
+		writeJSON(w, http.StatusOK, activityInfo{})
+		return
+	}
+	writeJSON(w, http.StatusOK, snap.Activity)
 }

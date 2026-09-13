@@ -9,8 +9,14 @@
 // terminal WebSocket) straight through to agent-deck so the phone talks to a
 // single origin. Front it with `tailscale serve` for HTTPS over the tailnet.
 //
-// Security: the entire boundary is Tailscale + one bearer token. Bind loopback
-// and let tailscale serve expose it; never bind a public address.
+// Security: the entire boundary is the network ACL + one bearer token. Bind
+// loopback and never bind a public address. Two fronting shapes are supported:
+//   - `tailscale serve` (tailnet only) -> plain HTTP on 127.0.0.1;
+//   - self-terminated TLS (--tls-cert/--tls-key, a `tailscale cert` pair) on a
+//     loopback high port, reached over BOTH the tailnet and the home LAN via a
+//     pf rdr from :443. That keeps one origin (the *.ts.net name) whether or
+//     not Tailscale is up on the client, which the service worker + Web Push
+//     subscription require. See README "Off-tailnet LAN fallback".
 package main
 
 import (
@@ -24,6 +30,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -35,8 +42,12 @@ type config struct {
 	profile      string // agent-deck profile (default for the CLI surface; per-call override-able)
 	proxyProfile string // profile the reverse-proxied agent-deck web is bound to (terminal/push)
 	bin          string // path to the agent-deck binary
+	tmuxBin      string // tmux binary used only to read the live Codex environment
+	homeDir      string // resolved OS home; injectable in tests
 	webDir       string // static PWA directory
 	pushSubject  string // VAPID "sub" contact URI (mailto:/https:); Apple rejects non-routable subjects
+	tlsCert      string // PEM cert (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve
+	tlsKey       string // PEM private key matching tlsCert
 }
 
 func loadConfig() config {
@@ -54,8 +65,11 @@ func loadConfig() config {
 	flag.StringVar(&c.profile, "profile", def("AGENTDECK_PROFILE", "default"), "agent-deck profile (default for the CLI surface)")
 	flag.StringVar(&c.proxyProfile, "proxy-profile", def("DECK_REMOTE_PROXY_PROFILE", ""), "profile the reverse-proxied agent-deck web is bound to (default = --profile); the in-app terminal + push are scoped to it")
 	flag.StringVar(&c.bin, "bin", def("DECK_REMOTE_BIN", "agent-deck"), "path to the agent-deck binary")
+	flag.StringVar(&c.tmuxBin, "tmux-bin", def("DECK_REMOTE_TMUX_BIN", "tmux"), "path to tmux (Codex session metadata resolver)")
 	flag.StringVar(&c.webDir, "web", def("DECK_REMOTE_WEB", filepath.Join(filepathDir(), "web")), "static PWA directory")
 	flag.StringVar(&c.pushSubject, "push-subject", def("DECK_REMOTE_PUSH_SUBJECT", defaultPushSubject), "VAPID 'sub' contact URI (mailto: or https:); Apple rejects non-routable subjects")
+	flag.StringVar(&c.tlsCert, "tls-cert", def("DECK_REMOTE_TLS_CERT", ""), "PEM cert to terminate TLS with (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve")
+	flag.StringVar(&c.tlsKey, "tls-key", def("DECK_REMOTE_TLS_KEY", ""), "PEM key matching --tls-cert")
 	flag.Parse()
 
 	if c.token == "" {
@@ -73,6 +87,7 @@ func loadConfig() config {
 	if c.proxyProfile == "" {
 		c.proxyProfile = c.profile
 	}
+	c.homeDir = home
 	return c
 }
 
@@ -116,9 +131,27 @@ func main() {
 		// No WriteTimeout: SSE and the proxied terminal WS are long-lived.
 	}
 
+	// --tls-cert/--tls-key are all-or-nothing: a half-configured pair would
+	// silently fall back to plain HTTP on a port the phone expects to be HTTPS.
+	if (cfg.tlsCert == "") != (cfg.tlsKey == "") {
+		log.Fatalf("--tls-cert and --tls-key must be given together")
+	}
+	serve := httpSrv.ListenAndServe
+	scheme := "http"
+	if cfg.tlsCert != "" {
+		reloader, err := newCertReloader(cfg.tlsCert, cfg.tlsKey)
+		if err != nil {
+			log.Fatalf("tls: %v", err)
+		}
+		httpSrv.TLSConfig = reloader.tlsConfig()
+		// Certs come from TLSConfig.GetCertificate, so the file args are empty.
+		serve = func() error { return httpSrv.ListenAndServeTLS("", "") }
+		scheme = "https"
+	}
+
 	go func() {
-		log.Printf("deck-remote listening on %s -> agent-deck %s (profile=%s)", cfg.listen, cfg.agentdeckURL, cfg.profile)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("deck-remote listening on %s://%s -> agent-deck %s (profile=%s)", scheme, cfg.listen, cfg.agentdeckURL, cfg.profile)
+		if err := serve(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
 	}()
@@ -132,16 +165,30 @@ func main() {
 }
 
 type server struct {
-	cfg    config
-	proxy  *httputil.ReverseProxy
-	hub    *sseHub
-	queue  *sessionQueues
-	push   *pushManager
-	acts   *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
-	tokens *tokenStore    // per-device tokens (additive to the shared bearer)
+	cfg       config
+	proxy     *httputil.ReverseProxy
+	hub       *sseHub
+	queue     *sessionQueues
+	push      *pushManager
+	acts      *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
+	codex     *codexRolloutStore
+	attn      *attentionCache
+	codexReqs *codexRequestTracker
+	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
+	lists     *listCache  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
+	replies   *replyCache // per-session last-reply cache (transcript-first, mtime-gated)
+
+	// Subprocess counters (see the watcher's periodic exec-stats log). The
+	// whole point of the polling rework is keeping execAdeck near zero at
+	// steady state — these make a regression visible without powermetrics.
+	execAdeck atomic.Int64
+	execTmux  atomic.Int64
 }
 
 func newServer(cfg config, upstream *url.URL) *server {
+	if cfg.homeDir == "" {
+		cfg.homeDir, _ = os.UserHomeDir()
+	}
 	proxy := httputil.NewSingleHostReverseProxy(upstream)
 	proxy.FlushInterval = -1 // stream immediately (SSE / chunked) instead of buffering
 	baseDirector := proxy.Director
@@ -154,14 +201,19 @@ func newServer(cfg config, upstream *url.URL) *server {
 			r.Header.Set("Authorization", "Bearer "+cfg.token)
 		}
 	}
-	home, _ := os.UserHomeDir()
+	home := cfg.homeDir
 	return &server{
-		cfg:    cfg,
-		proxy:  proxy,
-		hub:    newSSEHub(),
-		queue:  newSessionQueues(),
-		acts:   newActivityCache(),
-		tokens: newTokenStore(filepath.Join(home, ".agent-deck")),
+		cfg:       cfg,
+		proxy:     proxy,
+		hub:       newSSEHub(),
+		queue:     newSessionQueues(),
+		acts:      newActivityCache(),
+		codex:     newCodexRolloutStore(),
+		attn:      newAttentionCache(),
+		codexReqs: newCodexRequestTracker(),
+		tokens:    newTokenStore(filepath.Join(home, ".agent-deck")),
+		lists:     newListCache(),
+		replies:   newReplyCache(),
 	}
 }
 
@@ -185,6 +237,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/permission", s.auth(http.HandlerFunc(s.handlePermission)))
 	mux.Handle("GET /api/rc/activity", s.auth(http.HandlerFunc(s.handleActivity)))
 	mux.Handle("POST /api/rc/approve", s.auth(http.HandlerFunc(s.handleApprove)))
+	mux.Handle("GET /api/rc/attention", s.auth(http.HandlerFunc(s.handleAttention)))
+	mux.Handle("POST /api/rc/attention/respond", s.auth(http.HandlerFunc(s.handleAttentionRespond)))
+	mux.Handle("POST /api/rc/interrupt", s.auth(http.HandlerFunc(s.handleInterrupt)))
 	mux.Handle("GET /api/rc/events", s.auth(http.HandlerFunc(s.handleEvents)))
 
 	// deck-remote's OWN Web Push (event-driven via the watcher) — the PWA uses
@@ -193,6 +248,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/rc/push/subscribe", s.auth(http.HandlerFunc(s.handlePushSubscribe)))
 	mux.Handle("POST /api/rc/push/presence", s.auth(http.HandlerFunc(s.handlePushPresence)))
 	mux.Handle("POST /api/rc/push/test", s.auth(http.HandlerFunc(s.handlePushTest)))
+	mux.Handle("POST /api/rc/push/notify", s.auth(http.HandlerFunc(s.handlePushNotify)))
 	mux.Handle("POST /api/rc/push/prefs", s.auth(http.HandlerFunc(s.handlePushPrefs)))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and

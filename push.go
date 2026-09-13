@@ -26,7 +26,7 @@ const defaultPushSubject = "https://github.com/efenex/deck-remote"
 // global (single-user tailnet daemon) and pushed from the PWA via /push/prefs.
 //
 // Kind/pref mapping (the watcher's server vocabulary differs from the client's):
-//   - server Kind "approval" <- client pref Approve   (a permission dialog)
+//   - server Kind "approval"/"question" <- client pref Approve (needs attention)
 //   - server Kind "reply"    <- client pref Finished  (a settled reply)
 //   - server Kind "stall"    <- client pref Stall      (a frozen/hung spinner)
 //
@@ -192,7 +192,7 @@ func (pm *pushManager) allow(kind string) bool {
 		return false
 	}
 	switch kind {
-	case "approval":
+	case "approval", "question":
 		return p.Approve
 	case "reply":
 		return p.Finished
@@ -219,7 +219,7 @@ type pushPayload struct {
 	Title     string `json:"title"`
 	Body      string `json:"body"`
 	SessionID string `json:"sessionId"`
-	Kind      string `json:"kind"` // "reply" | "approval"
+	Kind      string `json:"kind"` // "reply" | "approval" | "question" | "stall"
 }
 
 // sendResult is the per-subscription outcome of a delivery attempt, surfaced by
@@ -323,6 +323,31 @@ func (s *server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	p := pushPayload{Title: "deck-remote test", Body: "If you can read this, push works.", Kind: "test"}
 	res := s.push.sendTo(p)
 	writeJSON(w, http.StatusOK, map[string]any{"sent": len(res), "results": res})
+}
+
+// handlePushNotify delivers an arbitrary caller-supplied notification (local
+// watchdogs, build scripts, cron jobs) through the same pipeline as watcher
+// events. Unlike the test endpoint it goes through pm.send, so foreground
+// suppression and quiet-hours still apply — automation can't spam a
+// foregrounded or sleeping user. Kind defaults to "notify", which passes the
+// per-event filter (unknown kinds are always allowed); callers may pass a
+// known kind ("stall", "reply", …) to opt into that kind's pref toggle.
+func (s *server) handlePushNotify(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		Kind      string `json:"kind"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || strings.TrimSpace(b.Title) == "" {
+		httpError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+	if b.Kind == "" {
+		b.Kind = "notify"
+	}
+	s.push.send(pushPayload{Title: b.Title, Body: preview(b.Body, 140), SessionID: b.SessionID, Kind: b.Kind})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handlePushPrefs stores the server-honored per-event + quiet-hours prefs (global,

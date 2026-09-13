@@ -9,7 +9,7 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v2';
+const CACHE = 'deck-remote-v3';
 const SHELL = [
   '/',
   '/index.html',
@@ -77,8 +77,7 @@ self.addEventListener('fetch', (event) => {
  *
  * Expected payload (best-effort; tolerant of partial/plain-text bodies):
  *   { title, body, sessionId, tag, kind }
- * kind ∈ reply | approval | test (server vocabulary; requireInteraction keys off
- * "approval"). Field names match what pushManager.send() emits in push.go.
+ * kind ∈ reply | approval | question | stall | test.
  */
 self.addEventListener('push', (event) => {
   let data = {};
@@ -102,7 +101,7 @@ self.addEventListener('push', (event) => {
     icon: ICON,
     badge: ICON,
     data: { sessionId, kind: data.kind || '', url: data.url || '/' },
-    requireInteraction: data.kind === 'approval',
+    requireInteraction: data.kind === 'approval' || data.kind === 'question',
   };
 
   event.waitUntil(self.registration.showNotification(title, options));

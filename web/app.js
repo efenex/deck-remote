@@ -5,18 +5,19 @@
  *
  * Detail-first model: the deck leads with each session's real last reply.
  * agent-deck's `status` field is intentionally NOT rendered — it's unreliable
- * in this environment. The Approve panel is gated on a REAL detected dialog
- * (GET /api/rc/permission), never on status.
+ * in this environment. Attention panels are gated on a live rollout/dialog
+ * (GET /api/rc/attention), never on status.
  *
  * Contract (same-origin, bearer-token auth):
  *   GET  /api/rc/sessions    -> {sessions:[{id,title,path,group,tool,lastReply,working,activity,currentTool,...}]}
  *   GET  /api/rc/activity?id -> {working:bool, activity?:string, currentTool?:string} (live probe)
  *   GET  /api/rc/reply?id    -> {claude_session_id,content,role,timestamp}
- *   GET  /api/rc/permission?id -> {pending:bool, text?:string, unavailable?:bool}
- *   POST /api/rc/ask         {sessionId,text} -> 202 {requestId,sessionId,status}
+ *   GET  /api/rc/attention?id -> {pending,kind,id,text?,questions?,actions?}
+ *   POST /api/rc/attention/respond {sessionId,attentionId,action,answers}
+ *   POST /api/rc/ask         {sessionId,text,delivery} -> 202 {requestId,sessionId,status}
  *   POST /api/rc/slash       {sessionId,text} -> same
- *   POST /api/rc/approve     {sessionId} -> {sessionId,approved,cleared?,reason?}
- *   GET  /api/rc/events      (SSE) -> ask-state | reply | slash-result | approve-result
+ *   POST /api/rc/interrupt   {sessionId} -> {sessionId,stopped,state}
+ *   GET  /api/rc/events      (SSE) -> ask-state | reply | slash-result | attention-result
  *   GET  /api/rc/push/config    -> {enabled,publicKey?}
  *   POST /api/rc/push/subscribe   = PushSubscription JSON
  *   POST /api/rc/push/presence    {focused:bool}
@@ -323,23 +324,24 @@
     return Math.floor(ageS / 86400) + 'd ago';
   }
 
-  // Recency for a group's session list: working sessions rank first (Infinity);
-  // otherwise the MAX lastActivity (unix seconds) across the list, 0 if none.
+  // Needs-attention sessions outrank working sessions, then recency.
   function groupRecency(list) {
     let anyWorking = false;
+    let needsAttention = false;
     let max = 0;
     for (const s of list) {
       if (s.working) anyWorking = true;
+      if (s.needsAttention) needsAttention = true;
       const t = Number(s.lastActivity) || 0;
       if (t > max) max = t;
     }
-    return { working: anyWorking, recency: anyWorking ? Infinity : max, last: max };
+    return { working: anyWorking, needsAttention, recency: needsAttention ? Infinity : (anyWorking ? Number.MAX_VALUE : max), last: max };
   }
 
   // Effective collapsed state: a working group is never collapsed; a manual
   // override wins; otherwise default-collapse only when stale (>24h).
   function isGroupCollapsed(name, info) {
-    if (info.working) return false;
+    if (info.working || info.needsAttention) return false;
     if (Object.prototype.hasOwnProperty.call(collapseOverrides, name)) {
       return !!collapseOverrides[name];
     }
@@ -379,7 +381,11 @@
     // Precompute per-group recency so we can sort and label headers.
     const meta = new Map(); // name -> {info, list}
     groups.forEach((list, k) => {
-      const sorted = list.slice().sort((a, b) => (a.title || a.id).localeCompare(b.title || b.id));
+      const sorted = list.slice().sort((a, b) => {
+        if (!!a.needsAttention !== !!b.needsAttention) return a.needsAttention ? -1 : 1;
+        if (!!a.working !== !!b.working) return a.working ? -1 : 1;
+        return (a.title || a.id).localeCompare(b.title || b.id);
+      });
       meta.set(k, { info: groupRecency(sorted), list: sorted });
     });
 
@@ -422,7 +428,7 @@
   // stale default). A working group can't be collapsed.
   function toggleGroup(name, info) {
     const nowCollapsed = isGroupCollapsed(name, info);
-    if (!nowCollapsed && info.working) return; // never collapse a working group
+    if (!nowCollapsed && (info.working || info.needsAttention)) return;
     collapseOverrides[name] = !nowCollapsed;
     saveCollapse(collapseOverrides);
     renderDeck();
@@ -438,6 +444,7 @@
     const harness = el('span', 'harness');
     harness.innerHTML = '<span class="gi">✦</span>' + esc(s.tool || 'agent');
     top.appendChild(harness);
+    if (s.needsAttention) top.appendChild(el('span', 'attention-chip', 'needs you'));
     card.appendChild(top);
 
     // Group/tree crumb.
@@ -590,13 +597,18 @@
 
     // Wire the header "Check for approval" affordance.
     const checkBtn = $('#sheetCheckPerm', sheet);
-    if (checkBtn) checkBtn.addEventListener('click', () => checkPermission(s, true));
+    if (checkBtn) checkBtn.addEventListener('click', () => checkAttention(s, true));
 
     const workingBanner = el('div', 'working-banner');
     workingBanner.id = 'workingBanner';
     workingBanner.hidden = true;
     workingBanner.innerHTML =
-      '<span class="spin"></span><span>Turn in progress — you\'ll get a push when it\'s done. You can keep typing.</span>';
+      '<span class="spin"></span><span class="wb-copy">Turn in progress — you can queue or steer a follow-up.</span>';
+    if (s.capabilities && s.capabilities.interrupt) {
+      const stop = el('button', 'hold-stop', 'Hold to stop');
+      wireHoldToInterrupt(stop, s);
+      workingBanner.appendChild(stop);
+    }
     sheet.appendChild(workingBanner);
 
     // LIVE "what it's doing now" — directly above the composer (Claude Code
@@ -608,6 +620,17 @@
     // Composer + its slash-suggestion popup (relative anchor for the popup).
     const composerWrap = el('div', 'composer-wrap');
 
+    let delivery = 'auto';
+    if (s.capabilities && s.capabilities.steer) {
+      const deliveryRow = el('div', 'delivery-row');
+      deliveryRow.innerHTML = '<span>Busy delivery</span>';
+      const select = el('select', 'delivery-select');
+      select.innerHTML = '<option value="auto">Queue (default)</option><option value="steer">Steer current</option>';
+      select.addEventListener('change', () => { delivery = select.value; });
+      deliveryRow.appendChild(select);
+      composerWrap.appendChild(deliveryRow);
+    }
+
     // Dynamic slash popup: hidden unless the input value starts with '/'.
     const slashPop = el('div', 'slash-pop');
     slashPop.id = 'slashPop';
@@ -618,6 +641,11 @@
     const ta = el('textarea');
     ta.rows = 1;
     ta.placeholder = 'Message ' + (s.title || 'this session') + '… (/ for commands)';
+    const structuredAsk = !s.capabilities || !!s.capabilities.ask;
+    if (!structuredAsk) {
+      ta.disabled = true;
+      ta.placeholder = s.degradedReason || 'Structured controls unavailable — open terminal';
+    }
     ta.addEventListener('input', () => {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 110) + 'px';
@@ -639,8 +667,8 @@
       send.disabled = true;
       hideSlashPop();
       // A leading-slash message is a slash command; otherwise a normal ask.
-      if (text[0] === '/') sendSlash(s.id, text);
-      else sendAsk(s.id, text);
+      if (text[0] === '/') sendSlash(s.id, text, delivery);
+      else sendAsk(s.id, text, delivery);
     });
     composer.appendChild(ta);
     composer.appendChild(send);
@@ -656,7 +684,7 @@
 
     renderConvo(s.id);
     loadHistory(s.id);
-    checkPermission(s, false); // auto-check for a real pending dialog on open
+    checkAttention(s, false); // questions and approvals are live, guarded forms
 
     // If the agent is already idle on open, reconcile the transcript tail once
     // shortly after history lands — covers a reply that finished just BEFORE we
@@ -672,7 +700,7 @@
   // ----- dynamic slash-command popup -----
   // The known slash commands (label + short hint). Tapping or sending one
   // routes through the existing /api/rc/slash path (sendSlash).
-  const SLASH_COMMANDS = [
+  const FALLBACK_SLASH_COMMANDS = [
     { cmd: '/compact', desc: 'condense the conversation' },
     { cmd: '/context', desc: 'show context usage' },
     { cmd: '/clear', desc: 'clear the conversation' },
@@ -693,7 +721,12 @@
     // Only a single leading-slash token (no space yet) triggers suggestions.
     if (v[0] !== '/' || /\s/.test(v)) { hideSlashPop(); return; }
     const q = v.toLowerCase();
-    const matches = SLASH_COMMANDS.filter((c) => c.cmd.toLowerCase().indexOf(q) === 0);
+    const session = state.sessions.get(id);
+    const advertised = session && session.capabilities && session.capabilities.slashCommands;
+    const commands = Array.isArray(advertised) && advertised.length
+      ? advertised.map((c) => ({ cmd: c.command, desc: c.description }))
+      : FALLBACK_SLASH_COMMANDS;
+    const matches = commands.filter((c) => c.cmd.toLowerCase().indexOf(q) === 0);
     if (!matches.length) { hideSlashPop(); return; }
     pop.innerHTML = '';
     matches.forEach((c) => {
@@ -717,7 +750,7 @@
     const send = ta.parentElement && ta.parentElement.querySelector('.send-btn');
     if (send) send.disabled = true;
     hideSlashPop();
-    sendSlash(id, cmd);
+    sendSlash(id, cmd, 'auto');
   }
 
   // ----- swipe-to-dismiss gestures -----
@@ -825,6 +858,8 @@
     if (state.openSheetId !== id) return;
     const live = $('#liveActivity');
     if (!live) return;
+    const wb = $('#workingBanner');
+    if (wb) wb.hidden = !(a && a.working) && !state.pending.has(id);
     if (a && a.working) {
       const stalled = !!(a && a.stalled);
       live.className = 'live-activity working' + (stalled ? ' stalled' : '');
@@ -842,6 +877,31 @@
       live.innerHTML = '<div class="la-row"><span class="la-dot"></span>' +
         '<span class="la-text">idle · waiting</span></div>';
     }
+  }
+
+  function wireHoldToInterrupt(button, s) {
+    const HOLD_MS = 900;
+    let timer = null, fired = false;
+    const begin = (e) => {
+      e.preventDefault(); fired = false; button.classList.add('armed'); button.textContent = 'Keep holding…';
+      timer = setTimeout(async () => {
+        fired = true; button.disabled = true; button.textContent = 'Stopping…';
+        try {
+          const r = await api('POST', '/api/rc/interrupt', { sessionId: s.id, profile: CURRENT_PROFILE });
+          button.textContent = r && r.stopped ? 'Stopped' : 'Stop sent';
+        } catch (err) {
+          button.disabled = false; button.classList.remove('armed'); button.textContent = 'Hold to stop';
+          toast(s.title || 'Session', 'Interrupt failed: ' + err.message);
+        }
+      }, HOLD_MS);
+    };
+    const cancel = () => {
+      if (fired) return;
+      clearTimeout(timer); button.classList.remove('armed'); button.textContent = 'Hold to stop';
+    };
+    button.addEventListener('mousedown', begin);
+    button.addEventListener('touchstart', begin, { passive: false });
+    ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((ev) => button.addEventListener(ev, cancel));
   }
 
   function startActivityPoll(id) {
@@ -913,11 +973,12 @@
     }
   }
 
-  // Map a history entry (role "user"|"reply", unix-seconds ts) onto a convo turn.
+  // Map a history entry (role "user"|"reply"|"commentary", unix-seconds ts)
+  // onto a convo turn. Commentary is reply-shaped but remains a distinct row.
   function historyToTurn(m) {
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
-    return { role, content, ts: m.ts };
+    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '' };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
@@ -1051,18 +1112,18 @@
 
     // Build a per-role multiset of trimmed contents already present so repeated
     // identical messages still dedup one-for-one (don't drop a genuine repeat).
-    const seen = new Map(); // key `${role}\n${trimmedContent}` -> remaining count
+    const seen = new Map(); // key `${role}\n${kind}\n${trimmedContent}` -> remaining count
     conv.forEach((e) => {
       if (e.role !== 'me' && e.role !== 'reply') return;
       if (e.content == null) return;
-      const key = e.role + '\n' + String(e.content).trim();
+      const key = e.role + '\n' + (e.kind || '') + '\n' + String(e.content).trim();
       seen.set(key, (seen.get(key) || 0) + 1);
     });
 
     let appended = 0;
     msgs.forEach((m) => {
       const turn = historyToTurn(m); // {role:'me'|'reply', content, ts}
-      const key = turn.role + '\n' + String(turn.content || '').trim();
+      const key = turn.role + '\n' + (turn.kind || '') + '\n' + String(turn.content || '').trim();
       const left = seen.get(key) || 0;
       if (left > 0) { seen.set(key, left - 1); return; } // already in thread
       conv.push(turn);
@@ -1117,11 +1178,13 @@
         convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
       } else if (e.role === 'reply') {
         // Merge consecutive 'reply' entries (one Claude turn can yield several
-        // assistant text entries) into a single row; skip those folded in.
-        if (i > 0 && conv[i - 1].role === 'reply') return;
+        // assistant text entries) into a single row. Codex commentary remains
+        // discrete so intermediary progress is durably readable message by
+        // message instead of being folded into the eventual final answer.
+        if (!e.kind && i > 0 && conv[i - 1].role === 'reply' && !conv[i - 1].kind) return;
         let content = e.content;
         let last = e;
-        for (let j = i + 1; j < conv.length && conv[j].role === 'reply'; j++) {
+        for (let j = i + 1; !e.kind && j < conv.length && conv[j].role === 'reply' && !conv[j].kind; j++) {
           content += '\n\n' + conv[j].content;
           last = conv[j];
         }
@@ -1168,12 +1231,15 @@
     const pend = state.pending.get(id);
     if (pend) {
       const p = el('div', 'pending');
+      const session = state.sessions.get(id);
+      const agent = session && session.tool === 'codex' ? 'Codex' : 'Claude';
       p.innerHTML = '<span class="tdots"><i></i><i></i><i></i></span>' +
-        '<span>Claude is working… <span class="ctx">' + esc(pend.ctx || 'thinking') + '</span></span>';
+        '<span>' + agent + ' is working… <span class="ctx">' + esc(pend.ctx || 'thinking') + '</span></span>';
       convo.appendChild(p);
     }
     const wb = $('#workingBanner');
-    if (wb) wb.hidden = !pend;
+    const openSession = state.sessions.get(id);
+    if (wb) wb.hidden = !(pend || (openSession && openSession.working));
 
     // Older-paging re-renders restore scroll position themselves (the caller
     // anchors on inserted height); everything else sticks to the bottom.
@@ -1202,10 +1268,10 @@
   }
 
   // ----- ask / slash -----
-  async function sendAsk(id, text) { await doSend(id, text, false); }
-  async function sendSlash(id, text) { await doSend(id, text, true); }
+  async function sendAsk(id, text, delivery) { await doSend(id, text, false, delivery); }
+  async function sendSlash(id, text, delivery) { await doSend(id, text, true, delivery); }
 
-  async function doSend(id, text, slash) {
+  async function doSend(id, text, slash, delivery) {
     const conv = ensureConvo(id);
     conv.push({ role: 'me', content: text, ts: Date.now() / 1000, queued: true });
     // Non-blocking pending state shown immediately.
@@ -1215,7 +1281,7 @@
 
     try {
       const path = slash ? '/api/rc/slash' : '/api/rc/ask';
-      const r = await api('POST', path, { sessionId: id, text, profile: CURRENT_PROFILE });
+      const r = await api('POST', path, { sessionId: id, text, profile: CURRENT_PROFILE, delivery: delivery || 'auto' });
       if (r && r.requestId) {
         // tag the pending row so the matching reply event resolves it
         const pend = state.pending.get(id) || {};
@@ -1230,31 +1296,33 @@
     }
   }
 
-  // ----- gated approve -----
-  // Ask the server whether a REAL permission dialog is on screen. Only render
-  // the Approve control when pending:true. Never inferred from status.
-  async function checkPermission(s, userInitiated) {
+  // ----- attention: guarded approvals + request_user_input forms -----
+  async function checkAttention(s, userInitiated) {
     const mount = $('#approveMount');
     if (!mount || state.openSheetId !== s.id) return;
 
     const btn = $('#sheetCheckPerm');
     if (btn) btn.classList.add('busy');
     try {
-      const r = await api('GET', '/api/rc/permission?id=' + encodeURIComponent(s.id));
+      const r = await api('GET', '/api/rc/attention?id=' + encodeURIComponent(s.id));
       if (state.openSheetId !== s.id) return;
       if (r && r.pending) {
-        renderApprovePanel(s, r.text || '');
+        s.needsAttention = true;
+        if (r.kind === 'question') renderQuestionPanel(s, r);
+        else renderApprovePanel(s, r);
       } else if (r && r.unavailable) {
         mount.innerHTML = '';
-        if (userInitiated) mount.appendChild(approveNote('Couldn\'t read this session\'s screen.'));
+        if (userInitiated) mount.appendChild(approveNote('Couldn\'t verify this session\'s live attention state.'));
       } else {
+        s.needsAttention = false;
         mount.innerHTML = '';
-        if (userInitiated) mount.appendChild(approveNote('No pending approval.'));
+        if (userInitiated) mount.appendChild(approveNote('No pending approval or question.'));
       }
+      renderDeck();
     } catch (e) {
       if (state.openSheetId !== s.id) return;
       mount.innerHTML = '';
-      if (userInitiated) mount.appendChild(approveNote('Couldn\'t check approval: ' + e.message));
+      if (userInitiated) mount.appendChild(approveNote('Couldn\'t check attention: ' + e.message));
     } finally {
       if (btn) btn.classList.remove('busy');
     }
@@ -1267,7 +1335,7 @@
   }
 
   // Render the Approve panel with the ACTUAL permission text the server read.
-  function renderApprovePanel(s, permText) {
+  function renderApprovePanel(s, info) {
     const mount = $('#approveMount');
     if (!mount) return;
     const wrap = el('div', 'approve-card');
@@ -1280,97 +1348,105 @@
           '<div class="label">Permission request</div>' +
           '<pre class="perm-text" id="permText"></pre>' +
         '</div>' +
-        '<div class="hold-approve" id="holdApprove"><div class="hold-fill" id="holdFill"></div>' +
-          '<div class="hold-label" id="holdLabel">Hold to approve</div></div>' +
-        '<div class="approve-foot" id="approveFoot">Approving sends the confirm keystroke to the live dialog. ' +
-          'To deny, reply with guidance instead.</div>' +
+        '<div class="approval-actions" id="approvalActions"></div>' +
+        '<div class="approve-foot" id="approveFoot">The server revalidates the exact live dialog before sending any key.</div>' +
       '</div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
     // Set the real text as textContent so line breaks/monospace are preserved
     // verbatim and nothing is interpreted as HTML.
-    $('#permText', wrap).textContent = permText || '(the server reported a pending dialog but returned no text)';
-
-    wireHoldToApprove(wrap, s);
+    $('#permText', wrap).textContent = info.text || '(no request text returned)';
+    const actions = $('#approvalActions', wrap);
+    const labels = { 'approve-once': 'Hold: approve once', 'approve-prefix': 'Hold: approve prefix', decline: 'Decline' };
+    (info.actions || []).forEach((action) => {
+      const b = el('button', action === 'decline' ? 'attention-action decline' : 'attention-action');
+      b.textContent = labels[action] || action;
+      if (action === 'decline') b.addEventListener('click', () => respondAttention(s, info, action, []));
+      else wireHoldAction(b, () => respondAttention(s, info, action, []));
+      actions.appendChild(b);
+    });
+    if (!actions.children.length) actions.appendChild(approveNote('This live dialog is not unambiguous enough for remote approval. Use the terminal.'));
   }
 
-  // Real press-and-hold (~800ms) with a fill ring; early release cancels.
-  function wireHoldToApprove(wrap, s) {
-    const hold = $('#holdApprove', wrap);
-    const fill = $('#holdFill', wrap);
-    const label = $('#holdLabel', wrap);
-    const HOLD_MS = 800;
-    let raf = null, start = 0, done = false;
-
-    function begin(e) {
-      if (done) return;
+  function renderQuestionPanel(s, info) {
+    const mount = $('#approveMount');
+    if (!mount) return;
+    const wrap = el('div', 'approve-card question-card');
+    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Codex needs input</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
+    mount.innerHTML = '';
+    mount.appendChild(wrap);
+    const form = $('#questionForm', wrap);
+    (info.questions || []).forEach((q) => {
+      const field = el('fieldset', 'question-field');
+      const legend = el('legend', null, q.header || 'Question');
+      field.appendChild(legend);
+      field.appendChild(el('div', 'question-text', q.question || ''));
+      (q.options || []).forEach((opt, i) => {
+        const label = el('label', 'question-option');
+        const input = document.createElement('input');
+        input.type = 'radio'; input.name = q.id; input.value = opt.label; input.required = true;
+        label.appendChild(input);
+        const copy = el('span');
+        copy.innerHTML = '<b>' + esc(opt.label) + '</b>' + (opt.description ? '<small>' + esc(opt.description) + '</small>' : '');
+        label.appendChild(copy); field.appendChild(label);
+      });
+      const custom = el('label', 'question-option');
+      const radio = document.createElement('input');
+      radio.type = 'radio'; radio.name = q.id; radio.value = '__other__'; radio.required = true;
+      const text = document.createElement('input');
+      text.type = 'text'; text.className = 'question-freeform'; text.placeholder = 'Other answer';
+      text.addEventListener('focus', () => { radio.checked = true; });
+      custom.appendChild(radio); custom.appendChild(text); field.appendChild(custom);
+      form.appendChild(field);
+    });
+    const submit = el('button', 'question-submit', 'Submit answers');
+    submit.type = 'submit'; form.appendChild(submit);
+    form.addEventListener('submit', (e) => {
       e.preventDefault();
-      start = performance.now();
-      hold.classList.add('armed');
-      label.textContent = 'Keep holding…';
-      tick();
-    }
-    function tick() {
-      const p = Math.min(1, (performance.now() - start) / HOLD_MS);
-      fill.style.width = (p * 100) + '%';
-      if (p >= 1) { finish(); return; }
-      raf = requestAnimationFrame(tick);
-    }
-    function cancel() {
-      if (done) return;
-      cancelAnimationFrame(raf);
-      fill.style.width = '0%';
-      hold.classList.remove('armed');
-      label.textContent = 'Hold to approve';
-    }
-    function finish() {
-      done = true;
-      cancelAnimationFrame(raf);
-      fill.style.width = '100%';
-      hold.classList.add('done', 'busy');
-      label.textContent = '✓ Approving…';
-      doApprove(s);
-    }
-    hold.addEventListener('mousedown', begin);
-    hold.addEventListener('touchstart', begin, { passive: false });
-    ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((ev) => hold.addEventListener(ev, cancel));
+      const answers = [];
+      for (const q of (info.questions || [])) {
+        const checked = form.querySelector('input[type=radio][name="' + CSS.escape(q.id) + '"]:checked');
+        if (!checked) return;
+        let answer = checked.value;
+        if (answer === '__other__') {
+          answer = checked.parentElement.querySelector('.question-freeform').value.trim();
+          if (!answer) return;
+        }
+        answers.push({ id: q.id, answer });
+      }
+      submit.disabled = true;
+      respondAttention(s, info, 'answer', answers);
+    });
   }
 
-  function resetHold() {
-    const hold = $('#holdApprove');
-    if (hold) {
-      hold.classList.remove('done', 'busy', 'armed');
-      const f = $('#holdFill'); if (f) f.style.width = '0%';
-      const l = $('#holdLabel'); if (l) l.textContent = 'Hold to approve';
-    }
+  function wireHoldAction(button, action) {
+    const HOLD_MS = 800;
+    let timer = null, fired = false;
+    const begin = (e) => {
+      e.preventDefault(); fired = false; button.classList.add('armed');
+      timer = setTimeout(() => { fired = true; button.disabled = true; action(); }, HOLD_MS);
+    };
+    const cancel = () => { if (!fired) { clearTimeout(timer); button.classList.remove('armed'); } };
+    button.addEventListener('mousedown', begin);
+    button.addEventListener('touchstart', begin, { passive: false });
+    ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((ev) => button.addEventListener(ev, cancel));
   }
 
-  async function doApprove(s) {
+  async function respondAttention(s, info, action, answers) {
     try {
-      const r = await api('POST', '/api/rc/approve', { sessionId: s.id, profile: CURRENT_PROFILE });
-      if (r && r.approved) {
-        const conv = ensureConvo(s.id);
-        conv.push({
-          role: 'approved', bad: false,
-          html: '✅ Approved' + (r.cleared ? ' · dialog cleared' : ' · sent (confirming…)') + ' · ' + fmtTime(),
-        });
-        // Dialog handled — remove the approve panel and drop into the thread.
-        const mount = $('#approveMount');
-        if (mount) mount.innerHTML = '';
-        state.pending.set(s.id, { ctx: 'running approved action' });
-        renderConvo(s.id);
-      } else {
-        // approved=false with reason = safe no-op (no dialog on screen).
-        const reason = (r && r.reason) || 'No permission dialog on screen.';
-        const foot = $('#approveFoot');
-        if (foot) { foot.textContent = reason + ' Nothing was sent.'; foot.style.color = 'var(--yellow)'; }
-        resetHold();
-        toast(s.title || 'Session', reason);
+      const r = await api('POST', '/api/rc/attention/respond', {
+        sessionId: s.id, profile: CURRENT_PROFILE, attentionId: info.id, action, answers: answers || [],
+      });
+      if (r && r.responded) {
+        s.needsAttention = false;
+        const mount = $('#approveMount'); if (mount) mount.innerHTML = '';
+        ensureConvo(s.id).push({ role: 'note', content: '✓ response sent' + (r.cleared ? '' : ' · confirming…'), ts: Date.now() / 1000 });
+        renderConvo(s.id); renderDeck();
       }
     } catch (e) {
       const foot = $('#approveFoot');
-      if (foot) { foot.textContent = 'Approve failed: ' + e.message; foot.style.color = 'var(--red)'; }
-      resetHold();
+      if (foot) { foot.textContent = 'Response failed: ' + e.message; foot.style.color = 'var(--red)'; }
+      checkAttention(s, false);
     }
   }
 
@@ -1406,10 +1482,11 @@
   function handleRCEvent(ev) {
     if (!ev || !ev.type) return;
     const id = ev.sessionId;
-    if (ev.type === 'ask-state' && ev.state === 'sent') {
+    if (ev.type === 'ask-state' && (ev.state === 'sent' || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
       if (id && !state.pending.has(id)) state.pending.set(id, { ctx: 'thinking', requestId: ev.requestId });
       renderConvo(id);
+      if (ev.state === 'steered' && id && state.openSheetId === id) toast('Steered', 'Injected into the current Codex turn.');
     } else if (ev.type === 'ask-state' && ev.state === 'queued') {
       // Busy-session delivery: the message was injected into Claude's live composer
       // and queued natively (runs after the current turn). No "reply" event follows
@@ -1418,7 +1495,9 @@
       state.pending.delete(id);
       renderConvo(id);
       renderDeck();
-      if (state.openSheetId === id) toast('Queued', 'Claude will run it after the current turn.');
+      if (state.openSheetId === id) toast('Queued', 'The agent will run it after the current turn.');
+    } else if (ev.type === 'ask-state' && ev.state === 'stopping') {
+      if (id && state.openSheetId === id) toast('Stopping', 'Interrupt sent; waiting for rollout confirmation.');
     } else if (ev.type === 'reply') {
       const conv = ensureConvo(id);
       const pend = state.pending.get(id);
@@ -1452,13 +1531,13 @@
       renderConvo(id);
       renderDeck();
     } else if (ev.type === 'approve-result') {
-      // The approve outcome is reflected inline by doApprove. If the SSE event
-      // reports an outcome for the open session, surface it too.
-      if (id && state.openSheetId === id && ev.approved === false) {
-        const foot = $('#approveFoot');
-        const reason = ev.reason || 'No permission dialog on screen.';
-        if (foot) { foot.textContent = reason + ' Nothing was sent.'; foot.style.color = 'var(--yellow)'; }
-        resetHold();
+      if (id && state.openSheetId === id) {
+        const s = state.sessions.get(id); if (s) checkAttention(s, false);
+      }
+    } else if (ev.type === 'attention-result') {
+      if (id && state.openSheetId === id && ev.responded) {
+        const s = state.sessions.get(id);
+        if (s) { s.needsAttention = false; checkAttention(s, false); }
       }
     }
   }

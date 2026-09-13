@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-10T12:00:00Z","type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","cli_version":"0.145.0"}}
+{"timestamp":"2026-07-10T12:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"future-turn"}}

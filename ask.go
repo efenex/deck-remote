@@ -62,6 +62,9 @@ type askRequest struct {
 	// Profile optionally scopes the turn to a non-default agent-deck profile
 	// (matches the ?profile= override on the GET surface). Empty = cfg.profile.
 	Profile string `json:"profile"`
+	// Delivery controls Codex while it is busy: auto (default) queues with Tab,
+	// queue explicitly queues, and steer injects into the current turn with Enter.
+	Delivery string `json:"delivery"`
 }
 
 // POST /api/rc/ask {sessionId, text} — inject a prompt and deliver the reply
@@ -86,12 +89,20 @@ func (s *server) ask(w http.ResponseWriter, r *http.Request, slash bool) {
 	req.SessionID = strings.TrimSpace(req.SessionID)
 	req.Text = strings.TrimSpace(req.Text)
 	req.Profile = strings.TrimSpace(req.Profile)
+	req.Delivery = strings.ToLower(strings.TrimSpace(req.Delivery))
 	if req.SessionID == "" || req.Text == "" {
 		httpError(w, http.StatusBadRequest, "sessionId and text required")
 		return
 	}
 	if slash && !strings.HasPrefix(req.Text, "/") {
 		req.Text = "/" + req.Text
+	}
+	if req.Delivery == "" {
+		req.Delivery = "auto"
+	}
+	if req.Delivery != "auto" && req.Delivery != "queue" && req.Delivery != "steer" {
+		httpError(w, http.StatusBadRequest, "delivery must be auto, queue, or steer")
+		return
 	}
 
 	// Resolve to a concrete session id and reject unknown sessions early.
@@ -100,6 +111,14 @@ func (s *server) ask(w http.ResponseWriter, r *http.Request, slash bool) {
 	cancel()
 	if err != nil {
 		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if se.Tool == "codex" {
+		s.handleCodexAsk(w, r, se, req, slash)
+		return
+	}
+	if req.Delivery == "steer" {
+		httpError(w, http.StatusBadRequest, "steer delivery is supported only by Codex")
 		return
 	}
 
@@ -126,6 +145,71 @@ func (s *server) ask(w http.ResponseWriter, r *http.Request, slash bool) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"requestId": reqID, "sessionId": se.ID, "status": "sent"})
 }
 
+type codexDeliveryOutcome struct {
+	result deliveryResult
+	snap   harnessSnapshot
+	err    error
+}
+
+func (s *server) handleCodexAsk(w http.ResponseWriter, r *http.Request, se sessionInfo, req askRequest, slash bool) {
+	reqID := newRequestID()
+	done := make(chan codexDeliveryOutcome, 1)
+	prof := req.Profile
+	deliveryCtx, deliveryCancel := context.WithTimeout(withProfile(context.Background(), prof), 20*time.Second)
+	defer deliveryCancel()
+	queued := s.queue.submit(se.ID, func() {
+		adapter := s.adapterFor(se)
+		snap, err := adapter.Snapshot(deliveryCtx, se, "", false)
+		if err != nil || snap.DegradedReason != "" {
+			if err == nil {
+				err = fmt.Errorf("%s", snap.DegradedReason)
+			}
+			done <- codexDeliveryOutcome{snap: snap, err: err}
+			return
+		}
+		pane, paneErr := s.sessionPane(deliveryCtx, se.ID)
+		if paneErr != nil {
+			done <- codexDeliveryOutcome{snap: snap, err: fmt.Errorf("could not read live pane: %w", paneErr)}
+			return
+		}
+		result, err := adapter.Deliver(deliveryCtx, se, req.Text, req.Delivery, pane, true)
+		done <- codexDeliveryOutcome{result: result, snap: snap, err: err}
+	})
+	if !queued {
+		httpError(w, http.StatusTooManyRequests, "session busy: queue full")
+		return
+	}
+	var outcome codexDeliveryOutcome
+	select {
+	case <-r.Context().Done():
+		httpError(w, http.StatusRequestTimeout, "delivery timed out")
+		return
+	case outcome = <-done:
+	}
+	if outcome.err != nil {
+		httpError(w, http.StatusConflict, outcome.err.Error())
+		return
+	}
+	state := outcome.result.State
+	s.hub.publish(map[string]any{
+		"type": "ask-state", "state": state, "requestId": reqID,
+		"sessionId": se.ID, "text": req.Text, "slash": slash, "ts": time.Now().Unix(),
+	})
+	if slash {
+		s.hub.publish(map[string]any{
+			"type": "slash-result", "requestId": reqID, "sessionId": se.ID,
+			"command": req.Text, "ok": true, "state": state, "ts": time.Now().Unix(),
+		})
+	} else {
+		s.codexReqs.add(se.ID, codexPendingRequest{
+			RequestID: reqID, Text: req.Text, Baseline: outcome.snap.Sequence,
+		})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"requestId": reqID, "sessionId": se.ID, "status": state,
+	})
+}
+
 // runTurn sends the prompt with --wait in a background goroutine (off the HTTP
 // request) so a multi-minute turn is fine, then publishes the reply over SSE.
 // --wait reuses agent-deck's own turn-completion + fresh-output logic, so we
@@ -147,10 +231,14 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 		log.Printf("ask: runTurn QUEUE (busy) session=%s req=%s text=%q", se.ID, reqID, text)
 		if err := s.sendNoWait(dctx, se.ID, text); err != nil {
 			log.Printf("ask: runTurn QUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
-			s.hub.publish(map[string]any{
+			ev := map[string]any{
 				"type": "reply", "requestId": reqID, "sessionId": se.ID,
 				"error": "couldn't deliver while busy: " + err.Error(), "ts": time.Now().Unix(),
-			})
+			}
+			for k, v := range sendErrorFields(err) {
+				ev[k] = v
+			}
+			s.hub.publish(ev)
 			return
 		}
 		s.hub.publish(map[string]any{
@@ -161,17 +249,23 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 	}
 
 	log.Printf("ask: runTurn START session=%s req=%s text=%q", se.ID, reqID, text)
-	out, err := s.adeck(ctx, "session", "send", se.ID, text,
+	// --json makes agent-deck emit its delivery status object first and the
+	// reply body after it; adeckSend hands back only the body.
+	out, err := s.adeckSend(ctx, "session", "send", se.ID, text,
 		"--wait", "--timeout", fmt.Sprintf("%.0fs", maxTurn.Seconds()))
 	if err != nil {
 		log.Printf("ask: runTurn ERROR session=%s req=%s: %v", se.ID, reqID, err)
-		s.hub.publish(map[string]any{
+		ev := map[string]any{
 			"type": "reply", "requestId": reqID, "sessionId": se.ID,
 			"error": err.Error(), "ts": time.Now().Unix(),
-		})
+		}
+		for k, v := range sendErrorFields(err) {
+			ev[k] = v
+		}
+		s.hub.publish(ev)
 		return
 	}
-	reply := cleanReplyContent(strings.TrimRight(string(out), "\n"))
+	reply := cleanReplyContent(strings.TrimRight(out, "\n"))
 	log.Printf("ask: runTurn OK session=%s req=%s replyLen=%d", se.ID, reqID, len(reply))
 	s.hub.publish(map[string]any{
 		"type": "reply", "requestId": reqID, "sessionId": se.ID,
@@ -252,13 +346,17 @@ func (s *server) runSlash(se sessionInfo, text, reqID, prof string) {
 
 	// --timeout bounds the readiness/gate wait (a busy session); default mode
 	// (no --wait/--no-wait) gates + sends, then prints "Sent message" and returns.
-	_, err := s.adeck(ctx, "session", "send", se.ID, text, "--timeout", "30s")
+	_, err := s.adeckSend(ctx, "session", "send", se.ID, text, "--timeout", "30s")
 	if err != nil {
 		log.Printf("slash: ERROR session=%s req=%s: %v", se.ID, reqID, err)
-		s.hub.publish(map[string]any{
+		ev := map[string]any{
 			"type": "slash-result", "requestId": reqID, "sessionId": se.ID,
 			"command": text, "error": err.Error(), "ts": time.Now().Unix(),
-		})
+		}
+		for k, v := range sendErrorFields(err) {
+			ev[k] = v
+		}
+		s.hub.publish(ev)
 		return
 	}
 

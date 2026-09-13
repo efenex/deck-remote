@@ -42,9 +42,11 @@ func queryInt(r *http.Request, key string, def, lo, hi int) int {
 // (command wrappers, tool results, system reminders, meta).
 
 type histMsg struct {
-	Role    string `json:"role"` // "user" | "reply"
+	Role    string `json:"role"` // "user" | "reply" | "commentary"
 	Content string `json:"content"`
 	Ts      int64  `json:"ts"` // unix seconds, 0 if unknown
+	TurnID  string `json:"-"`
+	Seq     int64  `json:"-"`
 }
 
 type jsonlLine struct {
@@ -286,24 +288,13 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" {
+	if se.Tool != "claude" && se.Tool != "codex" {
 		writeJSON(w, http.StatusOK, map[string]any{"messages": []histMsg{}, "hasMore": false})
 		return
 	}
-	// Resolve the claude session id (session output --json carries it).
-	out, err := s.sessionReply(ctx, se.ID)
+	all, err := s.adapterFor(se).History(ctx, se)
 	if err != nil {
-		httpError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	path := findTranscript(out.ClaudeSessionID, se.Path)
-	if path == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"messages": []histMsg{}, "hasMore": false})
-		return
-	}
-	all, err := parseTranscript(path)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, err.Error())
+		httpError(w, http.StatusNotImplemented, err.Error())
 		return
 	}
 	// Window: the `limit` messages ending `offset` from the newest.

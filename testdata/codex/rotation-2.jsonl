@@ -1,0 +1,3 @@
+{"timestamp":"2026-07-10T11:00:03Z","type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222","cli_version":"0.144.0"}}
+{"timestamp":"2026-07-10T11:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"rotation complete","phase":"final_answer"}}
+{"timestamp":"2026-07-10T11:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}

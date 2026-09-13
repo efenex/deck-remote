@@ -54,10 +54,14 @@ func stepStall(prev activityState, parsed activityInfo, now time.Time) activityS
 		next.lastChangeAt = now
 		return next
 	}
-	// Working: track whether the activity string moved since last poll. An empty
+	stallKey := parsed.Activity
+	if parsed.stallKeySet {
+		stallKey = parsed.stallKey
+	}
+	// Working: track whether the activity/progress identity moved since last poll. An empty
 	// activity string (spinner present but no parsed label) does not count as a
 	// stall signal — we only stall on a concrete, unchanging label.
-	if parsed.Activity != "" && parsed.Activity == prev.lastActivity {
+	if stallKey != "" && stallKey == prev.lastActivity {
 		next.sameCount = prev.sameCount + 1
 		next.lastChangeAt = prev.lastChangeAt
 		if next.lastChangeAt.IsZero() {
@@ -67,10 +71,10 @@ func stepStall(prev activityState, parsed activityInfo, now time.Time) activityS
 		next.sameCount = 1
 		next.lastChangeAt = now
 	}
-	next.lastActivity = parsed.Activity
+	next.lastActivity = stallKey
 	// Stalled once the same concrete label has persisted across >=stallThreshold
 	// polls. working stays true — we add a separate flag, never silently flip it.
-	next.Stalled = parsed.Activity != "" && next.sameCount >= stallThreshold
+	next.Stalled = stallKey != "" && next.sameCount >= stallThreshold
 	return next
 }
 

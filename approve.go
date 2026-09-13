@@ -63,8 +63,8 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" {
-		httpError(w, http.StatusBadRequest, "guarded approve is Claude-only in v0")
+	if se.Tool != "claude" && se.Tool != "codex" {
+		httpError(w, http.StatusBadRequest, "guarded approve is unavailable for this harness")
 		return
 	}
 
@@ -73,9 +73,37 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadGateway, "could not read pane: "+err.Error())
 		return
 	}
-	if !isClaudePermissionPrompt(pane) {
+	info, infoErr := s.adapterFor(se).Attention(ctx, se, pane, true)
+	if infoErr != nil || !info.Pending || info.Kind != "approval" {
 		// Safe no-op: nothing to approve.
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": se.ID, "approved": false, "reason": "no permission dialog on screen"})
+		return
+	}
+	if se.Tool == "codex" {
+		result, respondErr := s.adapterFor(se).RespondAttention(ctx, se, attentionResponseRequest{
+			SessionID: se.ID, AttentionID: info.ID, Action: "approve-once",
+		})
+		if respondErr != nil {
+			httpError(w, http.StatusConflict, respondErr.Error())
+			return
+		}
+		s.hub.publish(map[string]any{
+			"type": "approve-result", "sessionId": se.ID,
+			"approved": result.Responded, "cleared": result.Cleared, "ts": time.Now().Unix(),
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": se.ID, "approved": result.Responded, "cleared": result.Cleared})
+		return
+	}
+
+	// Close the read-to-key race for the compatibility endpoint too.
+	pane, err = s.sessionPane(ctx, se.ID)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "could not revalidate pane: "+err.Error())
+		return
+	}
+	current, _ := s.adapterFor(se).Attention(ctx, se, pane, true)
+	if !current.Pending || current.ID != info.ID {
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": se.ID, "approved": false, "reason": "permission dialog changed before approval"})
 		return
 	}
 

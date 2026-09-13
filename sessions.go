@@ -29,8 +29,8 @@ func httpError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]any{"error": msg})
 }
 
-// GET /api/rc/sessions — sessions + a best-effort last-reply preview for each
-// Claude session. The PWA is detail-first: agent-deck's status is unreliable in
+// GET /api/rc/sessions — sessions + best-effort harness snapshots. The PWA is
+// detail-first: agent-deck's status is unreliable in
 // some setups (stale registry / churn), so we surface the real last reply
 // (transcript-based, name-independent) rather than a status chip.
 func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -42,14 +42,11 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Concurrently fetch last-reply previews (bounded). Failures (no transcript,
-	// non-Claude) just leave LastReply empty — never an error for the list.
+	// Concurrently fetch structured snapshots (bounded). Unsupported/custom
+	// harnesses remain listed with terminal-only capabilities.
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 6)
 	for i := range sessions {
-		if sessions[i].Tool != "claude" {
-			continue
-		}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -57,17 +54,26 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			defer func() { <-sem }()
 			rctx, rc := context.WithTimeout(ctx, 5*time.Second)
 			defer rc()
-			if out, err := s.sessionReply(rctx, sessions[i].ID); err == nil {
-				sessions[i].LastReply = preview(cleanReplyContent(out.Content), 160)
-				if t, perr := time.Parse(time.RFC3339, out.Timestamp); perr == nil {
-					sessions[i].LastActivity = t.Unix()
+			adapter := s.adapterFor(sessions[i])
+			snap, snapErr := adapter.Snapshot(rctx, sessions[i], "", false)
+			if snapErr == nil {
+				if snap.DegradedReason == "" {
+					sessions[i].Capabilities = adapter.Capabilities(rctx, sessions[i])
 				}
+				sessions[i].LastReply = preview(snap.LastReply, 160)
+				sessions[i].LastActivity = snap.LastActivity
+				sessions[i].Working = snap.Activity.Working
+				sessions[i].Activity = snap.Activity.Activity
+				sessions[i].CurrentTool = snap.Activity.CurrentTool
+				sessions[i].Stalled = snap.Activity.Stalled
+				sessions[i].State = snap.State
+				sessions[i].DegradedReason = snap.DegradedReason
 			}
-			act := s.liveActivity(rctx, sessions[i].ID)
-			sessions[i].Working = act.Working
-			sessions[i].Activity = act.Activity
-			sessions[i].CurrentTool = act.CurrentTool
-			sessions[i].Stalled = act.Stalled
+			if attn, ok := s.attn.get(sessions[i].ID); ok {
+				sessions[i].NeedsAttention = attn.Pending
+			} else {
+				sessions[i].NeedsAttention = snap.Attention.Pending
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -84,7 +90,29 @@ func (s *server) handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 10*time.Second)
 	defer cancel()
-	out, err := s.sessionReply(ctx, id)
+	se, err := s.findSession(ctx, id)
+	if err != nil {
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if se.Tool == "codex" {
+		snap, snapErr := s.adapterFor(se).Snapshot(ctx, se, "", false)
+		if snapErr != nil || snap.DegradedReason != "" {
+			if snapErr != nil {
+				httpError(w, http.StatusBadGateway, snapErr.Error())
+			} else {
+				httpError(w, http.StatusNotImplemented, snap.DegradedReason)
+			}
+			return
+		}
+		out := replyOutput{Content: snap.LastReply, Role: "assistant"}
+		if snap.LastActivity > 0 {
+			out.Timestamp = time.Unix(snap.LastActivity, 0).UTC().Format(time.RFC3339)
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out, err := s.claudeReply(ctx, se)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, err.Error())
 		return
