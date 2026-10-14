@@ -251,7 +251,7 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 	log.Printf("ask: runTurn START session=%s req=%s text=%q", se.ID, reqID, text)
 	// --json makes agent-deck emit its delivery status object first and the
 	// reply body after it; adeckSend hands back only the body.
-	out, err := s.adeckSend(ctx, "session", "send", se.ID, text,
+	out, err := s.sendMessage(ctx, se.ID, text,
 		"--wait", "--timeout", fmt.Sprintf("%.0fs", maxTurn.Seconds()))
 	if err != nil {
 		log.Printf("ask: runTurn ERROR session=%s req=%s: %v", se.ID, reqID, err)
@@ -345,8 +345,12 @@ func (s *server) runSlash(se sessionInfo, text, reqID, prof string) {
 	}
 
 	// --timeout bounds the readiness/gate wait (a busy session); default mode
-	// (no --wait/--no-wait) gates + sends, then prints "Sent message" and returns.
-	_, err := s.adeckSend(ctx, "session", "send", se.ID, text, "--timeout", "30s")
+	// (no --wait/--no-wait) gates + sends, then prints "Sent message" and
+	// returns. Deliberately NOT --json: since agent-deck v1.16.17 a bare
+	// --json send is a durable background queue that returns "queued" before
+	// anything is typed, so "sent" would be a lie and the pane capture below
+	// would run before the command did.
+	_, err := s.adeckIn(ctx, []byte(text), sendArgs(se.ID, "--timeout", "30s")...)
 	if err != nil {
 		log.Printf("slash: ERROR session=%s req=%s: %v", se.ID, reqID, err)
 		ev := map[string]any{

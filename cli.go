@@ -68,9 +68,17 @@ func subtleConstantEq(a, b string) bool {
 // paths must NOT come through here (see adeckweb.go / pane.go / replies.go);
 // the exec counter makes any regression visible in the periodic watcher log.
 func (s *server) adeck(ctx context.Context, args ...string) ([]byte, error) {
+	return s.adeckIn(ctx, nil, args...)
+}
+
+// adeckIn is adeck with stdin attached (nil = none).
+func (s *server) adeckIn(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
 	s.execAdeck.Add(1)
 	full := adeckArgs(profileFrom(ctx, s.cfg.profile), args...)
 	cmd := exec.CommandContext(ctx, s.cfg.bin, full...)
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
@@ -286,7 +294,23 @@ func sendErrorFields(err error) map[string]any {
 // prints the JSON status first and then the raw reply body, so the decoder's
 // input offset is exactly the boundary between them.
 func (s *server) adeckSend(ctx context.Context, args ...string) (string, error) {
-	out, execErr := s.adeck(ctx, append(args, "--json")...)
+	return s.adeckSendIn(ctx, nil, args...)
+}
+
+// sendArgs builds `session send <id> --message-file - <flags>`. The message
+// goes on stdin, never argv: agent-deck's flag parser reads a positional
+// message starting with "-" as a flag ("-x hello" fails the send).
+func sendArgs(id string, flags ...string) []string {
+	return append([]string{"session", "send", id, "--message-file", "-"}, flags...)
+}
+
+// sendMessage is adeckSend for a user-typed message (see sendArgs).
+func (s *server) sendMessage(ctx context.Context, id, message string, flags ...string) (string, error) {
+	return s.adeckSendIn(ctx, []byte(message), sendArgs(id, flags...)...)
+}
+
+func (s *server) adeckSendIn(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	out, execErr := s.adeckIn(ctx, stdin, append(args, "--json")...)
 
 	var p sendDeliveryPayload
 	dec := json.NewDecoder(bytes.NewReader(out))
@@ -323,7 +347,7 @@ func (s *server) adeckSend(ctx context.Context, args ...string) (string, error) 
 
 // sendNoWait injects a prompt/message without blocking for the reply.
 func (s *server) sendNoWait(ctx context.Context, id, message string) error {
-	_, err := s.adeckSend(ctx, "session", "send", id, message, "--no-wait")
+	_, err := s.sendMessage(ctx, id, message, "--no-wait")
 	return err
 }
 
