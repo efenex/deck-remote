@@ -675,6 +675,32 @@
   // Detail-first: the sheet ALWAYS opens in detail mode. The Approve panel is
   // an embedded section, shown only when /api/rc/permission reports a real
   // pending dialog — never inferred from status.
+  // iOS doesn't shrink the layout viewport for the on-screen keyboard: the
+  // full-height sheet stayed put and the page scrolled the composer into
+  // view, pushing the header off screen. Size the open sheet to the visual
+  // viewport instead, so the header stays and the composer sits on the
+  // keyboard.
+  function applyViewport() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const kb = vv.height < window.innerHeight - 120;
+    const was = document.documentElement.classList.contains('kb');
+    document.documentElement.classList.toggle('kb', kb);
+    const sheet = $('#sheet');
+    if (!sheet) return;
+    sheet.style.top = kb ? vv.offsetTop + 'px' : '';
+    sheet.style.height = kb ? vv.height + 'px' : '';
+    sheet.style.bottom = kb ? 'auto' : '';
+    if (kb !== was) {
+      const convo = $('#convo');
+      if (convo) convo.scrollTop = convo.scrollHeight;
+    }
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', applyViewport);
+    window.visualViewport.addEventListener('scroll', applyViewport);
+  }
+
   function openSheet(id) {
     const s = state.sessions.get(id);
     if (!s) return;
@@ -694,6 +720,7 @@
 
     sheet.innerHTML = sheetHeadHTML(s);
     buildDetailSheet(sheet, s);
+    applyViewport();
   }
 
   function sheetHeadHTML(s) {
