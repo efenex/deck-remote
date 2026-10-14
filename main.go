@@ -198,10 +198,14 @@ func newServer(cfg config, upstream *url.URL) *server {
 	proxy.Director = func(r *http.Request) {
 		baseDirector(r)
 		r.Host = upstream.Host
-		// Ensure agent-deck sees the shared token even if the phone passed it
-		// only as a query param (e.g. EventSource / WebSocket can't set headers).
-		if r.Header.Get("Authorization") == "" {
-			r.Header.Set("Authorization", "Bearer "+cfg.token)
+		// The route is already gated by s.auth (shared OR device token), so
+		// agent-deck always gets the shared token, and the phone's own token
+		// (header or ?token=, which EventSource/WebSocket must use) never
+		// reaches it: agent-deck knows nothing of device tokens.
+		r.Header.Set("Authorization", "Bearer "+cfg.token)
+		if q := r.URL.Query(); q.Has("token") {
+			q.Del("token")
+			r.URL.RawQuery = q.Encode()
 		}
 	}
 	home := cfg.homeDir
@@ -269,9 +273,11 @@ func (s *server) routes() http.Handler {
 	// NOTE: the proxy targets ONE agent-deck web bound to cfg.proxyProfile, so —
 	// unlike the per-call CLI surface above — these routes CANNOT follow the PWA
 	// profile selector. The PWA gates the terminal affordance accordingly.
-	mux.Handle("/api/", s.proxy)
-	mux.Handle("/events/", s.proxy)
-	mux.Handle("/ws/", s.proxy)
+	// Bearer-gated like everything above: the proxy injects the shared token,
+	// so an unauthenticated route here would hand any tailnet peer a shell.
+	mux.Handle("/api/", s.auth(s.proxy))
+	mux.Handle("/events/", s.auth(s.proxy))
+	mux.Handle("/ws/", s.auth(s.proxy))
 
 	// Serve the manifest with the correct MIME (Go's FileServer doesn't know
 	// .webmanifest) so installability is clean.
