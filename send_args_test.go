@@ -48,7 +48,7 @@ func TestSendMessageGoesOnStdin(t *testing.T) {
 	if strings.Contains(argv, "-x hello") || strings.Contains(argv, "/etc/passwd") {
 		t.Errorf("message leaked into argv: %q", argv)
 	}
-	if !strings.Contains(argv, "session send s1 --message-file - --no-wait --json") {
+	if !strings.Contains(argv, "session send s1 --message-file - --no-wait --require-input-prompt --json") {
 		t.Errorf("argv = %q", argv)
 	}
 	if got := readFile(t, stdinLog); got != msg {
@@ -71,5 +71,16 @@ func TestRunSlashIsSynchronous(t *testing.T) {
 	}
 	if got := readFile(t, stdinLog); got != "/compact" {
 		t.Errorf("stdin = %q", got)
+	}
+}
+
+// A guard refusal from agent-deck surfaces as a non-retryable menu_open.
+func TestSendNoWaitMenuOpenRefusal(t *testing.T) {
+	bin, _ := fakeAdeckSend(t, `{"success":false,"error":"input prompt unavailable; no keys typed","delivery":"menu_open"}`, 1)
+	s := testServer(t, config{bin: bin, token: "tok"})
+	err := s.sendNoWait(context.Background(), "s1", "hi")
+	f := sendErrorFields(err)
+	if err == nil || f["delivery"] != "menu_open" || f["retryable"] != false {
+		t.Fatalf("err=%v fields=%v", err, f)
 	}
 }

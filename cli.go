@@ -345,9 +345,12 @@ func (s *server) adeckSendIn(ctx context.Context, stdin []byte, args ...string) 
 	return strings.TrimSpace(trailing), nil
 }
 
-// sendNoWait injects a prompt/message without blocking for the reply.
+// sendNoWait injects a prompt/message without blocking for the reply. It is
+// the mid-turn path, so it asks agent-deck to refuse (delivery menu_open or
+// composer_blocked, nothing typed) unless an input prompt is visible: typed
+// into a picker or permission dialog, the text would answer it instead.
 func (s *server) sendNoWait(ctx context.Context, id, message string) error {
-	_, err := s.sendMessage(ctx, id, message, "--no-wait")
+	_, err := s.sendMessage(ctx, id, message, "--no-wait", "--require-input-prompt")
 	return err
 }
 

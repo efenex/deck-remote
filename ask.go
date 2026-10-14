@@ -231,9 +231,13 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 		log.Printf("ask: runTurn QUEUE (busy) session=%s req=%s text=%q", se.ID, reqID, text)
 		if err := s.sendNoWait(dctx, se.ID, text); err != nil {
 			log.Printf("ask: runTurn QUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
+			msg := "couldn't deliver while busy: " + err.Error()
+			if f := sendErrorFields(err); f["delivery"] == "menu_open" || f["delivery"] == "composer_blocked" {
+				msg = "Not sent: a menu or permission prompt is open in the session. Answer it first, then resend."
+			}
 			ev := map[string]any{
 				"type": "reply", "requestId": reqID, "sessionId": se.ID,
-				"error": "couldn't deliver while busy: " + err.Error(), "ts": time.Now().Unix(),
+				"error": msg, "ts": time.Now().Unix(),
 			}
 			for k, v := range sendErrorFields(err) {
 				ev[k] = v
