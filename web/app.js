@@ -215,6 +215,8 @@
   // Tab navigation
   // ---------------------------------------------------------------------------
   function showTab(tab) {
+    // Leaving the inbox marks what was shown as read (dots stay during the visit).
+    if (tab !== 'inbox' && !$('#screenInbox').hidden && inbox.loaded) markInboxSeen();
     $('#screenDeck').hidden = tab !== 'deck';
     $('#screenInbox').hidden = tab !== 'inbox';
     $('#screenSettings').hidden = tab !== 'settings';
@@ -235,8 +237,13 @@
   // entry here. Read state is per device: the newest timestamp seen.
   // ---------------------------------------------------------------------------
   const INBOX_SEEN_KEY = 'dr-inbox-seen-at';
-  const INBOX_KIND = { approval: '🔐 Approval', question: '❓ Question', reply: '✅ Reply', stall: '🧊 Stalled', test: '🧪 Test' };
-  const inbox = { items: [], loaded: false, focusId: null, openIds: new Set() };
+  // Kind → label and state hue (same hues as the deck's card rails).
+  const INBOX_KIND = {
+    approval: ['Approval', 'k-needs'], question: ['Question', 'k-needs'], stall: ['Stalled', 'k-stall'],
+    reply: ['Reply', 'k-reply'], error: ['Error', 'k-err'], test: ['Test', ''],
+  };
+  const NEEDS_KINDS = new Set(['approval', 'question', 'stall']);
+  const inbox = { items: [], loaded: false, focusId: null, openIds: new Set(), filter: 'all' };
 
   function inboxSeenAt() { return Number(localStorage.getItem(INBOX_SEEN_KEY) || 0); }
   function renderInboxBadge() {
@@ -275,11 +282,30 @@
       ? time
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
   }
+  function dayLabel(ms) {
+    const d = new Date(ms);
+    const today = new Date();
+    const yest = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    if (d.toDateString() === yest.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  // An approval/question whose session no longer needs you was answered
+  // (here, on the laptop, or it went away): show it as handled.
+  function inboxHandled(n) {
+    if (n.kind !== 'approval' && n.kind !== 'question') return false;
+    const s = n.sessionId && state.sessions.get(n.sessionId);
+    return !!s && !s.needsAttention;
+  }
   function renderInbox() {
     const list = $('#inboxList');
     if (!list) return;
-    if (!inbox.items.length) {
-      list.innerHTML = '<div class="inbox-empty">' + (inbox.loaded ? 'No notifications yet.' : 'Loading…') + '</div>';
+    const bar = $('#inboxFilter');
+    if (bar) $$('.seg-opt', bar).forEach((b) => b.classList.toggle('on', b.dataset.v === inbox.filter));
+    const items = inbox.filter === 'needs' ? inbox.items.filter((n) => NEEDS_KINDS.has(n.kind) && !inboxHandled(n)) : inbox.items;
+    if (!items.length) {
+      list.innerHTML = '<div class="inbox-empty">' + (!inbox.loaded ? 'Loading…'
+        : inbox.filter === 'needs' ? 'Nothing waiting on you.' : 'No notifications yet.') + '</div>';
       return;
     }
     const seen = inboxSeenAt();
@@ -287,23 +313,32 @@
     if (focus) inbox.openIds.add(focus);
     list.innerHTML = '';
     let focusCard = null;
-    for (const n of inbox.items) {
-      const cls = 'card notif' + (n.at > seen ? ' unread' : '') + (inbox.openIds.has(n.id) ? ' open' : '') + (focus === n.id ? ' flash' : '');
+    let day = '';
+    for (const n of items) {
+      const d = dayLabel(n.at);
+      if (d !== day) { day = d; list.appendChild(el('div', 'inbox-day', d)); }
+      const handled = inboxHandled(n);
+      const kind = INBOX_KIND[n.kind] || [n.kind || '', ''];
+      const cls = 'card notif' + (n.at > seen ? ' unread' : '') + (handled ? ' handled' : '') +
+        (inbox.openIds.has(n.id) ? ' open' : '') + (focus === n.id ? ' flash' : '');
       const card = el('div', cls);
       card.dataset.id = n.id;
       const known = !n.sessionId || !state.sessions.size || state.sessions.has(n.sessionId);
       card.innerHTML =
-        '<div class="card-top"><div class="card-title">' + esc(n.title || 'deck-remote') + '</div>' +
-        '<div class="card-meta">' + esc(fmtWhen(n.at)) + '</div></div>' +
-        '<div class="card-meta notif-kind">' + esc(INBOX_KIND[n.kind] || n.kind || '') + '</div>' +
+        '<div class="card-top">' + (n.at > seen ? '<span class="unread-dot" title="Unread"></span>' : '') +
+          '<div class="card-title">' + esc(n.title || 'deck-remote') + '</div>' +
+          '<div class="card-meta">' + esc(fmtWhen(n.at)) + '</div></div>' +
+        '<div class="notif-kind"><span class="kind-chip ' + kind[1] + '">' + esc(kind[0]) + '</span>' +
+          (handled ? '<span class="kind-chip k-done">handled</span>' : '') + '</div>' +
         '<div class="notif-body">' + renderMarkdown(n.body || '') + '</div>' +
         (n.sessionId
           ? '<div class="notif-actions"><button class="notif-open" data-open="' + esc(n.sessionId) + '"' + (known ? '' : ' disabled') + '>' +
-            (known ? 'Open session' : 'Session no longer listed') + '</button></div>'
+            (known ? 'Open session ›' : 'Session no longer listed') + '</button></div>'
           : '');
       card.addEventListener('click', (e) => {
         const btn = e.target.closest('[data-open]');
         if (btn) { e.stopPropagation(); openSession(btn.dataset.open); return; }
+        if (e.target.closest('[data-act]')) return; // code-block toolbar
         if (inbox.openIds.has(n.id)) inbox.openIds.delete(n.id); else inbox.openIds.add(n.id);
         card.classList.toggle('open');
       });
@@ -316,8 +351,12 @@
     } else if (focus && inbox.loaded) {
       inbox.focusId = null; // not in the recorded window (older than the last 200)
     }
-    markInboxSeen();
   }
+  // Read state moves only on an explicit "Mark all read" (or opening an
+  // entry's session), not merely by looking at the tab, so unread dots mean
+  // something.
+  function markAllRead() { markInboxSeen(); renderInbox(); }
+
   // A tapped notification: show its inbox entry, expanded and highlighted.
   function openNotification(id) {
     inbox.focusId = id || null;
@@ -338,6 +377,9 @@
     if (state.openSheetId !== id) openSheet(id);
   }
   $('#inboxRefresh').addEventListener('click', () => loadInbox());
+  $('#inboxMarkRead').addEventListener('click', () => markAllRead());
+  $$('#inboxFilter .seg-opt').forEach((b) => b.addEventListener('click', () => { inbox.filter = b.dataset.v; renderInbox(); }));
+  $('#inboxList').addEventListener('click', onCodeAction);
 
   // ---------------------------------------------------------------------------
   // Toast (foreground notify + errors)

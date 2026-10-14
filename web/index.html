@@ -151,9 +151,25 @@
   .inbox{padding:8px 16px calc(40px + var(--safe-bottom));display:flex;flex-direction:column;gap:10px}
   .inbox-empty{color:var(--muted);text-align:center;padding:48px 0;font-size:14px}
   .notif{cursor:pointer}
-  .notif.unread{border-color:var(--accent)}
+  .notif.unread .card-title{color:#fff}
+  .unread-dot{width:9px;height:9px;border-radius:50%;background:var(--accent);flex:0 0 auto}
+  .notif.handled{opacity:.72}
+  .inbox-day{margin:10px 6px 0;color:var(--muted);font-size:13px;font-weight:700}
+  .seg.inbox-filter{margin-top:10px;display:flex}
+  .inbox-filter .seg-opt{flex:1;white-space:nowrap}
+  .notif-body p{margin:0 0 6px}
+  .notif-body p:last-child{margin-bottom:0}
+  .notif-body ul,.notif-body ol{margin:4px 0 6px;padding-left:20px}
+  .text-btn{min-height:var(--tap);padding:0 10px;border:0;background:none;color:var(--accent);font-size:14px;font-weight:600}
+  .kind-chip{display:inline-block;margin-right:6px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;
+    color:var(--muted);background:rgba(154,165,206,.12)}
+  .kind-chip.k-needs{color:var(--st-needs);background:rgba(255,158,100,.14)}
+  .kind-chip.k-stall{color:var(--st-stall);background:rgba(224,175,104,.14)}
+  .kind-chip.k-reply{color:var(--st-new);background:rgba(115,218,202,.12)}
+  .kind-chip.k-err{color:var(--red);background:rgba(247,118,142,.12)}
+  .kind-chip.k-done{color:var(--muted)}
   .notif.flash{box-shadow:0 0 0 2px var(--accent)}
-  .notif-kind{margin-top:4px}
+  .notif-kind{margin-top:2px}
   .notif-body{margin-top:8px;font-size:13px;line-height:1.45;color:var(--fg);overflow-wrap:anywhere}
   .notif:not(.open) .notif-body{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
   .notif-body pre{white-space:pre-wrap;background:rgba(0,0,0,.25);padding:8px;border-radius:6px;font-size:12px}
@@ -586,7 +602,14 @@
   <!-- INBOX tab: every notification the server recorded, full text -->
   <div class="screen" id="screenInbox" hidden>
     <div class="appbar"><div class="appbar-row"><div class="appbar-title">Inbox</div>
-      <button class="icon-btn" id="inboxRefresh" title="refresh"><span class="gi">↻</span></button></div></div>
+      <div class="appbar-actions">
+        <button class="text-btn" id="inboxMarkRead">Mark all read</button>
+        <button class="icon-btn" id="inboxRefresh" title="Refresh" aria-label="Refresh"><svg class="ico" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg></button>
+      </div></div>
+      <div class="seg inbox-filter" id="inboxFilter" role="radiogroup">
+        <button type="button" class="seg-opt on" data-v="all">All</button>
+        <button type="button" class="seg-opt" data-v="needs">Needs you</button>
+      </div></div>
     <div class="inbox" id="inboxList"></div>
   </div>
 
