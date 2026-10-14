@@ -203,6 +203,12 @@ func newServer(cfg config, upstream *url.URL) *server {
 		// (header or ?token=, which EventSource/WebSocket must use) never
 		// reaches it: agent-deck knows nothing of device tokens.
 		r.Header.Set("Authorization", "Bearer "+cfg.token)
+		// agent-deck only accepts its own origin on the WebSocket (and on API
+		// mutations). sameOrigin has already checked the phone's origin
+		// against deck-remote's host, so present agent-deck's.
+		if r.Header.Get("Origin") != "" {
+			r.Header.Set("Origin", upstream.Scheme+"://"+upstream.Host)
+		}
 		if q := r.URL.Query(); q.Has("token") {
 			q.Del("token")
 			r.URL.RawQuery = q.Encode()
@@ -275,9 +281,9 @@ func (s *server) routes() http.Handler {
 	// profile selector. The PWA gates the terminal affordance accordingly.
 	// Bearer-gated like everything above: the proxy injects the shared token,
 	// so an unauthenticated route here would hand any tailnet peer a shell.
-	mux.Handle("/api/", s.auth(s.proxy))
-	mux.Handle("/events/", s.auth(s.proxy))
-	mux.Handle("/ws/", s.auth(s.proxy))
+	mux.Handle("/api/", s.auth(sameOrigin(s.proxy)))
+	mux.Handle("/events/", s.auth(sameOrigin(s.proxy)))
+	mux.Handle("/ws/", s.auth(sameOrigin(s.proxy)))
 
 	// Serve the manifest with the correct MIME (Go's FileServer doesn't know
 	// .webmanifest) so installability is clean.
@@ -326,6 +332,23 @@ func (s *server) authShared(next http.Handler) http.Handler {
 			return
 		}
 		http.Error(w, `{"error":"admin token required"}`, http.StatusForbidden)
+	})
+}
+
+// sameOrigin refuses a browser request from another site (cross-site
+// WebSocket hijacking, CSRF). The proxy rewrites Origin to agent-deck's own, so
+// agent-deck's check no longer sees the browser's; this one stands in for it.
+// No Origin (non-browser clients) passes, as it does upstream.
+func sameOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := strings.TrimSpace(r.Header.Get("Origin")); o != "" {
+			u, err := url.Parse(o)
+			if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+				http.Error(w, `{"error":"cross-origin request blocked"}`, http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

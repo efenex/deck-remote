@@ -65,3 +65,34 @@ func TestProxiedRoutesRequireAuth(t *testing.T) {
 		t.Errorf("device token via header: code %d, upstream auth %q", rec.Code, gotAuth)
 	}
 }
+
+// The phone's own origin is accepted and presented to agent-deck as agent-deck's
+// own (its WebSocket origin check refused the phone's with 403); another
+// site's origin is refused by deck-remote.
+func TestProxiedRoutesOrigin(t *testing.T) {
+	var gotOrigin string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrigin = r.Header.Get("Origin")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+	s := newServer(config{token: "shared", homeDir: t.TempDir(), profile: "default"}, u)
+	h := s.routes()
+
+	req := httptest.NewRequest("GET", "https://deck.example/ws/session/x?token=shared", nil)
+	req.Header.Set("Origin", "https://deck.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || gotOrigin != "http://"+u.Host {
+		t.Fatalf("same origin: code %d, upstream Origin %q", rec.Code, gotOrigin)
+	}
+
+	req = httptest.NewRequest("GET", "https://deck.example/ws/session/x?token=shared", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross origin: got %d, want 403", rec.Code)
+	}
+}
