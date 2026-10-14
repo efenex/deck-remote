@@ -336,7 +336,7 @@
       return;
     }
     showTab('deck');
-    openSheet(id);
+    if (state.openSheetId !== id) openSheet(id);
   }
   $('#inboxRefresh').addEventListener('click', () => loadInbox());
 
@@ -546,8 +546,31 @@
     renderDeck();
   }
 
+  // Per-session "last looked at" (unix s), for the new-reply dot. A session
+  // seen for the first time counts as read up to its current activity.
+  const SEEN_KEY = 'deckRemote.lastSeen';
+  const lastSeen = (() => { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch (_) { return {}; } })();
+  function saveSeen() { try { localStorage.setItem(SEEN_KEY, JSON.stringify(lastSeen)); } catch (_) {} }
+  function markSeen(id) { lastSeen[id] = Date.now() / 1000; saveSeen(); }
+  function hasNewReply(s) {
+    const t = Number(s.lastActivity) || 0;
+    if (!t || s.working) return false;
+    if (!(s.id in lastSeen)) { lastSeen[s.id] = t; saveSeen(); return false; }
+    return t > lastSeen[s.id];
+  }
+
+  // One state per card, one hue per state (left rail): needs you (orange),
+  // stalled (yellow), working (blue), new reply (green dot). Idle: no colour.
+  function cardState(s) {
+    if (s.needsAttention) return 'st-needs';
+    if (s.working && s.stalled) return 'st-stall';
+    if (s.working) return 'st-work';
+    return '';
+  }
+
   function cardEl(s) {
-    const card = el('div', 'card');
+    const st = cardState(s);
+    const card = el('div', 'card' + (st ? ' ' + st : ''));
     card.dataset.id = s.id;
 
     // Title row: title + tool chip.
@@ -557,6 +580,11 @@
     harness.innerHTML = '<span class="gi">✦</span>' + esc(s.tool || 'agent');
     top.appendChild(harness);
     if (s.needsAttention) top.appendChild(el('span', 'attention-chip', 'needs you'));
+    else if (hasNewReply(s)) {
+      const dot = el('span', 'new-dot');
+      dot.title = 'New reply';
+      top.appendChild(dot);
+    }
     card.appendChild(top);
 
     // Group/tree crumb.
@@ -592,6 +620,7 @@
   // ---------------------------------------------------------------------------
   function closeSheet() {
     stopActivityPoll(); // stop the live-activity poll so it doesn't leak
+    if (state.openSheetId) markSeen(state.openSheetId); // replies read while open
     // Detach the convo scroll listener and clear any in-flight paging flag so a
     // fetch settling after close doesn't touch a stale DOM.
     const convoEl = $('#convo');
@@ -629,6 +658,7 @@
 
     if ($('#sheet')) closeSheet();
     state.openSheetId = id;
+    markSeen(id);
 
     const scrim = el('div', 'scrim');
     scrim.id = 'scrim';
@@ -694,11 +724,13 @@
     state.convoScrollHandler = onScroll;
     convo.addEventListener('scroll', onScroll, { passive: true });
 
-    // Approve section mounts inside the scrolling convo; populated only when a
-    // real pending dialog is detected. Starts empty.
-    const approveMount = el('div');
+    // Approval / question dock: between the thread and the composer, so a
+    // pending request is on screen when the sheet opens (the thread opens
+    // scrolled to the bottom). Populated only when a real pending dialog is
+    // detected; scrolls internally up to 62% of the sheet.
+    const approveMount = el('div', 'approve-dock');
     approveMount.id = 'approveMount';
-    convo.appendChild(approveMount);
+    sheet.appendChild(approveMount);
 
     // Back affordances (standalone PWA has no back gesture, and the full-screen
     // sheet covers the scrim — so an explicit control is required).
@@ -751,8 +783,9 @@
 
     const composer = el('div', 'composer');
     const ta = el('textarea');
+    ta.id = 'composerInput';
     ta.rows = 1;
-    ta.placeholder = 'Message ' + (s.title || 'this session') + '… (/ for commands)';
+    ta.placeholder = 'Message… (/ for commands)';
     const structuredAsk = !s.capabilities || !!s.capabilities.ask;
     if (!structuredAsk) {
       ta.disabled = true;
@@ -971,7 +1004,16 @@
     const live = $('#liveActivity');
     if (!live) return;
     const wb = $('#workingBanner');
-    if (wb) wb.hidden = !(a && a.working) && !state.pending.has(id);
+    if (wb) {
+      wb.hidden = !(a && a.working) && !state.pending.has(id);
+      const stalledNow = !!(a && a.working && a.stalled);
+      wb.classList.toggle('stalled', stalledNow);
+      const copy = $('.wb-copy', wb);
+      const canStop = !!$('.hold-stop', wb);
+      if (copy) copy.textContent = stalledNow
+        ? (canStop ? 'No progress for a while. Hold Stop to interrupt.' : 'No progress for a while.')
+        : 'Turn in progress. You can queue or steer a follow-up.';
+    }
     if (a && a.working) {
       const stalled = !!(a && a.stalled);
       live.className = 'live-activity working' + (stalled ? ' stalled' : '');
@@ -1136,6 +1178,7 @@
           conv.unshift({ role: 'note', kind: 'no-history', content: 'Full history: open terminal.' });
         }
       }
+      renderConvo(id); // drop the loading state; shows the empty-thread note
       loadReply(id);
     }
   }
@@ -1270,10 +1313,7 @@
     if (!convo) return;
     const conv = ensureConvo(id);
 
-    // Preserve the approve section (it lives outside the turn list).
-    const approveMount = $('#approveMount');
     convo.innerHTML = '';
-    if (approveMount) convo.appendChild(approveMount);
 
     // Scroll-back affordance at the very top: a "Loading…" spinner while a page
     // is in flight, hidden entirely once there's no older history.
@@ -1345,8 +1385,12 @@
       }
     });
 
-    // Active pending row.
     const pend = state.pending.get(id);
+    if (!conv.length && !pend && hs && !hs.loading) {
+      convo.appendChild(el('div', 'thread-empty', 'No messages yet. Send one below.'));
+    }
+
+    // Active pending row.
     if (pend) {
       const p = el('div', 'pending');
       const session = state.sessions.get(id);
@@ -1443,6 +1487,7 @@
       if (userInitiated) mount.appendChild(approveNote('Couldn\'t check attention: ' + e.message));
     } finally {
       if (btn) btn.classList.remove('busy');
+      syncComposerLock();
     }
   }
 
@@ -1452,38 +1497,80 @@
     return n;
   }
 
-  // Render the Approve panel with the ACTUAL permission text the server read.
+  // While a request is docked the composer is locked: typed text would land in
+  // the live dialog, not the composer.
+  function syncComposerLock() {
+    const ta = $('#composerInput');
+    const mount = $('#approveMount');
+    if (!ta) return;
+    const locked = !!(mount && mount.querySelector('.approve-card'));
+    const send = ta.parentElement && ta.parentElement.querySelector('.send-btn');
+    if (send) send.disabled = locked || !ta.value.trim();
+    if (locked && !ta.dataset.lockPlaceholder) {
+      ta.dataset.lockPlaceholder = ta.placeholder;
+      ta.dataset.lockDisabled = ta.disabled ? '1' : '';
+      ta.placeholder = 'Answer the request above first';
+      ta.disabled = true;
+    } else if (!locked && ta.dataset.lockPlaceholder) {
+      ta.placeholder = ta.dataset.lockPlaceholder;
+      ta.disabled = ta.dataset.lockDisabled === '1';
+      delete ta.dataset.lockPlaceholder;
+      delete ta.dataset.lockDisabled;
+    }
+  }
+
+  // "Bash command" / "git push origin main": the dialog's first two lines, as
+  // a one-glance summary above the verbatim text.
+  function permissionSummary(text) {
+    const lines = String(text || '').split('\n')
+      .map((l) => l.replace(/^[\s│╭╮╰╯─]+|[\s│╭╮╰╯─]+$/g, ''))
+      .filter(Boolean);
+    return { kind: lines[0] || 'Permission request', what: lines[1] || '' };
+  }
+
+  // Render the Approve dock with the ACTUAL permission text the server read.
   function renderApprovePanel(s, info) {
     const mount = $('#approveMount');
     if (!mount) return;
+    const sum = permissionSummary(info.text);
     const wrap = el('div', 'approve-card');
     wrap.innerHTML =
-      '<div class="approve-head"><span class="dot"></span> Permission requested</div>' +
-      '<div class="approve-body">' +
-        '<div class="approve-q">' + esc(s.tool === 'claude' ? 'Claude' : (s.tool || 'The agent')) +
-          ' is paused on a permission prompt. Review the request below before approving.</div>' +
-        '<div class="approve-what">' +
-          '<div class="label">Permission request</div>' +
-          '<pre class="perm-text" id="permText"></pre>' +
-        '</div>' +
-        '<div class="approval-actions" id="approvalActions"></div>' +
-        '<div class="approve-foot" id="approveFoot">The server revalidates the exact live dialog before sending any key.</div>' +
-      '</div>';
+      '<div class="approve-head"><span class="dot"></span><div class="approve-sum">' +
+        '<div class="approve-kind">' + esc(sum.kind) + '</div>' +
+        (sum.what ? '<div class="approve-cmd">' + esc(sum.what) + '</div>' : '') +
+      '</div></div>' +
+      '<div class="approve-body"><pre class="perm-text" id="permText"></pre></div>' +
+      '<div class="approval-actions" id="approvalActions"></div>' +
+      '<div class="approve-foot" id="approveFoot">The live dialog is re-checked before any key is sent.</div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
     // Set the real text as textContent so line breaks/monospace are preserved
     // verbatim and nothing is interpreted as HTML.
     $('#permText', wrap).textContent = info.text || '(no request text returned)';
     const actions = $('#approvalActions', wrap);
-    const labels = { 'approve-once': 'Hold: approve once', 'approve-prefix': 'Hold: approve prefix', decline: 'Decline' };
-    (info.actions || []).forEach((action) => {
-      const b = el('button', action === 'decline' ? 'attention-action decline' : 'attention-action');
+    const labels = { 'approve-once': 'Hold to approve', 'approve-prefix': 'Hold: approve and don\'t ask again', decline: 'Decline' };
+    const button = (action) => {
+      const b = el('button', 'attention-action ' + (action === 'decline' ? 'decline' : 'approve'));
       b.textContent = labels[action] || action;
       if (action === 'decline') b.addEventListener('click', () => respondAttention(s, info, action, []));
       else wireHoldAction(b, () => respondAttention(s, info, action, []));
-      actions.appendChild(b);
-    });
-    if (!actions.children.length) actions.appendChild(approveNote('This live dialog is not unambiguous enough for remote approval. Use the terminal.'));
+      return b;
+    };
+    // Main row: Decline left, Hold-to-approve right. Anything else (approve
+    // prefix) sits behind "More options" so it can't be hit by accident.
+    const acts = info.actions || [];
+    const main = el('div', 'approval-main');
+    ['decline', 'approve-once'].forEach((a) => { if (acts.includes(a)) main.appendChild(button(a)); });
+    if (main.children.length) actions.appendChild(main);
+    const rest = acts.filter((a) => a !== 'decline' && a !== 'approve-once');
+    if (rest.length) {
+      const more = el('details', 'approval-more');
+      more.appendChild(el('summary', null, 'More options'));
+      rest.forEach((a) => more.appendChild(button(a)));
+      actions.appendChild(more);
+    }
+    if (!acts.length) actions.appendChild(approveNote('This live dialog is not unambiguous enough for remote approval. Use the terminal.'));
+    syncComposerLock();
   }
 
   function renderQuestionPanel(s, info) {
@@ -1493,6 +1580,7 @@
     wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Codex needs input</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
+    syncComposerLock();
     const form = $('#questionForm', wrap);
     (info.questions || []).forEach((q) => {
       const field = el('fieldset', 'question-field');
@@ -1558,6 +1646,7 @@
       if (r && r.responded) {
         s.needsAttention = false;
         const mount = $('#approveMount'); if (mount) mount.innerHTML = '';
+        syncComposerLock();
         ensureConvo(s.id).push({ role: 'note', content: '✓ response sent' + (r.cleared ? '' : ' · confirming…'), ts: Date.now() / 1000 });
         renderConvo(s.id); renderDeck();
       }
@@ -1863,6 +1952,12 @@
   // settings toggles
   $$('.toggle[data-pref]').forEach((tg) => {
     tg.classList.toggle('on', !!prefs[tg.dataset.pref]);
+    // The whole row is the tap target, not just the 46px knob.
+    const row = tg.closest('.set-row');
+    if (row) {
+      row.classList.add('tappable');
+      row.addEventListener('click', (e) => { if (!tg.contains(e.target)) tg.click(); });
+    }
     tg.addEventListener('click', () => {
       const key = tg.dataset.pref;
       prefs[key] = !prefs[key];
@@ -1952,7 +2047,7 @@
       const row = el('div', 'set-row');
       const when = d.created ? new Date(d.created * 1000).toLocaleDateString() : '';
       row.innerHTML = '<span class="gi">📲</span><span class="lbl">' + esc(d.name || d.id) +
-        '<div class="rhint" style="font-size:11px;color:var(--muted);margin-top:2px">added ' + esc(when) + '</div></span>';
+        '<div class="rhint" style="font-size:12px;color:var(--muted);margin-top:2px">added ' + esc(when) + '</div></span>';
       const revoke = el('span', 'lbl', 'Revoke');
       revoke.style.color = 'var(--red)';
       revoke.style.flex = '0 0 auto';

@@ -9,7 +9,7 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v5';
+const CACHE = 'deck-remote-v6';
 const SHELL = [
   '/',
   '/index.html',
