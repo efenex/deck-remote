@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -28,8 +29,25 @@ var claudePermissionMarkers = []string{
 	"no, and tell claude what to do differently",
 }
 
+// claudeDialogWindow is how many non-blank lines at the bottom of the pane we
+// look at for a live dialog: question, options, footer, plus room for the
+// background-task and status rows Claude draws under it.
+const claudeDialogWindow = 20
+
+// claudeDialogSelector matches the highlighted numbered option of a live
+// dialog ("❯ 1. Yes"); an idle composer never draws one.
+var claudeDialogSelector = regexp.MustCompile(`(?m)^[\s│]*❯\s*\d+\.`)
+
+// isClaudePermissionPrompt reports whether a permission dialog is live at the
+// bottom of the pane. The capture carries 2000 lines of scrollback, so matching
+// anywhere in it would fire on an old dialog or on transcript text quoting a
+// marker, and approve would then type "1"+Enter into the live composer.
 func isClaudePermissionPrompt(pane string) bool {
-	low := strings.ToLower(stripANSI(pane))
+	bottom := dialogExcerptLines(pane, claudeDialogWindow)
+	if !claudeDialogSelector.MatchString(bottom) {
+		return false
+	}
+	low := strings.ToLower(bottom)
 	for _, m := range claudePermissionMarkers {
 		if strings.Contains(low, m) {
 			return true
