@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -226,25 +228,35 @@ func (a codexAdapter) respondApproval(ctx context.Context, se sessionInfo, req a
 	if err != nil {
 		return attentionResponseResult{}, err
 	}
-	if err := a.s.moveDialogSelection(ctx, se.ID, cur.SelectedAt, target); err != nil {
+	// One keypress by displayed option number through agent-deck, which
+	// re-reads the prompt itself, fails closed when no stable approval menu is
+	// visible, and verifies the prompt cleared. Never fall back to arrow-key
+	// navigation: if agent-deck already sent its key, a second one would land
+	// in whatever came next.
+	cleared, err := a.s.approveCodexOption(ctx, se.ID, cur.Choices[target].Index)
+	if err != nil {
 		return attentionResponseResult{}, err
 	}
-	cleared := false
-	for i := 0; i < 8; i++ {
-		select {
-		case <-ctx.Done():
-			break
-		case <-time.After(250 * time.Millisecond):
-		}
-		p, readErr := a.s.sessionPane(ctx, se.ID)
-		if readErr == nil {
-			if next, pending := parseCodexApprovalDialog(p); !pending || next.ID != req.AttentionID {
-				cleared = true
-				break
-			}
-		}
-	}
 	return attentionResponseResult{SessionID: se.ID, AttentionID: req.AttentionID, Responded: true, Cleared: cleared}, nil
+}
+
+// approveCodexOption runs `agent-deck session approve <id> <n> --json` and
+// reports whether agent-deck verified that the prompt cleared.
+func (s *server) approveCodexOption(ctx context.Context, id string, option int) (bool, error) {
+	out, err := s.adeck(ctx, "session", "approve", id, strconv.Itoa(option), "--json", "--timeout", "3s")
+	var res struct {
+		Error    string `json:"error"`
+		KeySent  bool   `json:"key_sent"`
+		Verified bool   `json:"verified"`
+	}
+	_ = json.Unmarshal(out, &res)
+	if err != nil {
+		if res.Error != "" {
+			return false, fmt.Errorf("%s", res.Error)
+		}
+		return false, err
+	}
+	return res.Verified, nil
 }
 
 func (a codexAdapter) respondQuestions(ctx context.Context, se sessionInfo, req attentionResponseRequest, info attentionInfo) (attentionResponseResult, error) {

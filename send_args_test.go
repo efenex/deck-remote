@@ -84,3 +84,23 @@ func TestSendNoWaitMenuOpenRefusal(t *testing.T) {
 		t.Fatalf("err=%v fields=%v", err, f)
 	}
 }
+
+// Codex approval goes through `agent-deck session approve` with the displayed
+// option number, and reports agent-deck's own verification.
+func TestApproveCodexOption(t *testing.T) {
+	bin, argvLog := fakeAdeckSend(t, `{"success":true,"option_number":2,"key_sent":true,"verified":true}`, 0)
+	s := testServer(t, config{bin: bin, token: "tok"})
+	cleared, err := s.approveCodexOption(context.Background(), "s1", 2)
+	if err != nil || !cleared {
+		t.Fatalf("cleared=%v err=%v", cleared, err)
+	}
+	if argv := readFile(t, argvLog); !strings.Contains(argv, "session approve s1 2 --json --timeout 3s") {
+		t.Errorf("argv = %q", argv)
+	}
+
+	bin, _ = fakeAdeckSend(t, `{"success":false,"error":"failed to approve Codex prompt: no stable approval menu","key_sent":false}`, 1)
+	s = testServer(t, config{bin: bin, token: "tok"})
+	if _, err := s.approveCodexOption(context.Background(), "s1", 1); err == nil || !strings.Contains(err.Error(), "no stable approval menu") {
+		t.Fatalf("want agent-deck's refusal, got %v", err)
+	}
+}
