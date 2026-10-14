@@ -75,10 +75,12 @@
   }
   #wrap.kb #term { justify-content: flex-end; }
   #term > .terminal { flex: 0 0 auto; }
-  /* Keys the phone keyboard lacks. */
+  /* Keys the phone keyboard lacks. Under the header rather than above the
+     keyboard: iOS positions the page differently with the keyboard up, and
+     the top of the page is the part that is reliably on screen. */
   #keys {
     flex: 0 0 auto; display: flex; gap: 6px; padding: 6px 8px;
-    background: var(--chrome); border-top: 1px solid var(--border);
+    background: var(--chrome); border-bottom: 1px solid var(--border);
     overflow-x: auto;
   }
   #keys button {
@@ -121,7 +123,6 @@
     <span id="sid"></span>
     <span id="conn"><span id="led"></span><span id="conntext">connecting…</span></span>
   </div>
-  <div id="term"></div>
   <div id="keys">
     <button type="button" data-key="esc">Esc</button>
     <button type="button" data-key="tab">Tab</button>
@@ -130,6 +131,7 @@
     <button type="button" data-key="down">↓</button>
     <button type="button" data-key="enter">⏎</button>
   </div>
+  <div id="term"></div>
 </div>
 <div id="notice"><div class="box">
   <h2 id="noticeTitle">Terminal unavailable</h2>
