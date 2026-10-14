@@ -257,6 +257,11 @@ func (pm *pushManager) send(p pushPayload) {
 	_ = pm.sendTo(p)
 }
 
+// pushHTTPClient bounds each push request. Delivery runs inside the watcher
+// sweep, so a push service that accepts the connection and never answers
+// would otherwise stall every session's watcher with it.
+var pushHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // sendTo delivers a payload to every subscription unconditionally (no
 // suppression, no prefs), pruning dead subs (404/410) and logging every non-2xx
 // status + body and every transport error via the std logger. It returns the
@@ -283,6 +288,7 @@ func (pm *pushManager) sendTo(p pushPayload) []sendResult {
 			VAPIDPublicKey:  pub,
 			VAPIDPrivateKey: priv,
 			TTL:             60,
+			HTTPClient:      pushHTTPClient,
 		})
 		if err != nil {
 			log.Printf("push: transport error endpoint=%s: %v", short, err)
