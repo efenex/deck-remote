@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -87,10 +88,63 @@ func convertToClaudeDirName(p string) string { return nonAlnumRE.ReplaceAllStrin
 // findTranscript locates <claudeSessionID>.jsonl. Tries the computed path first
 // (configDir/projects/<encoded projectPath>/<id>.jsonl), then falls back to a
 // walk under projects/ (robust to path-encoding / per-config-dir differences).
+// findTranscript is findTranscriptUncached behind a small cache: the PWA asks
+// for history every few seconds while a sheet is open, and a transcript that
+// isn't at the expected path costs a walk of all of ~/.claude/projects. Hits
+// are kept while the file exists; misses are retried after transcriptMissTTL.
 func findTranscript(claudeSessionID, projectPath string) string {
 	if claudeSessionID == "" {
 		return ""
 	}
+	key := claudeSessionID + "\x00" + projectPath
+	now := time.Now()
+	transcripts.mu.Lock()
+	e, ok := transcripts.paths[key]
+	transcripts.mu.Unlock()
+	if ok {
+		if e.path == "" && now.Sub(e.at) < transcriptMissTTL {
+			return ""
+		}
+		if e.path != "" {
+			if _, err := os.Stat(e.path); err == nil {
+				return e.path
+			}
+		}
+	}
+	path := findTranscriptUncached(claudeSessionID, projectPath)
+	transcripts.mu.Lock()
+	if len(transcripts.paths) >= transcriptCacheMax {
+		transcripts.paths = map[string]pathEntry{}
+	}
+	transcripts.paths[key] = pathEntry{path: path, at: now}
+	transcripts.mu.Unlock()
+	return path
+}
+
+const (
+	transcriptMissTTL  = 30 * time.Second
+	transcriptCacheMax = 256
+)
+
+type pathEntry struct {
+	path string
+	at   time.Time
+}
+
+type parsedEntry struct {
+	size  int64
+	mtime time.Time
+	msgs  []histMsg
+}
+
+var transcripts = struct {
+	mu     sync.Mutex
+	paths  map[string]pathEntry
+	parsed map[string]parsedEntry
+	parses int // full parses done, for tests
+}{paths: map[string]pathEntry{}, parsed: map[string]parsedEntry{}}
+
+func findTranscriptUncached(claudeSessionID, projectPath string) string {
 	cfg := claudeConfigDir()
 	projects := filepath.Join(cfg, "projects")
 	if projectPath != "" {
@@ -125,9 +179,37 @@ func tsUnix(s string) int64 {
 	return 0
 }
 
-// parseTranscript reads the whole transcript into ordered conversation messages
-// (oldest first). Cheap enough to run per request for typical transcripts.
+// parseTranscript returns the transcript's messages (oldest first), re-reading
+// the file only when its size or mtime changed since the last parse. Callers
+// get their own copy of the slice.
 func parseTranscript(path string) ([]histMsg, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	transcripts.mu.Lock()
+	e, ok := transcripts.parsed[path]
+	transcripts.mu.Unlock()
+	if ok && e.size == fi.Size() && e.mtime.Equal(fi.ModTime()) {
+		return append([]histMsg(nil), e.msgs...), nil
+	}
+	msgs, err := parseTranscriptFile(path)
+	if err != nil {
+		return nil, err
+	}
+	transcripts.mu.Lock()
+	transcripts.parses++
+	if len(transcripts.parsed) >= transcriptCacheMax/8 {
+		transcripts.parsed = map[string]parsedEntry{}
+	}
+	transcripts.parsed[path] = parsedEntry{size: fi.Size(), mtime: fi.ModTime(), msgs: msgs}
+	transcripts.mu.Unlock()
+	return append([]histMsg(nil), msgs...), nil
+}
+
+// parseTranscriptFile reads the whole transcript into ordered conversation
+// messages (oldest first).
+func parseTranscriptFile(path string) ([]histMsg, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
