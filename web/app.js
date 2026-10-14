@@ -710,7 +710,7 @@
   // ----- detail sheet (ask + last reply + async pending + gated approve) -----
   function buildDetailSheet(sheet, s) {
     // DOM order top→bottom: handle (already in sheet.innerHTML) → convo (flex:1)
-    // → working-banner → live-activity (flex:0, above the composer) →
+    // → approval dock → status strip (live activity + Stop) →
     // composer-wrap (slash popup + composer, pinned to the very bottom).
     const convo = el('div', 'convo');
     convo.id = 'convo';
@@ -723,6 +723,18 @@
     };
     state.convoScrollHandler = onScroll;
     convo.addEventListener('scroll', onScroll, { passive: true });
+    convo.addEventListener('click', onCodeAction);
+
+    // "↓ N new": shown when messages arrive while scrolled up to read.
+    const newPill = el('button', 'new-pill');
+    newPill.id = 'newPill';
+    newPill.type = 'button';
+    newPill.hidden = true;
+    newPill.addEventListener('click', () => { convo.scrollTop = convo.scrollHeight; hideNewPill(); });
+    sheet.appendChild(newPill);
+    convo.addEventListener('scroll', () => {
+      if (convo.scrollHeight - convo.scrollTop - convo.clientHeight < 80) hideNewPill();
+    }, { passive: true });
 
     // Approval / question dock: between the thread and the composer, so a
     // pending request is on screen when the sheet opens (the thread opens
@@ -743,35 +755,47 @@
     const checkBtn = $('#sheetCheckPerm', sheet);
     if (checkBtn) checkBtn.addEventListener('click', () => checkAttention(s, true));
 
-    const workingBanner = el('div', 'working-banner');
-    workingBanner.id = 'workingBanner';
-    workingBanner.hidden = true;
-    workingBanner.innerHTML =
-      '<span class="spin"></span><span class="wb-copy">Turn in progress — you can queue or steer a follow-up.</span>';
-    if (s.capabilities && s.capabilities.interrupt) {
-      const stop = el('button', 'hold-stop', 'Hold to stop');
-      wireHoldToInterrupt(stop, s);
-      workingBanner.appendChild(stop);
-    }
-    sheet.appendChild(workingBanner);
-
-    // LIVE "what it's doing now" — directly above the composer (Claude Code
-    // style). Kept fresh by a ~3s probe of /api/rc/activity; collapses when idle.
-    const live = el('div', 'live-activity');
+    // One status strip directly above the composer (Claude Code style):
+    // spinner (or ⚠ when stalled), activity, tool line, and Hold-to-stop when
+    // the harness supports interruption. Only .la-main is re-rendered, so a
+    // hold in progress on Stop isn't torn out of the DOM by the 3s refresh.
+    // Hidden while idle.
+    const live = el('div', 'live-activity idle');
     live.id = 'liveActivity';
+    live.appendChild(el('div', 'la-main'));
+    if (s.capabilities && s.capabilities.interrupt) {
+      const stop = el('button', 'hold-stop', 'Stop');
+      stop.title = 'Hold to stop the current turn';
+      wireHoldToInterrupt(stop, s);
+      live.appendChild(stop);
+    }
     sheet.appendChild(live);
 
     // Composer + its slash-suggestion popup (relative anchor for the popup).
     const composerWrap = el('div', 'composer-wrap');
 
+    // Queue/Steer: only meaningful while a turn runs, so the row is shown by
+    // renderLiveActivity while working and resets to Queue when hidden.
     let delivery = 'auto';
     if (s.capabilities && s.capabilities.steer) {
       const deliveryRow = el('div', 'delivery-row');
-      deliveryRow.innerHTML = '<span>Busy delivery</span>';
-      const select = el('select', 'delivery-select');
-      select.innerHTML = '<option value="auto">Queue (default)</option><option value="steer">Steer current</option>';
-      select.addEventListener('change', () => { delivery = select.value; });
-      deliveryRow.appendChild(select);
+      deliveryRow.id = 'deliveryRow';
+      deliveryRow.hidden = true;
+      deliveryRow.innerHTML = '<span class="dl-label">While busy</span>' +
+        '<div class="seg" role="radiogroup">' +
+          '<button type="button" class="seg-opt on" data-v="auto" role="radio" aria-checked="true">Queue</button>' +
+          '<button type="button" class="seg-opt" data-v="steer" role="radio" aria-checked="false">Steer</button>' +
+        '</div>';
+      const pick = (v) => {
+        delivery = v;
+        $$('.seg-opt', deliveryRow).forEach((b) => {
+          const on = b.dataset.v === v;
+          b.classList.toggle('on', on);
+          b.setAttribute('aria-checked', on ? 'true' : 'false');
+        });
+      };
+      $$('.seg-opt', deliveryRow).forEach((b) => b.addEventListener('click', () => pick(b.dataset.v)));
+      deliveryRow.resetDelivery = () => pick('auto');
       composerWrap.appendChild(deliveryRow);
     }
 
@@ -815,6 +839,21 @@
       if (text[0] === '/') sendSlash(s.id, text, delivery);
       else sendAsk(s.id, text, delivery);
     });
+    // Visible entry to the slash commands (the list used to be discoverable
+    // only by typing '/').
+    const slashBtn = el('button', 'slash-btn', '/');
+    slashBtn.type = 'button';
+    slashBtn.title = 'Commands';
+    slashBtn.disabled = ta.disabled;
+    slashBtn.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus
+    slashBtn.addEventListener('click', () => {
+      if (ta.disabled) return;
+      if (ta.value[0] !== '/') ta.value = '/' + ta.value;
+      ta.focus();
+      send.disabled = !ta.value.trim();
+      updateSlashPop(s.id, ta);
+    });
+    composer.appendChild(slashBtn);
     composer.appendChild(ta);
     composer.appendChild(send);
     composerWrap.appendChild(composer);
@@ -1003,55 +1042,52 @@
     if (state.openSheetId !== id) return;
     const live = $('#liveActivity');
     if (!live) return;
-    const wb = $('#workingBanner');
-    if (wb) {
-      wb.hidden = !(a && a.working) && !state.pending.has(id);
-      const stalledNow = !!(a && a.working && a.stalled);
-      wb.classList.toggle('stalled', stalledNow);
-      const copy = $('.wb-copy', wb);
-      const canStop = !!$('.hold-stop', wb);
-      if (copy) copy.textContent = stalledNow
-        ? (canStop ? 'No progress for a while. Hold Stop to interrupt.' : 'No progress for a while.')
-        : 'Turn in progress. You can queue or steer a follow-up.';
+    const main = $('.la-main', live);
+    const working = !!(a && a.working);
+    const dr = $('#deliveryRow');
+    if (dr) {
+      if (dr.hidden === working && !working && dr.resetDelivery) dr.resetDelivery();
+      dr.hidden = !working;
     }
-    if (a && a.working) {
-      const stalled = !!(a && a.stalled);
-      live.className = 'live-activity working' + (stalled ? ' stalled' : '');
-      const toolText = toolLabel(a.currentTool);
-      // Stalled: spinner frozen across polls. Still "working", but flagged so a
-      // hung agent doesn't masquerade as live.
-      const lead = stalled ? '<span class="stall-dot">⚠</span>' : '<span class="spin"></span>';
-      const tag = stalled ? ' <span class="stall-tag">stalled</span>' : '';
-      live.innerHTML =
-        '<div class="la-row">' + lead +
-          '<span class="la-text">' + esc(a.activity || 'Working…') + tag + '</span></div>' +
-        (toolText ? '<div class="la-tool">' + esc(oneLine(toolText, 90)) + '</div>' : '');
-    } else {
+    if (!working) {
       live.className = 'live-activity idle';
-      live.innerHTML = '<div class="la-row"><span class="la-dot"></span>' +
-        '<span class="la-text">idle · waiting</span></div>';
+      // Re-arm Stop for the next turn (it stays disabled after firing).
+      const stop = $('.hold-stop', live);
+      if (stop) { stop.disabled = false; stop.classList.remove('armed'); stop.textContent = 'Stop'; }
+      return;
     }
+    const stalled = !!a.stalled;
+    live.className = 'live-activity working' + (stalled ? ' stalled' : '');
+    const toolText = toolLabel(a.currentTool);
+    // Stalled: spinner frozen across polls. Still "working", but flagged so a
+    // hung agent doesn't masquerade as live.
+    const lead = stalled ? '<span class="stall-dot">⚠</span>' : '<span class="spin"></span>';
+    const tag = stalled ? ' <span class="stall-tag">stalled</span>' : '';
+    main.innerHTML =
+      '<div class="la-row">' + lead +
+        '<span class="la-text">' + esc(a.activity || 'Working…') + tag + '</span></div>' +
+      (toolText ? '<div class="la-tool">' + esc(oneLine(toolText, 90)) + '</div>' : '');
   }
 
   function wireHoldToInterrupt(button, s) {
     const HOLD_MS = 900;
     let timer = null, fired = false;
     const begin = (e) => {
-      e.preventDefault(); fired = false; button.classList.add('armed'); button.textContent = 'Keep holding…';
+      e.preventDefault(); fired = false; button.classList.add('armed'); button.textContent = 'Hold…';
       timer = setTimeout(async () => {
         fired = true; button.disabled = true; button.textContent = 'Stopping…';
         try {
           const r = await api('POST', '/api/rc/interrupt', { sessionId: s.id, profile: CURRENT_PROFILE });
           button.textContent = r && r.stopped ? 'Stopped' : 'Stop sent';
         } catch (err) {
-          button.disabled = false; button.classList.remove('armed'); button.textContent = 'Hold to stop';
+          button.disabled = false; button.classList.remove('armed'); button.textContent = 'Stop';
           toast(s.title || 'Session', 'Interrupt failed: ' + err.message);
         }
       }, HOLD_MS);
     };
     const cancel = () => {
       if (fired) return;
-      clearTimeout(timer); button.classList.remove('armed'); button.textContent = 'Hold to stop';
+      clearTimeout(timer); button.classList.remove('armed'); button.textContent = 'Stop';
     };
     button.addEventListener('mousedown', begin);
     button.addEventListener('touchstart', begin, { passive: false });
@@ -1303,8 +1339,30 @@
       const beforeT = convo ? convo.scrollTop : 0;
       renderConvo(id, { keepScroll: true });
       if (convo) convo.scrollTop = beforeT;
+      showNewPill(appended);
     }
     renderDeck(); // refresh the card's last-reply preview
+  }
+
+  function showNewPill(n) {
+    const pill = $('#newPill');
+    if (!pill) return;
+    pill.dataset.count = String((Number(pill.dataset.count) || 0) + n);
+    pill.textContent = '↓ ' + pill.dataset.count + ' new';
+    pill.hidden = false;
+  }
+  function hideNewPill() {
+    const pill = $('#newPill');
+    if (pill) { pill.hidden = true; pill.dataset.count = '0'; }
+  }
+
+  // A timestamp closes a run of turns: shown when the next row is from the
+  // other side, more than 5 minutes later, or there is no next row.
+  function closesRun(e, next) {
+    if (!next) return true;
+    const side = (r) => (r === 'me' ? 'me' : 'agent');
+    if (side(e.role) !== side(next.role)) return true;
+    return !!(e.ts && next.ts && next.ts - e.ts > 300);
   }
 
   function renderConvo(id, opts) {
@@ -1333,7 +1391,7 @@
         body.textContent = e.content;
         row.appendChild(body);
         convo.appendChild(row);
-        convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
+        if (e.queued || closesRun(e, conv[i + 1])) convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
       } else if (e.role === 'reply') {
         // Merge consecutive 'reply' entries (one Claude turn can yield several
         // assistant text entries) into a single row. Codex commentary remains
@@ -1342,9 +1400,11 @@
         if (!e.kind && i > 0 && conv[i - 1].role === 'reply' && !conv[i - 1].kind) return;
         let content = e.content;
         let last = e;
+        let lastIdx = i;
         for (let j = i + 1; !e.kind && j < conv.length && conv[j].role === 'reply' && !conv[j].kind; j++) {
           content += '\n\n' + conv[j].content;
           last = conv[j];
+          lastIdx = j;
         }
         // Full-width assistant row: accent left border + '‹' marker.
         const row = el('div', 'msg reply');
@@ -1353,7 +1413,7 @@
         body.innerHTML = renderMarkdown(content);
         row.appendChild(body);
         convo.appendChild(row);
-        convo.appendChild(el('div', 'ts', fmtTime(last.ts)));
+        if (closesRun(last, conv[lastIdx + 1])) convo.appendChild(el('div', 'ts', fmtTime(last.ts)));
       } else if (e.role === 'error') {
         const row = el('div', 'msg err');
         row.appendChild(el('span', 'gutter', '⛔'));
@@ -1399,34 +1459,34 @@
         '<span>' + agent + ' is working… <span class="ctx">' + esc(pend.ctx || 'thinking') + '</span></span>';
       convo.appendChild(p);
     }
-    const wb = $('#workingBanner');
-    const openSession = state.sessions.get(id);
-    if (wb) wb.hidden = !(pend || (openSession && openSession.working));
 
     // Older-paging re-renders restore scroll position themselves (the caller
     // anchors on inserted height); everything else sticks to the bottom.
-    if (!(opts && opts.keepScroll)) convo.scrollTop = convo.scrollHeight;
+    if (!(opts && opts.keepScroll)) { convo.scrollTop = convo.scrollHeight; hideNewPill(); }
   }
 
-  // Tiny, safe markdown: escapes first, then re-introduces a few inline forms.
-  function renderMarkdown(src) {
-    let s = esc(src);
-    // fenced code blocks
-    s = s.replace(/```(?:\w+)?\n?([\s\S]*?)```/g, (_, code) => '<pre><code>' + code.replace(/\n$/, '') + '</code></pre>');
-    // inline code
-    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
-    // bold
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-    // headers (line-start #...)
-    s = s.replace(/^(#{1,6})\s*(.+)$/gm, '<span class="md-h">$2</span>');
-    // bullet lists
-    s = s.replace(/(?:^|\n)((?:- .+(?:\n|$))+)/g, (m, block) => {
-      const items = block.trim().split('\n').map((l) => '<li>' + l.replace(/^- /, '') + '</li>').join('');
-      return '<ul>' + items + '</ul>';
-    });
-    // remaining newlines
-    s = s.replace(/\n/g, '<br>');
-    return s;
+  // Escape-first markdown (web/markdown.js).
+  function renderMarkdown(src) { return DeckMarkdown.render(src); }
+
+  // Code-block toolbar (Wrap / Copy / Show all), delegated from the thread.
+  function onCodeAction(e) {
+    const btn = e.target.closest && e.target.closest('[data-act]');
+    const block = btn && btn.closest('.code');
+    if (!block) return;
+    const act = btn.dataset.act;
+    if (act === 'wrap') {
+      // The label says what a tap does: wrapped blocks offer Unwrap.
+      block.classList.toggle('wrap');
+      btn.textContent = block.classList.contains('wrap') ? 'Unwrap' : 'Wrap';
+    } else if (act === 'more') {
+      block.classList.remove('collapsed');
+      btn.remove();
+    } else if (act === 'copy') {
+      const code = $('code', block);
+      const done = (ok) => { btn.textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); };
+      if (navigator.clipboard && code) navigator.clipboard.writeText(code.textContent).then(() => done(true), () => done(false));
+      else done(false);
+    }
   }
 
   // ----- ask / slash -----
@@ -1506,6 +1566,7 @@
     const locked = !!(mount && mount.querySelector('.approve-card'));
     const send = ta.parentElement && ta.parentElement.querySelector('.send-btn');
     if (send) send.disabled = locked || !ta.value.trim();
+    const slash = ta.parentElement && ta.parentElement.querySelector('.slash-btn');
     if (locked && !ta.dataset.lockPlaceholder) {
       ta.dataset.lockPlaceholder = ta.placeholder;
       ta.dataset.lockDisabled = ta.disabled ? '1' : '';
@@ -1517,6 +1578,7 @@
       delete ta.dataset.lockPlaceholder;
       delete ta.dataset.lockDisabled;
     }
+    if (slash) slash.disabled = ta.disabled;
   }
 
   // "Bash command" / "git push origin main": the dialog's first two lines, as

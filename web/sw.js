@@ -9,11 +9,12 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v6';
+const CACHE = 'deck-remote-v7';
 const SHELL = [
   '/',
   '/index.html',
   '/thread.js',
+  '/markdown.js',
   '/app.js',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
