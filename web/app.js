@@ -1090,7 +1090,8 @@
   function historyToTurn(m) {
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
-    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '' };
+    // hist: from the transcript, so a fresh history page may replace it.
+    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
@@ -1115,13 +1116,13 @@
       // Seed the convo from history (oldest-first), preserving any in-flight
       // pending turn (that's tracked separately in state.pending, so we only
       // need to avoid clobbering it — which we don't, convos != pending).
+      // Replace the rows that came from history and keep live ones (queued
+      // 'me' rows, SSE replies, errors) the transcript hasn't caught up with.
+      // Re-appending the whole old thread duplicated it on every reopen.
       const conv = ensureConvo(id);
-      // Keep any live turns the user fired before history landed (e.g. queued
-      // 'me' rows / errors): prepend the history snapshot ahead of them.
-      const live = conv.slice();
+      const merged = DeckThread.mergeFreshHistory(msgs.map(historyToTurn), conv);
       conv.length = 0;
-      msgs.forEach((m) => conv.push(historyToTurn(m)));
-      live.forEach((e) => conv.push(e));
+      merged.forEach((e) => conv.push(e));
       state.history.set(id, { loaded: msgs.length, hasMore: !!(r && r.hasMore), loading: false });
       renderConvo(id);
       renderDeck();
@@ -1165,9 +1166,11 @@
     const conv = ensureConvo(id);
     // Prepend older messages ahead of the existing thread, after any leading
     // note row so the "Full history" hint stays at the very top.
-    const turns = msgs.map(historyToTurn);
     let insertAt = 0;
     while (insertAt < conv.length && conv[insertAt].role === 'note') insertAt++;
+    // The offset counts back from the newest message, so turns appended since
+    // the last page make this one overlap the thread's head: trim it.
+    const turns = DeckThread.trimOverlap(msgs.map(historyToTurn), conv.slice(insertAt));
     conv.splice(insertAt, 0, ...turns);
     state.history.set(id, {
       loaded: hs.loaded + msgs.length,
@@ -1243,6 +1246,9 @@
     });
 
     if (!appended) return; // common case: nothing new — cheap no-op
+    // Keep the scroll-back offset aligned with what the thread holds.
+    const hsNow = state.history.get(id);
+    if (hsNow) hsNow.loaded += appended;
 
     if (nearBottom) {
       // User is at the live edge: render normally so it sticks to the bottom.
