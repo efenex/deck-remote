@@ -40,14 +40,15 @@
   #bar {
     flex: 0 0 auto;
     display: flex; align-items: center; gap: 10px;
-    height: 42px; padding: 0 12px;
+    height: 52px; padding: 0 8px;
     background: var(--chrome);
     border-bottom: 1px solid var(--border);
     font-size: 13px;
   }
   #bar a.back {
     color: var(--accent); text-decoration: none;
-    padding: 4px 8px; border-radius: 8px;
+    display: inline-flex; align-items: center; min-height: 44px;
+    padding: 0 12px; border-radius: 10px; font-size: 15px;
     background: rgba(122,162,247,.12);
     white-space: nowrap;
   }
@@ -62,12 +63,33 @@
   #conn.live #led { background: var(--green); }
   #conn.bad  #led { background: var(--red); }
   /* Terminal host: fills remaining space; xterm fits into it. */
+  /* While the on-screen keyboard is up (#wrap.kb) the terminal keeps its size
+     (no resize of the shared tmux pane) and is bottom-aligned, so its TOP
+     rows are clipped and the input line stays just above the keyboard. */
   #term {
     flex: 1; min-height: 0; min-width: 0;
     padding: 6px 8px;
     overflow: hidden;
     background: var(--bg);
+    display: flex; flex-direction: column;
   }
+  #wrap.kb #term { justify-content: flex-end; }
+  #term > .terminal { flex: 0 0 auto; }
+  /* Keys the phone keyboard lacks. */
+  #keys {
+    flex: 0 0 auto; display: flex; gap: 6px; padding: 6px 8px;
+    background: var(--chrome); border-top: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  #keys button {
+    flex: 1 0 auto; min-width: 48px; min-height: 44px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: #24283b; color: var(--fg);
+    font: 600 14px ui-monospace, "SF Mono", Menlo, monospace;
+    -webkit-user-select: none; user-select: none; touch-action: manipulation;
+  }
+  #keys button:active { background: #2b3047; }
+  #keys button[data-key=up], #keys button[data-key=down], #keys button[data-key=enter] { font-size: 19px; }
   /* Centered notice (no token / disconnected). */
   #notice {
     position: absolute; inset: 0;
@@ -100,6 +122,14 @@
     <span id="conn"><span id="led"></span><span id="conntext">connecting…</span></span>
   </div>
   <div id="term"></div>
+  <div id="keys">
+    <button type="button" data-key="esc">Esc</button>
+    <button type="button" data-key="tab">Tab</button>
+    <button type="button" data-key="ctrlc">^C</button>
+    <button type="button" data-key="up">↑</button>
+    <button type="button" data-key="down">↓</button>
+    <button type="button" data-key="enter">⏎</button>
+  </div>
 </div>
 <div id="notice"><div class="box">
   <h2 id="noticeTitle">Terminal unavailable</h2>
@@ -133,6 +163,8 @@
   var $noticeActions = document.getElementById('noticeActions');
 
   $sid.textContent = sessionId ? ('session · ' + sessionId) : 'no session';
+  // Back lands on this session's thread, not the bare deck.
+  if (sessionId) document.querySelector('#bar a.back').href = '/?session=' + encodeURIComponent(sessionId);
 
   function setConn(stateName, text) {
     $conn.className = stateName; // '', 'live', 'bad'
@@ -204,7 +236,32 @@
   // backend doesn't leave us spinning forever.
   var MAX_RECONNECT_ATTEMPTS = 6;
 
+  // ---- on-screen keyboard -------------------------------------------------
+  // iOS doesn't shrink the layout viewport for the keyboard, so the fixed
+  // #wrap kept its full height and the bottom rows (the input line) sat
+  // behind the keyboard. Track the visual viewport instead. While the
+  // keyboard is up we don't refit: the tmux pane is shared with the laptop,
+  // and #term is bottom-aligned so the top rows are what gets clipped.
+  var $wrap = document.getElementById('wrap');
+  var vv = window.visualViewport;
+  var keyboardOpen = false;
+  function onViewport() {
+    if (!vv) return;
+    keyboardOpen = vv.height < window.innerHeight - 120;
+    $wrap.classList.toggle('kb', keyboardOpen);
+    $wrap.style.height = keyboardOpen ? vv.height + 'px' : '';
+    $wrap.style.bottom = keyboardOpen ? 'auto' : '';
+    $wrap.style.transform = keyboardOpen && vv.offsetTop ? 'translateY(' + vv.offsetTop + 'px)' : '';
+    // Safe-area bottom padding belongs to the home bar, not the keyboard.
+    $wrap.style.paddingBottom = keyboardOpen ? '0px' : '';
+  }
+  if (vv) {
+    vv.addEventListener('resize', onViewport);
+    vv.addEventListener('scroll', onViewport);
+  }
+
   function doFit() {
+    if (keyboardOpen) return;
     if (!$term.offsetWidth || !$term.offsetHeight) return;
     try { fitAddon.fit(); } catch (_e) { return; }
     var cols = terminal.cols, rows = terminal.rows;
@@ -230,6 +287,19 @@
   // Mobile: tapping the terminal focuses the xterm helper textarea to raise
   // the on-screen keyboard.
   $term.addEventListener('click', function () { terminal.focus(); });
+
+  // Key bar: send the sequence without taking focus from xterm's textarea (so
+  // the keyboard stays up).
+  var KEYS = { esc: '\x1b', tab: '\t', ctrlc: '\x03', up: '\x1b[A', down: '\x1b[B', enter: '\r' };
+  Array.prototype.forEach.call(document.querySelectorAll('#keys button'), function (b) {
+    b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    b.addEventListener('touchstart', function (e) { e.preventDefault(); b.click(); }, { passive: false });
+    b.addEventListener('click', function () {
+      var data = KEYS[b.dataset.key];
+      if (!data || !ws || ws.readyState !== WebSocket.OPEN || !terminalAttached || readOnly) return;
+      ws.send(JSON.stringify({ type: 'input', data: data }));
+    });
+  });
 
   // Input forwarding — gated on terminalAttached + !readOnly, exactly as the
   // reference client does (server also enforces read-only).

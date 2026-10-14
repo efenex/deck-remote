@@ -674,9 +674,10 @@
   }
 
   function sheetHeadHTML(s) {
-    // Open the embedded xterm.js terminal page. Same-origin, so the token is
-    // read from localStorage by terminal.html — we deliberately do NOT put it
-    // in the URL (avoids leaking it into history / target=_blank referrers).
+    // Open the embedded xterm.js terminal page in the same window: an installed
+    // iOS PWA opens target=_blank in a separate browser context whose storage
+    // lacks the token. Same-origin, so terminal.html reads the token from
+    // localStorage; it is deliberately not put in the URL.
     const termURL = '/terminal.html?id=' + encodeURIComponent(s.id);
     // The terminal is reverse-proxied to ONE agent-deck web bound to PROXY_PROFILE,
     // so it can't follow the profile selector. Disable + annotate it honestly when
@@ -685,7 +686,7 @@
     const termOff = CURRENT_PROFILE && PROXY_PROFILE && CURRENT_PROFILE !== PROXY_PROFILE;
     const termLink = termOff
       ? '<a class="sheet-term disabled" title="Terminal only available for the \'' + esc(PROXY_PROFILE) + '\' profile" aria-disabled="true">⧉</a>'
-      : '<a class="sheet-term" title="Open full web terminal" target="_blank" rel="noopener" href="' + termURL + '">⧉</a>';
+      : '<a class="sheet-term" title="Open full web terminal" href="' + termURL + '">⧉</a>';
     // grabber + header are wrapped in .sheet-handle: this whole region (which
     // sits ABOVE the scrolling convo and never scrolls) is the swipe-down
     // dismiss target, keeping it cleanly separate from the convo's scroll-up
@@ -2155,7 +2156,7 @@
     }
     const id = state.openSheetId || (Array.from(state.sessions.keys())[0]);
     const url = id ? '/terminal.html?id=' + encodeURIComponent(id) : tokenURL('/');
-    window.open(url, '_blank', 'noopener');
+    location.href = url; // same window: see sheetHeadHTML
   });
 
   // ---------------------------------------------------------------------------
