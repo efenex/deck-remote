@@ -223,7 +223,6 @@
     if (tab === 'inbox') { renderInbox(); loadInbox(); }
   }
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
-  $('#goSettings').addEventListener('click', () => showTab('settings'));
   $('#goRefresh').addEventListener('click', async () => {
     const b = $('#goRefresh');
     b.classList.add('busy');
@@ -381,10 +380,10 @@
     const conv = state.convos.get(s.id);
     if (conv && conv.length) {
       for (let i = conv.length - 1; i >= 0; i--) {
-        if (conv[i].role === 'reply' && conv[i].content) return oneLine(conv[i].content);
+        if (conv[i].role === 'reply' && conv[i].content) return oneLine(conv[i].content, 200);
       }
     }
-    return oneLine(s.lastReply || '');
+    return oneLine(s.lastReply || '', 200);
   }
 
   function oneLine(s, max) {
@@ -468,6 +467,20 @@
     return t;
   }
 
+  // The deck leads with state, not the tree: Needs you → Working → Recent
+  // (active in the last RECENT_S) → the rest in their folded tree groups.
+  const RECENT_S = 86400;
+
+  function deckSection(deck, title, list, cls) {
+    if (!list.length) return;
+    const sec = el('section', 'deck-section' + (cls ? ' ' + cls : ''));
+    const head = el('div', 'section-head');
+    head.innerHTML = '<span class="section-title">' + esc(title) + '</span><span class="count">' + list.length + '</span>';
+    sec.appendChild(head);
+    list.forEach((s) => sec.appendChild(cardEl(s)));
+    deck.appendChild(sec);
+  }
+
   function renderDeck() {
     const deck = $('#deck');
     const all = Array.from(state.sessions.values());
@@ -481,10 +494,28 @@
     }
 
     deck.innerHTML = '';
+    const byTitle = (a, b) => (a.title || a.id).localeCompare(b.title || b.id);
+    const byRecent = (a, b) => (Number(b.lastActivity) || 0) - (Number(a.lastActivity) || 0) || byTitle(a, b);
+    const cut = Date.now() / 1000 - RECENT_S;
+    const needs = all.filter((s) => s.needsAttention).sort(byRecent);
+    const working = all.filter((s) => !s.needsAttention && s.working).sort(byTitle);
+    const recent = all.filter((s) => !s.needsAttention && !s.working && (Number(s.lastActivity) || 0) > cut).sort(byRecent);
+    const placed = new Set(needs.concat(working, recent).map((s) => s.id));
+    const older = all.filter((s) => !placed.has(s.id));
 
-    // Group by tree/group. Within-group session order stays stable-alpha.
+    deckSection(deck, 'Needs you', needs, 'sec-needs');
+    deckSection(deck, 'Working', working, 'sec-work');
+    deckSection(deck, 'Recent', recent);
+    if (!older.length) return;
+    if (placed.size) {
+      const head = el('div', 'section-head older-head');
+      head.innerHTML = '<span class="section-title">Older</span><span class="count">' + older.length + '</span>';
+      deck.appendChild(head);
+    }
+
+    // Older: by tree/group, folded by default (stale), as before.
     const groups = new Map();
-    all.forEach((s) => {
+    older.forEach((s) => {
       const k = groupKey(s);
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(s);
@@ -493,16 +524,12 @@
     // Precompute per-group recency so we can sort and label headers.
     const meta = new Map(); // name -> {info, list}
     groups.forEach((list, k) => {
-      const sorted = list.slice().sort((a, b) => {
-        if (!!a.needsAttention !== !!b.needsAttention) return a.needsAttention ? -1 : 1;
-        if (!!a.working !== !!b.working) return a.working ? -1 : 1;
-        return (a.title || a.id).localeCompare(b.title || b.id);
-      });
+      const sorted = list.slice().sort(byTitle);
       meta.set(k, { info: groupRecency(sorted), list: sorted });
     });
 
-    // Ordering: by activity (working/most-recent first, "never" last) when the
-    // pref is ON; else the legacy alphabetical order. Ties break alphabetically.
+    // Ordering: by activity (most-recent first, "never" last) when the pref is
+    // ON; else alphabetical. Ties break alphabetically.
     let keys = Array.from(groups.keys());
     if (prefs.sortGroupsByActivity) {
       keys.sort((a, b) => {
@@ -520,15 +547,13 @@
 
       const grp = el('div', 'group' + (collapsed ? ' collapsed' : ''));
       const head = el('div', 'group-head');
-      const treeHTML = esc(k).replace(/ \/ /g, ' / ');
+      head.setAttribute('role', 'button');
+      head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       const age = relAge(info.last, info.working);
-      // Collapsed headers carry a summary (count + age); expanded show a dim age.
-      const summary = collapsed
-        ? '<span class="summary">' + list.length + ' · ' + esc(age) + '</span>'
-        : '<span class="age">' + esc(age) + '</span><span class="count">' + list.length + '</span>';
       head.innerHTML =
         '<span class="chev">' + (collapsed ? '▸' : '▾') + '</span>' +
-        '<span class="tree">' + treeHTML + '</span> ' + summary;
+        '<span class="tree">' + esc(k) + '</span>' +
+        '<span class="age">' + esc(age) + '</span><span class="count">' + list.length + '</span>';
       head.addEventListener('click', () => toggleGroup(k, info));
       grp.appendChild(head);
       if (!collapsed) list.forEach((s) => grp.appendChild(cardEl(s)));
@@ -573,12 +598,9 @@
     const card = el('div', 'card' + (st ? ' ' + st : ''));
     card.dataset.id = s.id;
 
-    // Title row: title + tool chip.
+    // Title row: title + state (needs-you chip or new-reply dot).
     const top = el('div', 'card-top');
     top.appendChild(el('div', 'card-title', s.title || s.id));
-    const harness = el('span', 'harness');
-    harness.innerHTML = '<span class="gi">✦</span>' + esc(s.tool || 'agent');
-    top.appendChild(harness);
     if (s.needsAttention) top.appendChild(el('span', 'attention-chip', 'needs you'));
     else if (hasNewReply(s)) {
       const dot = el('span', 'new-dot');
@@ -587,9 +609,10 @@
     }
     card.appendChild(top);
 
-    // Group/tree crumb.
+    // One meta line: harness · group · age.
     const meta = el('div', 'card-meta');
-    meta.appendChild(el('span', 'path', groupKey(s)));
+    const age = relAge(s.lastActivity, s.working);
+    meta.textContent = [s.tool || 'agent', groupKey(s), age === '—' ? '' : age].filter(Boolean).join(' · ');
     card.appendChild(meta);
 
     // Live activity takes over the hero detail while the agent is working;
@@ -685,8 +708,8 @@
     // the proxy can't see).
     const termOff = CURRENT_PROFILE && PROXY_PROFILE && CURRENT_PROFILE !== PROXY_PROFILE;
     const termLink = termOff
-      ? '<a class="sheet-term disabled" title="Terminal only available for the \'' + esc(PROXY_PROFILE) + '\' profile" aria-disabled="true">⧉</a>'
-      : '<a class="sheet-term" title="Open full web terminal" href="' + termURL + '">⧉</a>';
+      ? '<a class="sheet-term disabled" title="Terminal only available for the \'' + esc(PROXY_PROFILE) + '\' profile" aria-disabled="true"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10l3 2-3 2M12 15h5"/></svg></a>'
+      : '<a class="sheet-term" title="Open full web terminal" aria-label="Terminal" href="' + termURL + '"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10l3 2-3 2M12 15h5"/></svg></a>';
     // grabber + header are wrapped in .sheet-handle: this whole region (which
     // sits ABOVE the scrolling convo and never scrolls) is the swipe-down
     // dismiss target, keeping it cleanly separate from the convo's scroll-up
@@ -701,7 +724,7 @@
           '<div class="sheet-sub"><span class="harness"><span class="gi">✦</span>' + esc(s.tool || 'agent') + '</span>' +
             '<span>' + esc(groupKey(s)) + '</span></div>' +
         '</div>' +
-        '<button class="icon-btn sheet-check" id="sheetCheckPerm" title="Check for approval"><span class="gi">🔐</span></button>' +
+        '<button class="icon-btn sheet-check" id="sheetCheckPerm" title="Check for a pending request" aria-label="Check for a pending request"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg></button>' +
         termLink +
       '</div></div>' +
       '</div>'
@@ -1729,12 +1752,17 @@
     if (evRC) { evRC.close(); evRC = null; }
   }
 
+  // Live: a green dot by the title. Anything else also shows the detail strip.
   function setConn(text, cls) {
+    const led = $('#titleLed');
+    if (led) { led.className = 'title-led' + (cls ? ' ' + cls : ''); led.title = text; }
     const strip = $('#connStrip');
     if (!strip) return;
     strip.className = 'conn' + (cls ? ' ' + cls : '');
+    strip.hidden = cls === 'live';
     $('#connText').textContent = text;
   }
+
 
   function startStreams() {
     teardownStreams();
