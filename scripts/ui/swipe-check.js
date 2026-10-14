@@ -1,0 +1,21 @@
+const { chromium } = require(process.env.PW);
+(async () => { const b = await chromium.launch(); const c = await b.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,serviceWorkers:'block'}); const p = await c.newPage();
+ const errs=[]; p.on('pageerror', e => errs.push(e.message));
+ await p.goto(process.argv[2] + '/?token=fake'); await p.waitForTimeout(1200);
+ const swipe = async (x0, y0, x1, y1, target) => p.evaluate(([x0,y0,x1,y1,target]) => {
+   const el = document.querySelector(target);
+   const t = (x,y) => new Touch({ identifier: 1, target: el, clientX: x, clientY: y });
+   el.dispatchEvent(new TouchEvent('touchstart', { touches: [t(x0,y0)], bubbles: true, cancelable: true }));
+   for (let i = 1; i <= 5; i++) el.dispatchEvent(new TouchEvent('touchmove', { touches: [t(x0+(x1-x0)*i/5, y0+(y1-y0)*i/5)], bubbles: true, cancelable: true }));
+   el.dispatchEvent(new TouchEvent('touchend', { touches: [], bubbles: true, cancelable: true }));
+ }, [x0,y0,x1,y1,target]);
+ await p.click('.card[data-id=s2]'); await p.waitForTimeout(800);
+ await swipe(200, 40, 200, 140, '#sheetHandle'); await p.waitForTimeout(300);
+ const down = await p.evaluate(() => !document.querySelector('#sheet'));
+ await p.click('.card[data-id=s2]'); await p.waitForTimeout(800);
+ await swipe(200, 40, 200, 70, '#sheetHandle'); await p.waitForTimeout(300);
+ const small = await p.evaluate(() => !!document.querySelector('#sheet'));
+ await swipe(10, 400, 150, 405, '#convo'); await p.waitForTimeout(300);
+ const edge = await p.evaluate(() => !document.querySelector('#sheet'));
+ console.log('swipe-down closes:', down, '| short drag keeps open:', small, '| edge-swipe closes:', edge, '| errors:', JSON.stringify(errs));
+ await b.close(); })();
