@@ -9,14 +9,15 @@
  * Scope is "/" (registered from the root). No external/CDN deps.
  */
 
-const CACHE = 'deck-remote-v13';
+// Bump with the ?v= on index.html's script tags.
+const CACHE = 'deck-remote-v14';
 const SHELL = [
   '/',
   '/index.html',
-  '/thread.js',
-  '/markdown.js',
-  '/gestures.js',
-  '/app.js',
+  '/thread.js?v=14',
+  '/markdown.js?v=14',
+  '/gestures.js?v=14',
+  '/app.js?v=14',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.
@@ -71,7 +72,7 @@ self.addEventListener('fetch', (event) => {
         return res;
       })
       .catch(() =>
-        caches.match(req).then((hit) => hit || caches.match('/index.html'))
+        caches.match(req, { ignoreSearch: true }).then((hit) => hit || caches.match('/index.html'))
       )
   );
 });
