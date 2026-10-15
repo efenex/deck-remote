@@ -162,6 +162,8 @@
     history: new Map(),       // id -> {loaded, hasMore, loading} scroll-back paging state
     pushConfig: null,         // {enabled, publicKey}
     openSheetId: null,        // session id whose sheet is open
+    view: {},                 // {label, hidden}: agent-deck TUI filter applied server-side
+    showAll: false,           // bypass that filter for this visit (?all=1)
     activityTimer: null,      // interval id for the open sheet's live-activity poll
     convoScrollHandler: null, // scroll listener attached to the open sheet's #convo
     swipeTeardown: null,      // removes the open sheet's swipe-dismiss listeners (gestures.js)
@@ -370,6 +372,14 @@
       try { await loadSessions(false); } catch (_) {}
     }
     if (!state.sessions.has(id)) {
+      // Hidden by the synced agent-deck filter: fetch it unfiltered.
+      try {
+        const r = await api('GET', '/api/rc/sessions?all=1');
+        const s = ((r && r.sessions) || []).find((x) => x.id === id);
+        if (s) state.sessions.set(id, s);
+      } catch (_) {}
+    }
+    if (!state.sessions.has(id)) {
       toast('Session not found', 'It may have been removed, or it belongs to another profile.');
       return;
     }
@@ -523,9 +533,32 @@
     deck.appendChild(sec);
   }
 
+  // The list mirrors the agent-deck TUI's filter (% open, * today, …); the
+  // chip names it and lets this visit show everything instead.
+  function viewChip(deck) {
+    const v = state.view || {};
+    if (!v.label) return;
+    const chip = el('div', 'view-chip');
+    const txt = state.showAll
+      ? 'Showing all · agent-deck view is ' + esc(v.label)
+      : esc(v.label) + ' · from agent-deck' + (v.hidden ? ' · ' + v.hidden + ' hidden' : '');
+    chip.innerHTML = '<span>' + txt + '</span><button type="button" class="view-chip-btn">' + (state.showAll ? 'Use filter' : 'Show all') + '</button>';
+    $('button', chip).addEventListener('click', () => { state.showAll = !state.showAll; loadSessions(false); });
+    deck.appendChild(chip);
+  }
+
   function renderDeck() {
     const deck = $('#deck');
     const all = Array.from(state.sessions.values());
+
+    if (!all.length && state.view && state.view.hidden) {
+      deck.innerHTML = '';
+      viewChip(deck);
+      const ph = el('div', 'placeholder');
+      ph.textContent = 'No sessions match the agent-deck filter.';
+      deck.appendChild(ph);
+      return;
+    }
 
     if (!all.length) {
       deck.innerHTML = '';
@@ -536,6 +569,7 @@
     }
 
     deck.innerHTML = '';
+    viewChip(deck);
     const byTitle = (a, b) => (a.title || a.id).localeCompare(b.title || b.id);
     const byRecent = (a, b) => (Number(b.lastActivity) || 0) - (Number(a.lastActivity) || 0) || byTitle(a, b);
     const cut = Date.now() / 1000 - RECENT_S;
@@ -2177,8 +2211,9 @@
   // ---------------------------------------------------------------------------
   async function loadSessions(initial) {
     try {
-      const r = await api('GET', '/api/rc/sessions');
+      const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
       const list = (r && r.sessions) || [];
+      state.view = (r && r.view) || {};
       // Merge: keep ids stable so an open sheet isn't disrupted; replace fields
       // (incl. refreshed lastReply) and drop sessions no longer present.
       const seen = new Set();
@@ -2187,7 +2222,7 @@
         const prev = state.sessions.get(s.id);
         state.sessions.set(s.id, Object.assign({}, prev || {}, s));
       });
-      Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id)) state.sessions.delete(id); });
+      Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       setConn('Live', 'live');
     } catch (e) {
       setConn('Can\'t reach server: ' + e.message, 'bad');

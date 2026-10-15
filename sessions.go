@@ -78,7 +78,15 @@ func (s *server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	// Mirror the TUI's list filter unless the PWA asked for everything.
+	var view viewInfo
+	if r.URL.Query().Get("all") != "1" {
+		sessions, view = applyView(sessions, s.viewFilterFor(ctx))
+	} else {
+		view.Label = s.viewFilterFor(ctx).label()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions, "view": view})
 }
 
 // GET /api/rc/reply?id=<id|title> — last clean reply (wraps `session output --json`).

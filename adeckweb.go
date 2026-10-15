@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -57,6 +58,8 @@ type menuSessionWire struct {
 	ClaudeSessionID string `json:"claudeSessionId"`
 	CodexSessionID  string `json:"codexSessionId"`
 	SSHHost         string `json:"sshHost"`
+	LastActivityAt  string `json:"lastActivityAt"` // fork build; absent upstream
+	ArchivedAt      string `json:"archivedAt"`
 }
 
 type sessionsWireResp struct {
@@ -79,6 +82,8 @@ func mapMenuSession(m menuSessionWire, profile string) sessionInfo {
 		ClaudeSessionID: m.ClaudeSessionID,
 		CodexSessionID:  m.CodexSessionID,
 		SSHHost:         m.SSHHost,
+		LastActivityAt:  m.LastActivityAt,
+		Archived:        m.ArchivedAt != "" && !strings.HasPrefix(m.ArchivedAt, "0001-"),
 	}
 }
 

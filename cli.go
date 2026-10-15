@@ -120,6 +120,11 @@ type sessionInfo struct {
 	// hook .sid sidecar (in that order).
 	CodexSessionID    string `json:"codex_session_id,omitempty"`
 	ResolvedCodexHome string `json:"resolved_codex_home,omitempty"`
+	// TUI view-filter inputs (viewfilter.go). LastActivityAt is agent-deck's
+	// DisplayLastActivityTime (RFC 3339); both come from the CLI list or, on a
+	// fork build, the web list.
+	LastActivityAt string `json:"last_activity_at,omitempty"`
+	Archived       bool   `json:"archived,omitempty"`
 	// Populated by the agent-deck web list (adeckweb.go); best-effort from the
 	// CLI list. TmuxSocket/SSHHost never reach the PWA wire (internal use).
 	ClaudeSessionID string `json:"claude_session_id,omitempty"`

@@ -179,6 +179,7 @@ type server struct {
 	codexReqs *codexRequestTracker
 	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
 	lists     *listCache  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
+	views     *viewCache  // TTL-cached TUI view filter per profile (viewfilter.go)
 	replies   *replyCache // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
@@ -226,6 +227,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(filepath.Join(home, ".agent-deck")),
 		lists:     newListCache(),
+		views:     newViewCache(),
 		replies:   newReplyCache(),
 	}
 }
