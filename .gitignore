@@ -15,3 +15,7 @@ mockups/
 
 # bd workspace gate file (beside .beads)
 .beads.gate.lock
+
+# Python bytecode (scripts/ui mock server)
+__pycache__/
+*.pyc
