@@ -57,6 +57,7 @@ type menuSessionWire struct {
 	Model           string `json:"model"`
 	ClaudeSessionID string `json:"claudeSessionId"`
 	CodexSessionID  string `json:"codexSessionId"`
+	OpenCodeSessID  string `json:"opencodeSessionId"`
 	SSHHost         string `json:"sshHost"`
 	LastActivityAt  string `json:"lastActivityAt"` // fork build; absent upstream
 	ArchivedAt      string `json:"archivedAt"`
@@ -69,21 +70,22 @@ type sessionsWireResp struct {
 
 func mapMenuSession(m menuSessionWire, profile string) sessionInfo {
 	return sessionInfo{
-		ID:              m.ID,
-		Title:           m.Title,
-		Path:            m.ProjectPath,
-		Group:           m.GroupPath,
-		Tool:            m.Tool,
-		Status:          m.Status,
-		TmuxSession:     m.TmuxSession,
-		TmuxSocket:      m.TmuxSocketName,
-		Profile:         profile,
-		Model:           m.Model,
-		ClaudeSessionID: m.ClaudeSessionID,
-		CodexSessionID:  m.CodexSessionID,
-		SSHHost:         m.SSHHost,
-		LastActivityAt:  m.LastActivityAt,
-		Archived:        m.ArchivedAt != "" && !strings.HasPrefix(m.ArchivedAt, "0001-"),
+		ID:                m.ID,
+		Title:             m.Title,
+		Path:              m.ProjectPath,
+		Group:             m.GroupPath,
+		Tool:              m.Tool,
+		Status:            m.Status,
+		TmuxSession:       m.TmuxSession,
+		TmuxSocket:        m.TmuxSocketName,
+		Profile:           profile,
+		Model:             m.Model,
+		ClaudeSessionID:   m.ClaudeSessionID,
+		CodexSessionID:    m.CodexSessionID,
+		OpenCodeSessionID: m.OpenCodeSessID,
+		SSHHost:           m.SSHHost,
+		LastActivityAt:    m.LastActivityAt,
+		Archived:          m.ArchivedAt != "" && !strings.HasPrefix(m.ArchivedAt, "0001-"),
 	}
 }
 

@@ -176,6 +176,7 @@ type server struct {
 	acts      *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
 	codex     *codexRolloutStore
 	pi        *piTranscriptStore
+	oc        *opencodeClient
 	attn      *attentionCache
 	codexReqs *codexRequestTracker
 	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
@@ -225,6 +226,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		acts:      newActivityCache(),
 		codex:     newCodexRolloutStore(),
 		pi:        newPiTranscriptStore(),
+		oc:        newOpencodeClient(),
 		attn:      newAttentionCache(),
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(stateDir(home)),

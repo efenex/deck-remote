@@ -103,7 +103,7 @@ func (a genericAdapter) RespondAttention(context.Context, sessionInfo, attention
 // rather than the Claude-only agent-deck turn runner.
 func snapshotHarness(tool string) bool {
 	switch tool {
-	case "codex", "pi", "omp":
+	case "codex", "pi", "omp", "opencode":
 		return true
 	}
 	return false
@@ -124,6 +124,8 @@ func (s *server) adapterFor(se sessionInfo) harnessAdapter {
 		return piAdapter{s: s, root: ".pi"}
 	case "omp":
 		return piAdapter{s: s, root: ".omp"}
+	case "opencode":
+		return opencodeAdapter{s: s}
 	default:
 		return genericAdapter{s: s}
 	}

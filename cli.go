@@ -120,6 +120,7 @@ type sessionInfo struct {
 	// hook .sid sidecar (in that order).
 	CodexSessionID    string `json:"codex_session_id,omitempty"`
 	ResolvedCodexHome string `json:"resolved_codex_home,omitempty"`
+	OpenCodeSessionID string `json:"opencode_session_id,omitempty"`
 	// TUI view-filter inputs (viewfilter.go). LastActivityAt is agent-deck's
 	// DisplayLastActivityTime (RFC 3339); both come from the CLI list or, on a
 	// fork build, the web list.
