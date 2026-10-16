@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 type codexPendingRequest struct {
 	RequestID string
@@ -50,7 +53,7 @@ func (t *codexRequestTracker) reconcile(sessionID string, snap harnessSnapshot) 
 			continue
 		}
 		for _, msg := range snap.Messages {
-			if msg.Role == "user" && msg.Seq > pending[i].Baseline && msg.Content == pending[i].Text && !usedUser[msg.Seq] {
+			if msg.Role == "user" && msg.Seq > pending[i].Baseline && sameTypedText(msg.Content, pending[i].Text) && !usedUser[msg.Seq] {
 				pending[i].TurnID, pending[i].UserSeq = msg.TurnID, msg.Seq
 				usedUser[msg.Seq] = true
 				break
@@ -80,4 +83,14 @@ func (t *codexRequestTracker) reconcile(sessionID string, snap harnessSnapshot) 
 		t.m[sessionID] = keep
 	}
 	return replies
+}
+
+// sameTypedText compares a delivered request with the user message the harness
+// recorded, ignoring whitespace: keystroke delivery can drop or re-flow line
+// breaks (a TUI editor may trim, join or wrap them).
+func sameTypedText(a, b string) bool {
+	strip := func(s string) string {
+		return strings.Join(strings.Fields(s), "")
+	}
+	return strip(a) == strip(b)
 }

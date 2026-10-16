@@ -1484,7 +1484,7 @@
     if (pend) {
       const p = el('div', 'pending');
       const session = state.sessions.get(id);
-      const agent = session && session.tool === 'codex' ? 'Codex' : 'Claude';
+      const agent = ({ codex: 'Codex', pi: 'Pi', omp: 'omp', opencode: 'OpenCode' })[session && session.tool] || 'Claude';
       p.innerHTML = '<span class="tdots"><i></i><i></i><i></i></span>' +
         '<span>' + agent + ' is working… <span class="ctx">' + esc(pend.ctx || 'thinking') + '</span></span>';
       convo.appendChild(p);

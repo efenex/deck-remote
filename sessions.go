@@ -103,7 +103,7 @@ func (s *server) handleReply(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool == "codex" {
+	if snapshotHarness(se.Tool) {
 		snap, snapErr := s.adapterFor(se).Snapshot(ctx, se, "", false)
 		if snapErr != nil || snap.DegradedReason != "" {
 			if snapErr != nil {

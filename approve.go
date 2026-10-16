@@ -81,7 +81,7 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" && se.Tool != "codex" {
+	if !structuredHarness(se.Tool) {
 		httpError(w, http.StatusBadRequest, "guarded approve is unavailable for this harness")
 		return
 	}
@@ -97,7 +97,7 @@ func (s *server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"sessionId": se.ID, "approved": false, "reason": "no permission dialog on screen"})
 		return
 	}
-	if se.Tool == "codex" {
+	if se.Tool != "claude" {
 		result, respondErr := s.adapterFor(se).RespondAttention(ctx, se, attentionResponseRequest{
 			SessionID: se.ID, AttentionID: info.ID, Action: "approve-once",
 		})

@@ -163,7 +163,7 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool != "claude" && se.Tool != "codex" {
+	if !structuredHarness(se.Tool) {
 		writeJSON(w, http.StatusOK, activityInfo{})
 		return
 	}

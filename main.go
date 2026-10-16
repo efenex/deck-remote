@@ -114,7 +114,7 @@ func main() {
 
 	// deck-remote-native push + the event watcher that drives it.
 	home, _ := os.UserHomeDir()
-	pm, err := newPushManager(filepath.Join(home, ".agent-deck"), cfg.pushSubject)
+	pm, err := newPushManager(stateDir(home), cfg.pushSubject)
 	if err != nil {
 		log.Fatalf("push init: %v", err)
 	}
@@ -175,6 +175,7 @@ type server struct {
 	push      *pushManager
 	acts      *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
 	codex     *codexRolloutStore
+	pi        *piTranscriptStore
 	attn      *attentionCache
 	codexReqs *codexRequestTracker
 	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
@@ -223,9 +224,10 @@ func newServer(cfg config, upstream *url.URL) *server {
 		queue:     newSessionQueues(),
 		acts:      newActivityCache(),
 		codex:     newCodexRolloutStore(),
+		pi:        newPiTranscriptStore(),
 		attn:      newAttentionCache(),
 		codexReqs: newCodexRequestTracker(),
-		tokens:    newTokenStore(filepath.Join(home, ".agent-deck")),
+		tokens:    newTokenStore(stateDir(home)),
 		lists:     newListCache(),
 		views:     newViewCache(),
 		replies:   newReplyCache(),
@@ -367,4 +369,14 @@ func logRequests(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// stateDir holds deck-remote's own state (push keys/subscriptions, inbox,
+// device tokens). DECK_REMOTE_STATE_DIR lets a test instance run beside
+// production without sharing its push subscriptions.
+func stateDir(home string) string {
+	if d := os.Getenv("DECK_REMOTE_STATE_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".agent-deck")
 }

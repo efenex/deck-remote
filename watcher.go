@@ -94,7 +94,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 	sem := make(chan struct{}, 4)
 	var mu sync.Mutex // guards `seen`
 	for _, se := range sessions {
-		if se.Tool != "claude" && se.Tool != "codex" {
+		if !structuredHarness(se.Tool) {
 			continue
 		}
 		wg.Add(1)
@@ -121,9 +121,11 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 					st = cached // claudeAdapter.Snapshot updated it from this same pane
 				}
 			} else {
-				snap.Activity.stallKeySet = true
-				if paneErr == nil && !snap.Attention.Pending {
-					snap.Activity.stallKey = codexPaneProgressKey(pane)
+				if se.Tool == "codex" {
+					snap.Activity.stallKeySet = true
+					if paneErr == nil && !snap.Attention.Pending {
+						snap.Activity.stallKey = codexPaneProgressKey(pane)
+					}
 				}
 				st = s.acts.update(se.ID, snap.Activity)
 				snap.Activity.Stalled = st.Stalled
@@ -131,7 +133,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			s.attn.set(se.ID, snap.Attention)
 
 			// Request/reply correlation is useful even without push subscribers.
-			if se.Tool == "codex" {
+			if snapshotHarness(se.Tool) {
 				for _, reply := range s.codexReqs.reconcile(se.ID, snap) {
 					s.hub.publish(map[string]any{
 						"type": "reply", "requestId": reply.RequestID, "sessionId": se.ID,
@@ -159,7 +161,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			if se.Tool == "claude" && paneErr == nil {
 				s.watchPermissionPane(se, sw, isNew, pane)
 			}
-			if se.Tool == "codex" {
+			if snapshotHarness(se.Tool) {
 				s.watchAttention(se, sw, isNew, snap.Attention)
 			}
 			s.watchStall(se, sw, isNew, st)

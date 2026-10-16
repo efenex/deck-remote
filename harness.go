@@ -98,12 +98,32 @@ func (a genericAdapter) RespondAttention(context.Context, sessionInfo, attention
 	return attentionResponseResult{}, errTerminalOnly
 }
 
+// snapshotHarness reports whether a tool is driven through the adapter's
+// snapshot/Deliver path (transcript-backed replies, request correlation)
+// rather than the Claude-only agent-deck turn runner.
+func snapshotHarness(tool string) bool {
+	switch tool {
+	case "codex", "pi", "omp":
+		return true
+	}
+	return false
+}
+
+// structuredHarness reports whether a tool has a structured adapter at all.
+func structuredHarness(tool string) bool {
+	return tool == "claude" || snapshotHarness(tool)
+}
+
 func (s *server) adapterFor(se sessionInfo) harnessAdapter {
 	switch se.Tool {
 	case "claude":
 		return claudeAdapter{s: s}
 	case "codex":
 		return codexAdapter{s: s}
+	case "pi":
+		return piAdapter{s: s, root: ".pi"}
+	case "omp":
+		return piAdapter{s: s, root: ".omp"}
 	default:
 		return genericAdapter{s: s}
 	}

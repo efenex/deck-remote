@@ -113,12 +113,12 @@ func (s *server) ask(w http.ResponseWriter, r *http.Request, slash bool) {
 		httpError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if se.Tool == "codex" {
+	if snapshotHarness(se.Tool) {
 		s.handleCodexAsk(w, r, se, req, slash)
 		return
 	}
 	if req.Delivery == "steer" {
-		httpError(w, http.StatusBadRequest, "steer delivery is supported only by Codex")
+		httpError(w, http.StatusBadRequest, "steer delivery is unsupported for this harness")
 		return
 	}
 
