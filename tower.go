@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -93,8 +94,31 @@ func (t *towerStore) ask(id string) (map[string]any, bool) {
 // tsLogin is the identity `tailscale serve` stamps on proxied requests. A
 // client on the loopback side can forge it; that is accepted (loopback is the
 // operator's own machine) because the act token remains the real secret.
+// Callers must first check viaServeProxy: off that path nothing stamps or
+// strips the header, so any client could claim any login.
 func tsLogin(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("Tailscale-User-Login"))
+}
+
+// viaServeProxy reports whether r has the shape of a request relayed by
+// `tailscale serve`: plain HTTP (serve terminates TLS) from a loopback peer.
+// There is no unforgeable marker for serve itself, so this is the negative
+// test that matters: in --tls-cert LAN-fallback mode deck-remote terminates
+// TLS (r.TLS != nil) and pf rdr keeps the client's own source address, and a
+// non-loopback --listen lets remote peers in directly. In both cases the
+// Tailscale-User-Login header is client-controlled, so tower actions are off.
+func viaServeProxy(r *http.Request) (bool, string) {
+	if r.TLS != nil {
+		return false, "TLS terminated by deck-remote (--tls-cert): Tailscale-User-Login cannot be trusted without tailscale serve"
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return false, "request did not come from loopback (tailscale serve); Tailscale-User-Login cannot be trusted"
+	}
+	return true, ""
 }
 
 // bearerHeaderOnly reads the token from the Authorization header only: an action
@@ -119,6 +143,9 @@ func (s *server) towerActionOK(r *http.Request) (device string, reason string) {
 	}
 	if !dt.hasCap("act") {
 		return "", "device token " + dt.Name + " lacks the act capability"
+	}
+	if ok, why := viaServeProxy(r); !ok {
+		return dt.Name, why
 	}
 	login := tsLogin(r)
 	if login == "" {
@@ -265,6 +292,7 @@ func (s *server) handleTowerReply(w http.ResponseWriter, r *http.Request) {
 		_, err := s.sendMessage(ctx, target, msg, "--defer-if-busy", "--defer-timeout", "5m", "--no-tag")
 		ev := map[string]any{"type": "tower-reply-result", "requestId": reqID, "ask": req.Ask, "ts": time.Now().Unix()}
 		if err != nil {
+			s.towerUndup(req.Ask, req.Text)
 			ev["error"] = err.Error()
 			log.Printf("tower: reply ask=%s req=%s ERROR: %v", req.Ask, reqID, err)
 		} else {
@@ -273,6 +301,7 @@ func (s *server) handleTowerReply(w http.ResponseWriter, r *http.Request) {
 		s.hub.publish(ev)
 	})
 	if !queued {
+		s.towerUndup(req.Ask, req.Text) // nothing was sent: a retry must not read as a double tap
 		httpError(w, http.StatusServiceUnavailable, "tower reply queue is full")
 		return
 	}
@@ -299,6 +328,15 @@ func (s *server) towerDup(ask, text string) bool {
 	}
 	s.towerLast[key] = now
 	return false
+}
+
+// towerUndup drops the dedupe entry towerDup reserved, for a reply that was
+// never queued or whose delivery failed. towerDup reserves before the submit
+// (not after) so two concurrent taps cannot both pass the check.
+func (s *server) towerUndup(ask, text string) {
+	s.towerMu.Lock()
+	defer s.towerMu.Unlock()
+	delete(s.towerLast, ask+"\x00"+text)
 }
 
 // runTowerWatch publishes an SSE nudge when the overview file's mtime moves, so

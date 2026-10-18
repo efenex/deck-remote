@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -99,10 +100,23 @@ func TestTowerActionGate(t *testing.T) {
 		{"act token wrong identity", actRaw, "mallory@example.com", "", 403, "not the operator"},
 		{"act token via ?token= refused", "", "ruben@example.com", "?token=" + actRaw, 403, "device token required"},
 		{"act token + operator identity", actRaw, "RUBEN@example.com", "", 200, ""},
+		{"operator header from a LAN peer refused", actRaw, "ruben@example.com", "lan", 403, "did not come from loopback"},
+		{"operator header over self-terminated TLS refused", actRaw, "ruben@example.com", "tls", 403, "--tls-cert"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			r := httptest.NewRequest("POST", "/api/rc/tower/reply"+c.query, nil)
+			q := c.query
+			if q == "lan" || q == "tls" {
+				q = ""
+			}
+			r := httptest.NewRequest("POST", "/api/rc/tower/reply"+q, nil)
+			r.RemoteAddr = "127.0.0.1:50000" // tailscale serve's hop
+			switch c.query {
+			case "lan":
+				r.RemoteAddr = "192.168.1.23:50000" // pf rdr keeps the client's source
+			case "tls":
+				r.TLS = &tls.ConnectionState{} // --tls-cert: deck-remote terminated TLS itself
+			}
 			if c.bearer != "" {
 				r.Header.Set("Authorization", "Bearer "+c.bearer)
 			}
@@ -121,8 +135,8 @@ func TestTowerActionGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("action log missing: %v", err)
 	}
-	if n := strings.Count(string(logb), "\n"); n != 5 {
-		t.Fatalf("expected 5 refused attempts logged, got %d: %s", n, logb)
+	if n := strings.Count(string(logb), "\n"); n != 7 {
+		t.Fatalf("expected 7 refused attempts logged, got %d: %s", n, logb)
 	}
 	if strings.Contains(string(logb), actRaw) || strings.Contains(string(logb), readRaw) || strings.Contains(string(logb), "shared-secret") {
 		t.Fatal("action log must never contain a token")
@@ -157,6 +171,7 @@ func TestTowerReplySendsToTowerSession(t *testing.T) {
 
 	do := func(body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", "/api/rc/tower/reply", strings.NewReader(body))
+		r.RemoteAddr = "127.0.0.1:50000"
 		r.Header.Set("Authorization", "Bearer "+actRaw)
 		r.Header.Set("Tailscale-User-Login", "ruben@example.com")
 		w := httptest.NewRecorder()
@@ -193,5 +208,49 @@ func TestTowerReplySendsToTowerSession(t *testing.T) {
 	}
 	if strings.Contains(line, "done, files") {
 		t.Fatal("reply text must travel on stdin, never argv")
+	}
+}
+
+// A reply that never reached the queue must not block an immediate retry of the
+// same text as a "double tap" (ultrareview #10).
+func TestTowerReplyRetryAfterQueueFull(t *testing.T) {
+	bin, _ := fakeAdeckSend(t, `{"success":true,"delivery":"queued_socket","session_id":"tower"}`, 0)
+	dir := t.TempDir()
+	ov := filepath.Join(dir, "overview.json")
+	if err := os.WriteFile(ov, []byte(towerFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DECK_REMOTE_STATE_DIR", dir)
+	s := testServer(t, config{bin: bin, token: "shared-secret", homeDir: dir, towerOverview: ov, towerOperator: "ruben@example.com", towerSession: "tower"})
+	_, actRaw, _ := s.tokens.mint("phone-act", "act")
+	// An unbuffered channel with no worker: every submit fails as "queue full".
+	s.queue.mu.Lock()
+	s.queue.q["tower:tower"] = make(chan func())
+	s.queue.mu.Unlock()
+
+	do := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/api/rc/tower/reply", strings.NewReader(`{"ask":"radiomics-qms-export","text":"yes"}`))
+		r.RemoteAddr = "127.0.0.1:50000"
+		r.Header.Set("Authorization", "Bearer "+actRaw)
+		r.Header.Set("Tailscale-User-Login", "ruben@example.com")
+		w := httptest.NewRecorder()
+		s.auth(s.authAct(http.HandlerFunc(s.handleTowerReply))).ServeHTTP(w, r)
+		return w
+	}
+	if w := do(); w.Code != 503 {
+		t.Fatalf("full queue: got %d %s", w.Code, w.Body.String())
+	}
+	if w := do(); w.Code != 503 {
+		t.Fatalf("retry after a refused submit must be tried again (503), not deduped: got %d %s", w.Code, w.Body.String())
+	}
+	// Queue drains: the retry goes through, and only then does dedupe apply.
+	s.queue.mu.Lock()
+	delete(s.queue.q, "tower:tower")
+	s.queue.mu.Unlock()
+	if w := do(); w.Code != 202 {
+		t.Fatalf("retry after queue drained: got %d %s", w.Code, w.Body.String())
+	}
+	if w := do(); w.Code != 409 {
+		t.Fatalf("double tap after a queued reply must be refused, got %d", w.Code)
 	}
 }

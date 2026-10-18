@@ -376,7 +376,7 @@
     fl.forEach((t) => {
       const runMin = Math.round((Date.now() - Date.parse(t.dispatched_at)) / 60000);
       const card = towerCard(t.overdue ? 'overdue' : '',
-        '<span class="tid">' + esc(t.id) + '</span><span class="tmeta">' + esc(t.owner || '?') + ' · ' + (isNaN(runMin) ? '?' : runMin) + ' m' + (t.expected_min ? ' / ' + t.expected_min + ' m' : '') + (t.eta ? ' · eta ' + esc(t.eta) + (t.eta_step ? ' ' + esc(t.eta_step) : '') : '') + '</span>');
+        '<span class="tid">' + esc(t.id) + '</span><span class="tmeta">' + esc(t.owner || '?') + ' · ' + (isNaN(runMin) ? '?' : runMin) + ' m' + (t.expected_min ? ' / ' + esc(t.expected_min) + ' m' : '') + (t.eta ? ' · eta ' + esc(t.eta) + (t.eta_step ? ' ' + esc(t.eta_step) : '') : '') + '</span>');
       card.append(el('div', 'tbody', t.title || ''));
       if (t.progress) card.append(el('div', 'thint', '↳ ' + t.progress + (t.progress_at ? ' (' + t.progress_at + ')' : '')));
       list.append(card);

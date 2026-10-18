@@ -10,14 +10,14 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v17';
+const CACHE = 'deck-remote-v18';
 const SHELL = [
   '/',
   '/index.html',
-  '/thread.js?v=17',
-  '/markdown.js?v=17',
-  '/gestures.js?v=17',
-  '/app.js?v=17',
+  '/thread.js?v=18',
+  '/markdown.js?v=18',
+  '/gestures.js?v=18',
+  '/app.js?v=18',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.
