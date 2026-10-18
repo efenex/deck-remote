@@ -110,13 +110,14 @@ second PWA install with a second subscription. So the origin stays
   `pf` owns the privileged `:443`. The rdr's source tables (tailnet CGNAT range
   + your `/24`) are the access control — anything else finds nothing on `:443`.
 - `tailscale serve` is dropped: pf now carries the tailnet path too.
-- **Tower actions (reply-to-ask) are refused in this mode.** Their second
+- **Tower actions (reply-to-ask) are refused on the pf path.** Their second
   factor is the `Tailscale-User-Login` header, which only `tailscale serve`
-  stamps (and strips from clients). With deck-remote terminating TLS and pf
-  keeping the client's own source address, any LAN or tailnet peer could set
-  that header to the operator's login, so the gate trusts it only on a
-  plain-HTTP request from a loopback peer (the serve hop) and refuses
-  otherwise. The read-only Tower tab and Copy keep working.
+  stamps (and strips from clients). The pf anchor is a pure `rdr`, so a client
+  arriving through it keeps its own source address and could set that header
+  to anything; the gate therefore trusts it only from a loopback peer, i.e. the
+  serve hop. Keeping `tailscale serve` in front of the TLS port
+  (`proxy https+insecure://127.0.0.1:8443`) for tailnet clients keeps replies
+  working; LAN-only clients get the read-only Tower tab and Copy.
 
 ```sh
 ./scripts/lan-fallback.sh          # cert, launchd, pf anchor, boot daemon (needs sudo)
@@ -151,7 +152,7 @@ path.
 | `--tmux-bin` | `DECK_REMOTE_TMUX_BIN` | `tmux` |
 | `--web` | `DECK_REMOTE_WEB` | `web/` next to the binary |
 | `--tower-overview` | `DECK_REMOTE_TOWER_OVERVIEW` | empty (no tower tab); path to tower's `state/overview/overview.json` |
-| `--tower-operator` | `DECK_REMOTE_TOWER_OPERATOR` | empty (tower actions refused); the Tailscale login (`Tailscale-User-Login` as stamped by `tailscale serve`) allowed to reply to asks, together with a device token minted with `"caps":["act"]`. Only honoured behind `tailscale serve` (plain HTTP from loopback); refused under `--tls-cert` or from a non-loopback peer, where the header is client-controlled |
+| `--tower-operator` | `DECK_REMOTE_TOWER_OPERATOR` | empty (tower actions refused); the Tailscale login (`Tailscale-User-Login` as stamped by `tailscale serve`) allowed to reply to asks, together with a device token minted with `"caps":["act"]`. Only honoured from a loopback peer (the `tailscale serve` hop, plain or `https+insecure`); refused from any other peer, e.g. the pf LAN fallback, where the header is client-controlled |
 | `--tower-session` | `DECK_REMOTE_TOWER_SESSION` | `tower`; the agent-deck session that receives reply-to-ask messages |
 
 ## Operational note

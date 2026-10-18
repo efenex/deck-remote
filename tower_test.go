@@ -101,12 +101,13 @@ func TestTowerActionGate(t *testing.T) {
 		{"act token via ?token= refused", "", "ruben@example.com", "?token=" + actRaw, 403, "device token required"},
 		{"act token + operator identity", actRaw, "RUBEN@example.com", "", 200, ""},
 		{"operator header from a LAN peer refused", actRaw, "ruben@example.com", "lan", 403, "did not come from loopback"},
-		{"operator header over self-terminated TLS refused", actRaw, "ruben@example.com", "tls", 403, "--tls-cert"},
+		{"LAN peer over self-terminated TLS (pf rdr) refused", actRaw, "ruben@example.com", "lan+tls", 403, "did not come from loopback"},
+		{"serve -> https+insecure loopback hop allowed", actRaw, "ruben@example.com", "tls", 200, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			q := c.query
-			if q == "lan" || q == "tls" {
+			if q == "lan" || q == "tls" || q == "lan+tls" {
 				q = ""
 			}
 			r := httptest.NewRequest("POST", "/api/rc/tower/reply"+q, nil)
@@ -115,7 +116,10 @@ func TestTowerActionGate(t *testing.T) {
 			case "lan":
 				r.RemoteAddr = "192.168.1.23:50000" // pf rdr keeps the client's source
 			case "tls":
-				r.TLS = &tls.ConnectionState{} // --tls-cert: deck-remote terminated TLS itself
+				r.TLS = &tls.ConnectionState{} // serve proxying https+insecure to --tls-cert
+			case "lan+tls":
+				r.RemoteAddr = "192.168.1.23:50000"
+				r.TLS = &tls.ConnectionState{}
 			}
 			if c.bearer != "" {
 				r.Header.Set("Authorization", "Bearer "+c.bearer)

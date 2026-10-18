@@ -100,17 +100,15 @@ func tsLogin(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("Tailscale-User-Login"))
 }
 
-// viaServeProxy reports whether r has the shape of a request relayed by
-// `tailscale serve`: plain HTTP (serve terminates TLS) from a loopback peer.
-// There is no unforgeable marker for serve itself, so this is the negative
-// test that matters: in --tls-cert LAN-fallback mode deck-remote terminates
-// TLS (r.TLS != nil) and pf rdr keeps the client's own source address, and a
-// non-loopback --listen lets remote peers in directly. In both cases the
-// Tailscale-User-Login header is client-controlled, so tower actions are off.
+// viaServeProxy reports whether r came from a loopback peer, the shape of a
+// request relayed by `tailscale serve` (which stamps Tailscale-User-Login and
+// strips any client copy). Serve may proxy to plain HTTP or, in the hybrid prod
+// layout, to https+insecure://127.0.0.1:8443, so TLS on our side says nothing.
+// What matters is the peer: the --tls-cert LAN fallback's pf anchor is a pure
+// rdr (destination rewrite, no nat), so a LAN or tailnet client reaching the
+// listener that way keeps its own source address, as does any client of a
+// non-loopback --listen. For those the header is client-controlled: refuse.
 func viaServeProxy(r *http.Request) (bool, string) {
-	if r.TLS != nil {
-		return false, "TLS terminated by deck-remote (--tls-cert): Tailscale-User-Login cannot be trusted without tailscale serve"
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
