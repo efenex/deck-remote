@@ -36,7 +36,24 @@ type deviceToken struct {
 	Name    string `json:"name"`    // human label, e.g. "ruben-iphone"
 	Hash    string `json:"hash"`    // hex SHA-256 of the raw token (never the raw token)
 	Created int64  `json:"created"` // unix seconds
+	// Caps are capabilities beyond reading: today only "act" (tower actions,
+	// tower.go). Absent = read-only; existing tokens keep working unchanged.
+	Caps []string `json:"caps,omitempty"`
 }
+
+// hasCap reports whether the token carries the capability (case-insensitive).
+func (t deviceToken) hasCap(c string) bool {
+	for _, x := range t.Caps {
+		if strings.EqualFold(x, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// knownCaps is the closed set a mint may grant; anything else is refused so a
+// typo never silently mints a read-only token the operator believes can act.
+var knownCaps = map[string]bool{"act": true}
 
 // tokenStore persists named device tokens to a 0600 JSON file. All methods are
 // safe for concurrent use; the auth path (verify) is the hot one.
@@ -149,10 +166,21 @@ func (ts *tokenStore) find(raw string) (deviceToken, bool) {
 
 // mint creates and persists a new device token with the given name and returns
 // the metadata plus the RAW secret (shown exactly once — never stored raw).
-func (ts *tokenStore) mint(name string) (deviceToken, string, error) {
+func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "device"
+	}
+	var cl []string
+	for _, c := range caps {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if c == "" {
+			continue
+		}
+		if !knownCaps[c] {
+			return deviceToken{}, "", fmt.Errorf("unknown capability %q", c)
+		}
+		cl = append(cl, c)
 	}
 	raw, err := genSecret()
 	if err != nil {
@@ -162,7 +190,7 @@ func (ts *tokenStore) mint(name string) (deviceToken, string, error) {
 	if err != nil {
 		return deviceToken{}, "", err
 	}
-	dt := deviceToken{ID: id, Name: name, Hash: hashToken(raw), Created: time.Now().Unix()}
+	dt := deviceToken{ID: id, Name: name, Hash: hashToken(raw), Created: time.Now().Unix(), Caps: cl}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.tokens = append(ts.tokens, dt)
@@ -213,7 +241,7 @@ func (ts *tokenStore) list() []map[string]any {
 	defer ts.mu.RUnlock()
 	out := make([]map[string]any, 0, len(ts.tokens))
 	for _, t := range ts.tokens {
-		out = append(out, map[string]any{"id": t.ID, "name": t.Name, "created": t.Created})
+		out = append(out, map[string]any{"id": t.ID, "name": t.Name, "created": t.Created, "caps": t.Caps})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i]["created"].(int64) > out[j]["created"].(int64)
@@ -235,7 +263,7 @@ func (s *server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if dt, ok := s.tokens.find(tok); ok {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"kind": "device", "admin": false,
-			"id": dt.ID, "name": dt.Name, "created": dt.Created,
+			"id": dt.ID, "name": dt.Name, "created": dt.Created, "caps": dt.Caps, "act": dt.hasCap("act"),
 		})
 		return
 	}
@@ -254,11 +282,16 @@ func (s *server) handleDevicesList(w http.ResponseWriter, r *http.Request) {
 // (once) plus a ready-to-use phone URL. Admin-gated.
 func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name string `json:"name"`
+		Name string   `json:"name"`
+		Caps []string `json:"caps"` // e.g. ["act"] for a phone that may perform tower actions
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	dt, raw, err := s.tokens.mint(body.Name)
+	dt, raw, err := s.tokens.mint(body.Name, body.Caps...)
 	if err != nil {
+		if strings.Contains(err.Error(), "unknown capability") {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		httpError(w, http.StatusInternalServerError, "mint failed")
 		return
 	}
@@ -269,6 +302,7 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 		"id":       dt.ID,
 		"name":     dt.Name,
 		"created":  dt.Created,
+		"caps":     dt.Caps,
 		"token":    raw,
 		"phoneUrl": phoneURL,
 	})

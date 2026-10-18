@@ -222,10 +222,183 @@
     $('#screenDeck').hidden = tab !== 'deck';
     $('#screenInbox').hidden = tab !== 'inbox';
     $('#screenSettings').hidden = tab !== 'settings';
+    $('#screenTower').hidden = tab !== 'tower';
     $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
     if (tab === 'settings') { refreshPushUI(); refreshDevicesUI(); }
     if (tab === 'inbox') { renderInbox(); loadInbox(); }
+    if (tab === 'tower') { tower.unseen = false; renderTowerBadge(); loadTower(); }
   }
+
+  // ---------------------------------------------------------------------------
+  // Tower tab (optional feature): the operator's "what's open" overview, served
+  // by deck-remote from tower's overview.json (--tower-overview). Copy is free;
+  // "Reply" answers an open ask and needs an act-capable device token plus the
+  // Tailscale identity (the server refuses otherwise). Nothing is ever sent
+  // automatically; "send to session" is deliberately not in this version.
+  // ---------------------------------------------------------------------------
+  const tower = { enabled: false, data: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false };
+
+  async function initTower() {
+    try {
+      const r = await api('GET', '/api/rc/tower');
+      tower.enabled = !!(r && r.enabled);
+    } catch (_) { tower.enabled = false; }
+    $('#tabTower').hidden = !tower.enabled;
+    if (!tower.enabled) return;
+    try {
+      const who = await api('GET', '/api/rc/tower/whoami');
+      tower.act = !!(who && who.actions_enabled && who.act && !who.would_refuse);
+      tower.actReason = (who && who.would_refuse) || '';
+    } catch (_) { tower.act = false; }
+  }
+
+  async function loadTower() {
+    if (!tower.enabled) return;
+    try {
+      const r = await api('GET', '/api/rc/tower');
+      if (r && r.overview) { tower.data = r.overview; tower.mtime = r.mtime || ''; tower.loaded = true; }
+      else if (r && r.error) { $('#towerList').innerHTML = '<div class="placeholder">' + esc(r.error) + '</div>'; return; }
+    } catch (e) {
+      if (!tower.loaded) $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc(e.message || String(e)) + '</div>';
+      return;
+    }
+    renderTower();
+  }
+
+  function renderTowerBadge() {
+    const b = $('#towerBadge');
+    if (!b) return;
+    const c = tower.data && tower.data.counts;
+    const n = c ? (c.waiting || 0) : 0;
+    b.textContent = n ? String(n) : '';
+    b.hidden = !n && !tower.unseen;
+    b.classList.toggle('k-needs', !!(c && c.urgent));
+  }
+
+  function towerAgo(iso) {
+    if (!iso) return '?';
+    const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (isNaN(m)) return '?';
+    if (m < 60) return m + ' min';
+    if (m < 2880) return (m / 60).toFixed(1) + ' h';
+    return (m / 1440).toFixed(1) + ' d';
+  }
+
+  async function towerCopy(text, btn) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); ta.remove();
+      }
+      if (btn) { btn.textContent = 'Copied'; btn.classList.add('done'); setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1500); }
+    } catch (e) { toast('Copy failed', e.message || String(e)); }
+  }
+
+  async function towerReply(askId, ta, btn) {
+    const text = (ta.value || '').trim();
+    if (!text) { ta.focus(); return; }
+    if (!confirm('Send this answer to tower for ask "' + askId + '"?\n\n' + text)) return;
+    btn.disabled = true;
+    try {
+      const r = await api('POST', '/api/rc/tower/reply', { ask: askId, text });
+      toast('Reply sent', 'tower will journal ask ' + askId + ' as answered (' + ((r && r.requestId) || '') + ')');
+      ta.value = '';
+    } catch (e) {
+      toast('Reply refused', e.message || String(e));
+    } finally { btn.disabled = false; }
+  }
+
+  function towerCard(cls, headHTML) {
+    const c = el('div', 'tcard' + (cls ? ' ' + cls : ''));
+    c.innerHTML = headHTML;
+    return c;
+  }
+
+  function towerCmdRow(text) {
+    const row = el('div', 'tcmd');
+    const pre = el('pre', '', text);
+    const b = el('button', 'tcopy', 'Copy');
+    b.addEventListener('click', () => towerCopy(text, b));
+    row.append(pre, b);
+    return row;
+  }
+
+  function renderTower() {
+    const o = tower.data;
+    const list = $('#towerList');
+    if (!o) return;
+    list.innerHTML = '';
+    const gen = o.generated_at || '';
+    const ageMin = Math.round((Date.now() - Date.parse(gen)) / 60000);
+    const asOf = $('#towerAsOf');
+    if (asOf) { asOf.textContent = 'rendered ' + towerAgo(gen) + ' ago'; asOf.classList.toggle('stale', ageMin > 30); }
+    const c = o.counts || {};
+    const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE render' : ''));
+    list.append(head);
+
+    list.append(el('div', 'tsec', '1 · Waiting on you'));
+    const waiting = o.waiting || [];
+    if (!waiting.length && !(o.notes || []).length) list.append(el('div', 'thint', 'nothing'));
+    waiting.forEach((w) => {
+      const card = towerCard(w.urgent ? 'urgent' : '',
+        '<span class="tid">' + esc(w.id) + '</span><span class="tmeta">' + (w.urgent ? 'URGENT · ' : '') + esc(w.goal || '-') + ' · open ' + esc(towerAgo(w.opened)) + (w.blocks && w.blocks.length ? ' · blocks ' + esc(w.blocks.join(', ')) : '') + '</span>');
+      const body = el('div', 'tbody', w.detail || w.text || '');
+      card.append(body);
+      const bodyRow = el('div', 'tcmd');
+      const cb = el('button', 'tcopy', 'Copy'); cb.addEventListener('click', () => towerCopy(w.detail || w.text || '', cb));
+      bodyRow.append(cb); card.append(bodyRow);
+      (w.items || []).forEach((it) => card.append(towerCmdRow(it)));
+      if (tower.act) {
+        const rr = el('div', 'treply');
+        const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
+        const rb = el('button', '', 'Reply');
+        rb.addEventListener('click', () => towerReply(w.id, ta, rb));
+        rr.append(ta, rb); card.append(rr);
+      }
+      list.append(card);
+    });
+    if (!tower.act && waiting.length) list.append(el('div', 'thint', 'Reply from here needs an act-capable device token on this phone' + (tower.actReason ? ' (' + tower.actReason + ')' : '') + '. Copy works for everyone.'));
+    (o.notes || []).forEach((n) => list.append(el('div', 'tline', n)));
+
+    list.append(el('div', 'tsec', '2 · What you asked for'));
+    const reqs = (o.requests || []);
+    if (!reqs.length) list.append(el('div', 'thint', 'no request records yet'));
+    reqs.forEach((r) => {
+      const line = el('div', 'tline');
+      line.innerHTML = '<b>' + esc(r.derived || r.status) + '</b> ' + esc(r.text) + (r.where ? ' <span class="tmeta">↳ ' + esc(r.where) + '</span>' : '') + (r.result ? ' <span class="tmeta">→ ' + esc(r.result) + '</span>' : '');
+      list.append(line);
+    });
+
+    list.append(el('div', 'tsec', '3 · In flight'));
+    const fl = o.in_flight || [];
+    if (!fl.length) list.append(el('div', 'thint', 'nothing dispatched'));
+    fl.forEach((t) => {
+      const runMin = Math.round((Date.now() - Date.parse(t.dispatched_at)) / 60000);
+      const card = towerCard(t.overdue ? 'overdue' : '',
+        '<span class="tid">' + esc(t.id) + '</span><span class="tmeta">' + esc(t.owner || '?') + ' · ' + (isNaN(runMin) ? '?' : runMin) + ' m' + (t.expected_min ? ' / ' + t.expected_min + ' m' : '') + (t.eta ? ' · eta ' + esc(t.eta) + (t.eta_step ? ' ' + esc(t.eta_step) : '') : '') + '</span>');
+      card.append(el('div', 'tbody', t.title || ''));
+      if (t.progress) card.append(el('div', 'thint', '↳ ' + t.progress + (t.progress_at ? ' (' + t.progress_at + ')' : '')));
+      list.append(card);
+    });
+
+    list.append(el('div', 'tsec', '4 · Finished (last 12 h)'));
+    (o.finished || []).slice(0, 12).forEach((f) => {
+      const line = el('div', 'tline');
+      line.innerHTML = '<span class="tmeta">' + esc(towerAgo(f.done_at)) + ' ago</span> <span class="tid">' + esc(f.id) + '</span> <span class="tmeta">' + esc(f.owner || '') + '</span><br>' + esc(f.evidence || '');
+      list.append(line);
+    });
+
+    list.append(el('div', 'tsec', '5 · Life'));
+    (o.deadlines || []).forEach((d) => {
+      const left = d.due ? ((Date.parse(d.due) - Date.now()) / 86400000) : NaN;
+      const line = el('div', 'tline');
+      line.innerHTML = '<b>' + esc(d.due_text || '') + '</b> ' + (isNaN(left) ? '' : '<span class="tmeta' + (left < 2 ? ' stale' : '') + '">' + (left >= 0 ? 'in ' + left.toFixed(1) + ' d' : (-left).toFixed(1) + ' d ago') + '</span> ') + esc(d.item || '');
+      list.append(line);
+    });
+    renderTowerBadge();
+  }
+  $('#towerRefresh').addEventListener('click', () => loadTower());
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
   $('#goRefresh').addEventListener('click', async () => {
     const b = $('#goRefresh');
@@ -1786,6 +1959,14 @@
   function handleRCEvent(ev) {
     if (!ev || !ev.type) return;
     if (ev.type === 'notification') { addInboxItem(ev.notification); return; }
+    if (ev.type === 'tower-overview') {
+      if (!$('#screenTower').hidden) loadTower(); else { tower.unseen = true; renderTowerBadge(); }
+      return;
+    }
+    if (ev.type === 'tower-reply-result') {
+      if (ev.error) toast('Tower reply failed', ev.error); else toast('Delivered to tower', 'ask ' + (ev.ask || '') + ' answered');
+      return;
+    }
     const id = ev.sessionId;
     if (ev.type === 'ask-state' && (ev.state === 'sent' || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
@@ -2308,6 +2489,7 @@
     await loadSessions(true);
     startRefresh();
     loadInbox();
+    initTower().then(() => { if (tower.enabled) loadTower(); });
     // Deep links from a tapped notification on a cold start (the service worker
     // opens /?notif=<id>, or /?session=<id> for pushes from older servers).
     const params = new URL(location.href).searchParams;

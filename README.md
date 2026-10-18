@@ -143,6 +143,9 @@ path.
 | `--bin` | `DECK_REMOTE_BIN` | `agent-deck` |
 | `--tmux-bin` | `DECK_REMOTE_TMUX_BIN` | `tmux` |
 | `--web` | `DECK_REMOTE_WEB` | `web/` next to the binary |
+| `--tower-overview` | `DECK_REMOTE_TOWER_OVERVIEW` | empty (no tower tab); path to tower's `state/overview/overview.json` |
+| `--tower-operator` | `DECK_REMOTE_TOWER_OPERATOR` | empty (tower actions refused); the Tailscale login (`Tailscale-User-Login` as stamped by `tailscale serve`) allowed to reply to asks, together with a device token minted with `"caps":["act"]` |
+| `--tower-session` | `DECK_REMOTE_TOWER_SESSION` | `tower`; the agent-deck session that receives reply-to-ask messages |
 
 ## Operational note
 deck-remote is CLI-first precisely so it needs **no second long-running agent-deck

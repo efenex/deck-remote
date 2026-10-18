@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -48,6 +49,11 @@ type config struct {
 	pushSubject  string // VAPID "sub" contact URI (mailto:/https:); Apple rejects non-routable subjects
 	tlsCert      string // PEM cert (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve
 	tlsKey       string // PEM private key matching tlsCert
+
+	// Optional tower overview tab (tower.go). Empty towerOverview = feature off.
+	towerOverview string // path to tower's state/overview/overview.json
+	towerOperator string // Tailscale login (Tailscale-User-Login) allowed to perform tower actions; empty = actions off
+	towerSession  string // agent-deck session (id or title) that receives reply-to-ask messages
 }
 
 func loadConfig() config {
@@ -70,6 +76,9 @@ func loadConfig() config {
 	flag.StringVar(&c.pushSubject, "push-subject", def("DECK_REMOTE_PUSH_SUBJECT", defaultPushSubject), "VAPID 'sub' contact URI (mailto: or https:); Apple rejects non-routable subjects")
 	flag.StringVar(&c.tlsCert, "tls-cert", def("DECK_REMOTE_TLS_CERT", ""), "PEM cert to terminate TLS with (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve")
 	flag.StringVar(&c.tlsKey, "tls-key", def("DECK_REMOTE_TLS_KEY", ""), "PEM key matching --tls-cert")
+	flag.StringVar(&c.towerOverview, "tower-overview", def("DECK_REMOTE_TOWER_OVERVIEW", ""), "path to tower's overview.json; empty = no tower tab")
+	flag.StringVar(&c.towerOperator, "tower-operator", def("DECK_REMOTE_TOWER_OPERATOR", ""), "Tailscale login allowed to perform tower actions (reply-to-ask); empty = actions refused")
+	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")
 	flag.Parse()
 
 	if c.token == "" {
@@ -125,6 +134,7 @@ func main() {
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
 	go srv.runWatcher(watchCtx)
+	go srv.runTowerWatch(watchCtx)
 	log.Printf("push + watcher started (subject=%s vapid pub %s…)", pm.subject, pm.vapidPub[:min(12, len(pm.vapidPub))])
 
 	httpSrv := &http.Server{
@@ -180,9 +190,12 @@ type server struct {
 	attn      *attentionCache
 	codexReqs *codexRequestTracker
 	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
-	lists     *listCache  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
-	views     *viewCache  // TTL-cached TUI view filter per profile (viewfilter.go)
-	replies   *replyCache // per-session last-reply cache (transcript-first, mtime-gated)
+	tower     *towerStore // optional tower overview (tower.go); nil = feature off
+	towerMu   sync.Mutex
+	towerLast map[string]time.Time // reply dedup (tower.go)
+	lists     *listCache           // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
+	views     *viewCache           // TTL-cached TUI view filter per profile (viewfilter.go)
+	replies   *replyCache          // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
 	// whole point of the polling rework is keeping execAdeck near zero at
@@ -230,6 +243,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		attn:      newAttentionCache(),
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(stateDir(home)),
+		tower:     newTowerStore(cfg.towerOverview),
 		lists:     newListCache(),
 		views:     newViewCache(),
 		replies:   newReplyCache(),
@@ -270,6 +284,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/rc/push/notify", s.auth(http.HandlerFunc(s.handlePushNotify)))
 	mux.Handle("POST /api/rc/push/prefs", s.auth(http.HandlerFunc(s.handlePushPrefs)))
 	mux.Handle("GET /api/rc/notifications", s.auth(http.HandlerFunc(s.handleNotifications)))
+	// tower overview tab (tower.go): reads on any token, actions on act-cap device token + tailscale identity
+	mux.Handle("GET /api/rc/tower", s.auth(http.HandlerFunc(s.handleTower)))
+	mux.Handle("GET /api/rc/tower/whoami", s.auth(http.HandlerFunc(s.handleTowerWhoami)))
+	mux.Handle("POST /api/rc/tower/reply", s.auth(s.authAct(http.HandlerFunc(s.handleTowerReply))))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and
 	// reports whether the caller is the shared (admin) token or a device token.
