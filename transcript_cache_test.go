@@ -66,3 +66,49 @@ func TestFindTranscriptCachesMisses(t *testing.T) {
 		t.Fatalf("uncached lookup = %q, want %q", p, real)
 	}
 }
+
+// A growing transcript is parsed incrementally: the cached prefix is reused, only
+// the appended bytes are decoded, and a half-written last line waits for its newline.
+func TestParseTranscriptIsIncrementalAndSkipsToolResults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	appendTo := func(s string) {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString(s)
+		f.Close()
+	}
+	reply := `{"type":"assistant","timestamp":"2026-10-14T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]}}` + "\n"
+	toolResult := `{"type":"user","timestamp":"2026-10-14T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","content":"big output"}]}}` + "\n"
+	appendTo(transcriptLine)
+	msgs, err := parseTranscript(path)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("first: %v %d", err, len(msgs))
+	}
+	appendTo(toolResult + reply + `{"type":"user","timestamp":"2026-10-14T10:00:03Z","message":{"role":"user","con`) // trailing partial line
+	msgs, err = parseTranscript(path)
+	if err != nil || len(msgs) != 2 || msgs[1].Role != "reply" || msgs[1].Content != "hi there" {
+		t.Fatalf("after append (tool_result skipped, partial line pending): %v %+v", err, msgs)
+	}
+	transcripts.mu.Lock()
+	off := transcripts.parsed[path].off
+	transcripts.mu.Unlock()
+	if want := int64(len(transcriptLine) + len(toolResult) + len(reply)); off != want {
+		t.Fatalf("offset must stop before the partial line: got %d want %d", off, want)
+	}
+	appendTo(`tent":"third"}}` + "\n")
+	msgs, _ = parseTranscript(path)
+	if len(msgs) != 3 || msgs[2].Content != "third" {
+		t.Fatalf("completed line must be picked up: %+v", msgs)
+	}
+	// a rewritten (shorter) file is re-read from the start
+	if err := os.WriteFile(path, []byte(transcriptLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(3 * time.Second)
+	_ = os.Chtimes(path, future, future)
+	if msgs, _ = parseTranscript(path); len(msgs) != 1 {
+		t.Fatalf("truncated file must be reparsed from scratch: %+v", msgs)
+	}
+}

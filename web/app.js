@@ -239,34 +239,40 @@
   const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false };
 
   async function initTower() {
-    try {
-      const r = await api('GET', '/api/rc/tower');
-      tower.enabled = !!(r && r.enabled);
-    } catch (_) { tower.enabled = false; }
+    // The overview (counts for the badge) and whoami load concurrently; the badge
+    // paints from the overview alone, without waiting for the model or whoami.
+    const [ov, who] = await Promise.allSettled([api('GET', '/api/rc/tower'), api('GET', '/api/rc/tower/whoami')]);
+    tower.enabled = ov.status === 'fulfilled' && !!(ov.value && ov.value.enabled);
     $('#tabTower').hidden = !tower.enabled;
     if (!tower.enabled) return;
-    try {
-      const who = await api('GET', '/api/rc/tower/whoami');
-      tower.act = !!(who && who.actions_enabled && who.act && !who.would_refuse);
-      tower.actReason = (who && who.would_refuse) || '';
-    } catch (_) { tower.act = false; }
+    if (ov.value.overview) { tower.data = ov.value.overview; tower.mtime = ov.value.mtime || ''; tower.loaded = true; renderTowerBadge(); }
+    if (who.status === 'fulfilled' && who.value) {
+      tower.act = !!(who.value.actions_enabled && who.value.act && !who.value.would_refuse);
+      tower.actReason = who.value.would_refuse || '';
+    }
   }
 
   async function loadTower() {
     if (!tower.enabled) return;
-    // The overview (cheap: counts + legacy fallback) and the TUI-derived model
-    // (python, cached server-side) load concurrently; the model is what is shown.
-    const [ov, md] = await Promise.allSettled([api('GET', '/api/rc/tower'), api('GET', '/api/rc/tower/model')]);
-    if (ov.status === 'fulfilled' && ov.value && ov.value.overview) {
-      tower.data = ov.value.overview; tower.mtime = ov.value.mtime || ''; tower.loaded = true;
-    } else if (ov.status === 'fulfilled' && ov.value && ov.value.error) {
-      $('#towerList').innerHTML = '<div class="placeholder">' + esc(ov.value.error) + '</div>'; return;
-    } else if (!tower.loaded) {
-      $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc((ov.reason && ov.reason.message) || 'error') + '</div>'; return;
-    }
-    tower.model = (md.status === 'fulfilled' && md.value && md.value.model) || null;
-    tower.modelError = tower.model ? '' : ((md.status === 'fulfilled' && md.value && md.value.error) || (md.reason && md.reason.message) || 'model unavailable');
-    renderTower();
+    // Progressive: the cheap overview paints first (badge + the legacy list), the
+    // TUI-derived model (python, cached server-side) replaces it when it lands.
+    const ovP = api('GET', '/api/rc/tower').then((r) => {
+      if (r && r.overview) {
+        tower.data = r.overview; tower.mtime = r.mtime || ''; tower.loaded = true;
+        renderTowerBadge();
+        if (!tower.model) renderTowerLegacy();
+      } else if (r && r.error && !tower.model) {
+        $('#towerList').innerHTML = '<div class="placeholder">' + esc(r.error) + '</div>';
+      }
+    }, (e) => {
+      if (!tower.loaded) $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc(e.message || String(e)) + '</div>';
+    });
+    const mdP = api('GET', '/api/rc/tower/model').then((r) => {
+      tower.model = (r && r.model) || null;
+      tower.modelError = tower.model ? '' : ((r && r.error) || 'model unavailable');
+    }, (e) => { tower.model = null; tower.modelError = e.message || 'model unavailable'; });
+    await Promise.all([ovP, mdP]);
+    if (tower.loaded) renderTower();
   }
 
   function renderTowerBadge() {

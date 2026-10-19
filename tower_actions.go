@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -317,4 +318,14 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 	s.towerM.invalidate()
 	s.towerLog(map[string]any{"action": "act", "op": req.Op, "kind": req.Kind, "id": req.ID, "allowed": true, "ok": true, "device": device, "login": tsLogin(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "op": req.Op, "id": req.ID, "msg": msg})
+}
+
+// warmTower builds the model once at startup so the first Tower tab load is a cache hit.
+func (s *server) warmTower() {
+	if s.tower == nil {
+		return
+	}
+	if _, _, _, err := s.towerModelJSON(context.Background()); err != nil {
+		log.Printf("tower: warm model: %v", err)
+	}
 }

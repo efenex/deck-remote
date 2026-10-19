@@ -34,7 +34,7 @@ function makeEnv(notifs, seenAt, routes) {
   const fetch = async (url, opts) => {
     const u = String(url);
     let body = u.includes('/api/rc/notifications') ? { notifications: notifs } : {};
-    if (routes) { const r = routes(u, opts || {}); if (r !== undefined) body = r; }
+    if (routes) { const r = await routes(u, opts || {}); if (r !== undefined) body = r; }
     return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body, body: null };
   };
   const ctx = {
@@ -145,4 +145,19 @@ test('Version banner: no banner when the shas match', async () => {
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
   await new Promise((r) => setTimeout(r, 80));
   assert.strictEqual(env.els.get('#versionBanner').hidden, true);
+});
+
+test('Tower badge paints from the cheap overview without waiting for the slow model', async () => {
+  const gen = new Date().toISOString();
+  const env = makeEnv([], null, async (u) => {
+    if (u.startsWith('/api/rc/tower/whoami')) return { actions_enabled: true, act: true };
+    if (u.startsWith('/api/rc/tower/model')) { await new Promise((r) => setTimeout(r, 600)); return { enabled: true, model: { header: 'H', generated_at: gen, sections: [], palette: {}, legend: [] } }; }
+    if (u.startsWith('/api/rc/tower')) return { enabled: true, mtime: 'x', overview: { generated_at: gen, counts: { waiting: 3, urgent: 0 } } };
+    return undefined;
+  });
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.strictEqual(env.els.get('#towerBadge').textContent, '3', 'badge is set while the model is still loading');
+  assert.ok(env.els.get('#towerList').children.length > 0, 'the legacy list shows meanwhile');
 });

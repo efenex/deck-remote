@@ -140,6 +140,7 @@ func main() {
 	go srv.runWatcher(watchCtx)
 	go srv.runTowerWatch(watchCtx)
 	go srv.warmSessions()
+	go srv.warmTower()
 	log.Printf("push + watcher started (subject=%s vapid pub %s…)", pm.subject, pm.vapidPub[:min(12, len(pm.vapidPub))])
 
 	httpSrv := &http.Server{

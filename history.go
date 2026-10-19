@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -134,6 +136,7 @@ type pathEntry struct {
 type parsedEntry struct {
 	size  int64
 	mtime time.Time
+	off   int64 // bytes consumed: the end of the last complete line (transcripts are append-only)
 	msgs  []histMsg
 }
 
@@ -193,16 +196,25 @@ func parseTranscript(path string) ([]histMsg, error) {
 	if ok && e.size == fi.Size() && e.mtime.Equal(fi.ModTime()) {
 		return append([]histMsg(nil), e.msgs...), nil
 	}
-	msgs, err := parseTranscriptFile(path)
+	// A live session only ever appends: parse just the new tail and extend the
+	// cached messages instead of re-reading a (potentially 100 MB) transcript on
+	// every turn. A shrunk file was rewritten: start over.
+	var base []histMsg
+	var from int64
+	if ok && fi.Size() > e.size && e.off > 0 && e.off <= fi.Size() {
+		base, from = e.msgs, e.off
+	}
+	add, off, err := parseTranscriptFrom(path, from)
 	if err != nil {
 		return nil, err
 	}
+	msgs := append(append([]histMsg(nil), base...), add...)
 	transcripts.mu.Lock()
 	transcripts.parses++
 	if len(transcripts.parsed) >= transcriptCacheMax/8 {
 		transcripts.parsed = map[string]parsedEntry{}
 	}
-	transcripts.parsed[path] = parsedEntry{size: fi.Size(), mtime: fi.ModTime(), msgs: msgs}
+	transcripts.parsed[path] = parsedEntry{size: fi.Size(), mtime: fi.ModTime(), off: off, msgs: msgs}
 	transcripts.mu.Unlock()
 	return append([]histMsg(nil), msgs...), nil
 }
@@ -210,25 +222,62 @@ func parseTranscript(path string) ([]histMsg, error) {
 // parseTranscriptFile reads the whole transcript into ordered conversation
 // messages (oldest first).
 func parseTranscriptFile(path string) ([]histMsg, error) {
+	msgs, _, err := parseTranscriptFrom(path, 0)
+	return msgs, err
+}
+
+var (
+	contentStrA = []byte(`"content":"`)
+	contentStrB = []byte(`"content": "`)
+	typeUserA   = []byte(`"type":"user"`)
+	typeUserB   = []byte(`"type": "user"`)
+)
+
+// skipLine is a cheap pre-filter for the bulk of a transcript: a user entry whose
+// content is not a plain string is a tool_result / attachment list, which
+// humanText rejects anyway, so don't pay to JSON-decode it.
+func skipLine(line []byte) bool {
+	if !bytes.Contains(line, typeUserA) && !bytes.Contains(line, typeUserB) {
+		return false
+	}
+	return !bytes.Contains(line, contentStrA) && !bytes.Contains(line, contentStrB)
+}
+
+// parseTranscriptFrom parses complete lines starting at byte offset from and
+// returns the messages found plus the offset just past the last complete line
+// (a trailing partial line, still being written, is left for the next call).
+func parseTranscriptFrom(path string, from int64) ([]histMsg, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, from, err
 	}
 	defer f.Close()
-
+	if from > 0 {
+		if _, err := f.Seek(from, io.SeekStart); err != nil {
+			return nil, from, err
+		}
+	}
 	var msgs []histMsg
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024) // transcripts have long lines
-	for sc.Scan() {
-		line := sc.Bytes()
+	off := from
+	rd := bufio.NewReaderSize(f, 1024*1024) // transcripts have long lines
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err != nil && err != io.EOF {
+			return msgs, off, err
+		}
 		if len(line) == 0 {
+			break
+		}
+		if line[len(line)-1] != '\n' && !json.Valid(bytes.TrimSpace(line)) {
+			break // a partial last line still being written: leave it for the next call
+		}
+		off += int64(len(line))
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || skipLine(line) {
 			continue
 		}
 		var l jsonlLine
-		if json.Unmarshal(line, &l) != nil {
-			continue
-		}
-		if l.IsMeta {
+		if json.Unmarshal(line, &l) != nil || l.IsMeta {
 			continue
 		}
 		switch l.Type {
@@ -241,8 +290,11 @@ func parseTranscriptFile(path string) ([]histMsg, error) {
 				msgs = append(msgs, histMsg{Role: "user", Content: txt, Ts: tsUnix(l.Timestamp)})
 			}
 		}
+		if err == io.EOF {
+			break
+		}
 	}
-	return msgs, sc.Err()
+	return msgs, off, nil
 }
 
 // assistantText joins the text blocks of an assistant content array (skips
