@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -279,5 +282,171 @@ func TestTowerAskFindsFoldedAsks(t *testing.T) {
 	s.handleTower(w, httptest.NewRequest("GET", "/api/rc/tower", nil))
 	if !strings.Contains(w.Body.String(), `"waiting_folded":[{"id":"hh-flux-pr"`) {
 		t.Fatalf("overview must pass waiting_folded through: %s", w.Body.String())
+	}
+}
+
+// --- tower tab parity: model + act ------------------------------------------
+
+const towerStubModel = `{"header":"TOWER 17:35Z","generated_at":"2026-10-19T17:35:00Z","palette":{},"legend":[],"sections":[
+{"id":"waiting","title":"WAITING ON YOU","count":"1","urgent":0,"folded":null,"items":[{"kind":"ask","id":"hh-flux-pr","key":"ask:hh-flux-pr","fold_ok":true,"confirm_ok":true,"status":"waiting","blocks":[]}]},
+{"id":"requests","title":"WHAT YOU ASKED FOR","count":"2","urgent":0,"folded":null,"items":[
+ {"kind":"request","id":"req-open","key":"request:req-open","fold_ok":true,"confirm_ok":true,"status":"waiting"},
+ {"kind":"request","id":"req-busy","key":"request:req-busy","fold_ok":true,"confirm_ok":false,"status":"flight"}]},
+{"id":"flight","title":"IN FLIGHT","count":"2","urgent":0,"folded":null,"items":[
+ {"kind":"task","id":"op-task","key":"task:op-task","fold_ok":false,"confirm_ok":true,"status":"flight"},
+ {"kind":"task","id":"agent-task","key":"task:agent-task","fold_ok":false,"confirm_ok":false,"status":"flight"}]},
+{"id":"suggested","title":"SUGGESTED","count":"1","urgent":0,"folded":null,"items":[{"kind":"suggest","id":"sg_Next.Thing","key":"suggest:sg_Next.Thing","title":"Do the thing","task":"t-1","fold_ok":false,"confirm_ok":false,"status":"suggest"}]}]}`
+
+// towerActServer: a server whose model comes from a stub script and whose writes are
+// captured instead of run. Returns a request builder carrying a valid act credential.
+func towerActServer(t *testing.T) (*server, func(body string) *httptest.ResponseRecorder, *[][]string) {
+	t.Helper()
+	s, _ := towerTestServer(t, "ruben@example.com", towerFixture)
+	stub := filepath.Join(t.TempDir(), "stub_model.py")
+	if err := os.WriteFile(stub, []byte("import sys\nsys.stdout.write("+jsonStr(towerStubModel)+")\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.towerModelScript = stub
+	s.cfg.towerRoot = "/tower"
+	s.cfg.bin = "agent-deck"
+	var mu sync.Mutex
+	var ran [][]string
+	s.towerExec = func(ctx context.Context, argv []string) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		ran = append(ran, argv)
+		return 0, ""
+	}
+	_, tok, err := s.tokens.mint("phone", "act")
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/rc/tower/act", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Tailscale-User-Login", "ruben@example.com")
+		req.RemoteAddr = "127.0.0.1:5555"
+		w := httptest.NewRecorder()
+		s.authAct(http.HandlerFunc(s.handleTowerAct)).ServeHTTP(w, req)
+		return w
+	}
+	return s, do, &ran
+}
+
+func TestTowerActPickAndDismissUseTUIArgv(t *testing.T) {
+	_, do, ran := towerActServer(t)
+	if w := do(`{"op":"pick","id":"sg_Next.Thing"}`); w.Code != 200 || !strings.Contains(w.Body.String(), "queued") {
+		t.Fatalf("pick: %d %s", w.Code, w.Body.String())
+	}
+	j := "/tower/scripts/journal.py"
+	want := [][]string{
+		{"python3", "-I", j, "add", "--kind", "request", "--id", "pick-sg-next-thing", "--to", "open", "--by", "operator",
+			"--data", `{"text":"operator picked suggestion sg_Next.Thing: Do the thing","suggestion":"sg_Next.Thing","task":"t-1","from":"tui"}`},
+		{"python3", "-I", j, "add", "--kind", "suggest", "--id", "sg_Next.Thing", "--to", "picked", "--by", "operator"},
+		{"agent-deck", "session", "send", "--no-wait", "tower", "[tui] picked suggestion sg_Next.Thing"},
+	}
+	if !reflect.DeepEqual(*ran, want) {
+		t.Fatalf("pick argv:\n got %q\nwant %q", *ran, want)
+	}
+	*ran = nil
+	if w := do(`{"op":"dismiss","id":"sg_Next.Thing"}`); w.Code != 200 {
+		t.Fatalf("dismiss: %d %s", w.Code, w.Body.String())
+	}
+	if got := (*ran)[0]; !reflect.DeepEqual(got, []string{"python3", "-I", j, "add", "--kind", "suggest", "--id", "sg_Next.Thing", "--to", "dismissed", "--by", "operator"}) {
+		t.Fatalf("dismiss argv: %q", got)
+	}
+}
+
+func TestTowerActFoldCloseArgvAndValidation(t *testing.T) {
+	_, do, ran := towerActServer(t)
+	j := "/tower/scripts/journal.py"
+	cases := []struct {
+		body string
+		code int
+		argv []string
+	}{
+		{`{"op":"fold","id":"hh-flux-pr"}`, 200, []string{"python3", "-I", j, "add", "--kind", "fold", "--id", "hh-flux-pr", "--to", "folded", "--by", "operator", "--ref", "operator via overview TUI"}},
+		{`{"op":"unfold","id":"section:requests"}`, 200, []string{"python3", "-I", j, "add", "--kind", "fold", "--id", "section:requests", "--to", "unfolded", "--by", "operator", "--ref", "operator via overview TUI"}},
+		{`{"op":"close","kind":"ask","id":"hh-flux-pr"}`, 200, []string{"python3", "-I", j, "add", "--kind", "ask", "--id", "hh-flux-pr", "--to", "closed", "--by", "operator", "--data", `{"answer":"closed by operator in TUI"}`}},
+		{`{"op":"close","kind":"request","id":"req-open"}`, 200, []string{"python3", "-I", j, "add", "--kind", "request", "--id", "req-open", "--to", "done", "--by", "operator", "--data", `{"result":"confirmed by operator in TUI"}`}},
+		{`{"op":"close","kind":"task","id":"op-task"}`, 200, []string{"python3", "-I", j, "add", "--kind", "task", "--id", "op-task", "--to", "done", "--by", "operator", "--data", `{"done_evidence":"closed by operator in TUI"}`}},
+		// refusals: nothing may be journaled
+		{`{"op":"close","kind":"request","id":"req-busy"}`, 404, nil},
+		{`{"op":"close","kind":"task","id":"agent-task"}`, 404, nil},
+		{`{"op":"close","kind":"suggest","id":"sg_Next.Thing"}`, 404, nil},
+		{`{"op":"fold","id":"op-task"}`, 404, nil},
+		{`{"op":"fold","id":"section:nope"}`, 404, nil},
+		{`{"op":"pick","id":"not-there"}`, 404, nil},
+		{`{"op":"rm -rf","id":"hh-flux-pr"}`, 400, nil},
+		{`{"op":"fold","id":""}`, 400, nil},
+	}
+	for _, c := range cases {
+		*ran = nil
+		w := do(c.body)
+		if w.Code != c.code {
+			t.Fatalf("%s: status %d want %d (%s)", c.body, w.Code, c.code, w.Body.String())
+		}
+		if c.argv == nil && len(*ran) != 0 {
+			t.Fatalf("%s: refused request still wrote: %q", c.body, *ran)
+		}
+		if c.argv != nil && (len(*ran) != 1 || !reflect.DeepEqual((*ran)[0], c.argv)) {
+			t.Fatalf("%s: argv\n got %q\nwant %q", c.body, *ran, c.argv)
+		}
+	}
+}
+
+func TestTowerActNeedsActCredential(t *testing.T) {
+	s, _, ran := towerActServer(t)
+	for name, hdr := range map[string]map[string]string{
+		"no token":     {},
+		"shared token": {"Authorization": "Bearer shared-secret", "Tailscale-User-Login": "ruben@example.com"},
+	} {
+		req := httptest.NewRequest("POST", "/api/rc/tower/act", strings.NewReader(`{"op":"dismiss","id":"sg_Next.Thing"}`))
+		req.RemoteAddr = "127.0.0.1:5555"
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		s.authAct(http.HandlerFunc(s.handleTowerAct)).ServeHTTP(w, req)
+		if w.Code != 403 || len(*ran) != 0 {
+			t.Fatalf("%s: status %d, wrote %q", name, w.Code, *ran)
+		}
+	}
+}
+
+func TestTowerActReportsJournalFailureAndWakeFailureSeparately(t *testing.T) {
+	s, do, _ := towerActServer(t)
+	s.towerExec = func(ctx context.Context, argv []string) (int, string) {
+		if argv[0] == "python3" {
+			return 1, "boom"
+		}
+		return 0, ""
+	}
+	if w := do(`{"op":"dismiss","id":"sg_Next.Thing"}`); w.Code != 502 || !strings.Contains(w.Body.String(), "rc=1") {
+		t.Fatalf("journal failure must surface: %d %s", w.Code, w.Body.String())
+	}
+	s.towerExec = func(ctx context.Context, argv []string) (int, string) {
+		if argv[0] == "agent-deck" {
+			return 1, "no such session"
+		}
+		return 0, ""
+	}
+	w := do(`{"op":"pick","id":"sg_Next.Thing"}`)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "waking tower failed") {
+		t.Fatalf("a failed wake keeps the journaled pick: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTowerModelEndpointServesStubAndCaches(t *testing.T) {
+	s, _, _ := towerActServer(t)
+	w := httptest.NewRecorder()
+	s.handleTowerModel(w, httptest.NewRequest("GET", "/api/rc/tower/model", nil))
+	var resp struct {
+		Enabled bool           `json:"enabled"`
+		Actions bool           `json:"actions"`
+		Model   map[string]any `json:"model"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &resp) != nil || !resp.Enabled || !resp.Actions || resp.Model["header"] != "TOWER 17:35Z" {
+		t.Fatalf("model: %d %s", w.Code, w.Body.String())
 	}
 }

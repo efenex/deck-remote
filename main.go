@@ -51,9 +51,11 @@ type config struct {
 	tlsKey       string // PEM private key matching tlsCert
 
 	// Optional tower overview tab (tower.go). Empty towerOverview = feature off.
-	towerOverview string // path to tower's state/overview/overview.json
-	towerOperator string // Tailscale login (Tailscale-User-Login) allowed to perform tower actions; empty = actions off
-	towerSession  string // agent-deck session (id or title) that receives reply-to-ask messages
+	towerOverview    string // path to tower's state/overview/overview.json
+	towerOperator    string // Tailscale login (Tailscale-User-Login) allowed to perform tower actions; empty = actions off
+	towerSession     string // agent-deck session (id or title) that receives reply-to-ask messages
+	towerRoot        string // tower checkout (journal.py, tower_tui.py); default derived from towerOverview
+	towerModelScript string // scripts/tower_model.py; default next to the binary
 }
 
 func loadConfig() config {
@@ -79,6 +81,8 @@ func loadConfig() config {
 	flag.StringVar(&c.towerOverview, "tower-overview", def("DECK_REMOTE_TOWER_OVERVIEW", ""), "path to tower's overview.json; empty = no tower tab")
 	flag.StringVar(&c.towerOperator, "tower-operator", def("DECK_REMOTE_TOWER_OPERATOR", ""), "Tailscale login allowed to perform tower actions (reply-to-ask); empty = actions refused")
 	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")
+	flag.StringVar(&c.towerRoot, "tower-root", def("DECK_REMOTE_TOWER_ROOT", ""), "tower checkout holding scripts/journal.py + tower_tui.py (default: derived from --tower-overview)")
+	flag.StringVar(&c.towerModelScript, "tower-model-script", def("DECK_REMOTE_TOWER_MODEL_SCRIPT", ""), "path to scripts/tower_model.py (default: next to the binary)")
 	flag.Parse()
 
 	if c.token == "" {
@@ -179,26 +183,29 @@ func main() {
 }
 
 type server struct {
-	cfg       config
-	proxy     *httputil.ReverseProxy
-	hub       *sseHub
-	queue     *sessionQueues
-	push      *pushManager
-	acts      *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
-	codex     *codexRolloutStore
-	pi        *piTranscriptStore
-	oc        *opencodeClient
-	attn      *attentionCache
-	codexReqs *codexRequestTracker
-	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
-	tower     *towerStore // optional tower overview (tower.go); nil = feature off
-	towerMu   sync.Mutex
-	towerLast map[string]time.Time                                        // reply dedup (tower.go)
-	sessBuild func(ctx context.Context, all bool) ([]byte, string, error) // test seam; nil = buildSessions
-	sess      *sessionsCache                                              // stale-while-revalidate session-list bodies (sessions.go)
-	lists     *listCache                                                  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
-	views     *viewCache                                                  // TTL-cached TUI view filter per profile (viewfilter.go)
-	replies   *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
+	cfg        config
+	proxy      *httputil.ReverseProxy
+	hub        *sseHub
+	queue      *sessionQueues
+	push       *pushManager
+	acts       *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
+	codex      *codexRolloutStore
+	pi         *piTranscriptStore
+	oc         *opencodeClient
+	attn       *attentionCache
+	codexReqs  *codexRequestTracker
+	tokens     *tokenStore // per-device tokens (additive to the shared bearer)
+	tower      *towerStore // optional tower overview (tower.go); nil = feature off
+	towerMu    sync.Mutex
+	towerM     towerModel                                                  // cached tower_model.py output (tower_actions.go)
+	towerActMu sync.Mutex                                                  // serialises journal writes from the phone
+	towerExec  func(ctx context.Context, argv []string) (int, string)      // test seam; nil = exec
+	towerLast  map[string]time.Time                                        // reply dedup (tower.go)
+	sessBuild  func(ctx context.Context, all bool) ([]byte, string, error) // test seam; nil = buildSessions
+	sess       *sessionsCache                                              // stale-while-revalidate session-list bodies (sessions.go)
+	lists      *listCache                                                  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
+	views      *viewCache                                                  // TTL-cached TUI view filter per profile (viewfilter.go)
+	replies    *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
 	// whole point of the polling rework is keeping execAdeck near zero at
@@ -291,6 +298,8 @@ func (s *server) routes() http.Handler {
 	// tower overview tab (tower.go): reads on any token, actions on act-cap device token + tailscale identity
 	mux.Handle("GET /api/rc/tower", s.auth(http.HandlerFunc(s.handleTower)))
 	mux.Handle("GET /api/rc/tower/whoami", s.auth(http.HandlerFunc(s.handleTowerWhoami)))
+	mux.Handle("GET /api/rc/tower/model", s.auth(http.HandlerFunc(s.handleTowerModel)))
+	mux.Handle("POST /api/rc/tower/act", s.auth(s.authAct(http.HandlerFunc(s.handleTowerAct))))
 	mux.Handle("POST /api/rc/tower/reply", s.auth(s.authAct(http.HandlerFunc(s.handleTowerReply))))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and
