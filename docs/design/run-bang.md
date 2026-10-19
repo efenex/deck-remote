@@ -25,17 +25,22 @@ keeps every operator step an operator step.
 
 ## 1. What is in today's asks
 
-41 `! ` lines in `tower/journal.jsonl` (kind=ask, data.items, through 2026-10-19), classified
-by the rules in §3:
+40 `! ` lines in `tower/journal.jsonl` (kind=ask, data.items, through 2026-10-19), hand-classified
+by the rules in §3. Counts are approximate; phase 0 (§6) produces the real ones.
 
 | class | count | examples | phone | TUI |
 |---|---|---|---|---|
-| read-only | 8 | `flux … reconcile` (check), `kubectl get secret … \| wc -c`, `vault kv metadata get`, `fetch_fields.py`, `bash env-ligna-ga-compare.sh` | phase 1 | phase 1 |
-| mutating | 12 | `git pull && ansible-playbook … --tags homelab_health`, `launchctl bootstrap`, `launchctl kickstart`, `ln -sfn`, `cp -p … backup`, `printf > settings.local.json`, `tick_lease.py takeover --force`, `sketchybar --reload`, `gh pr merge` | phase 2, re-auth | phase 1, y/n |
-| secret-reading | 4 | `vault kv get -field=password … \| pbcopy`, `openssl rand \| vault kv put`, `export VAULT_TOKEN=$(vault login -method=oidc …) && sealkeep sync`, `vault kv metadata delete` (needs `$VAULT_TOKEN`) | phase 3, rc only | phase 2 |
+| read-only | 2 | `vault kv metadata get` (with `$VAULT_TOKEN` test, so copy-only by §3.2 until rewritten), `launchctl print` segments | phase 1 | phase 1 |
+| mutating | 17 | `flux reconcile` (a converge), `git pull && ansible-playbook … --tags homelab_health`, `launchctl bootstrap`, `launchctl kickstart`, `ln -sfn`, `cp -p … backup`, `printf > settings.local.json`, `tick_lease.py takeover --force`, `sketchybar --reload`, `gh pr merge`, every `bash`/`python3 <script>` (`fetch_fields.py`, `env-ligna-ga-compare.sh`, `open-prs.sh`, `fix-deckremote-plist.sh`, `mint-kubeconfig.sh`) | phase 2, re-auth | phase 1, y/n |
+| secret-reading | 5 | `vault kv get -field=password … \| pbcopy`, `openssl rand \| vault kv put`, `export VAULT_TOKEN=$(vault login -method=oidc …) && sealkeep sync`, `kubectl get secret … -o jsonpath \| wc -c`, `vault kv metadata delete` (also destructive) | phase 3, rc only | phase 2 |
 | destructive | 3 | `ssh starling3 'rm -rf -- …'`, `pkill -f …`, `vault kv metadata delete` | never | y/n with the line retyped |
 | interactive / local-only | 9 | `open https://…`, `ssh -t … tmux attach`, `ssh -fN -D 1080`, `vault login -method=oidc` (browser), `pbcopy`, `agent-deck session send … (paste …)` | never (copy) | TTY hand-over |
-| not a command | 5 | `(paste transport/fallback_reason …)`, `total 41`, prose fragments | copy | copy |
+| copy-only | 4 | relative paths without `cd`, lines that assume `$VAULT_TOKEN` from an earlier line, the `tailscale serve --set-path` lines (unknown verb until allowlisted) | copy | copy |
+
+The honest reading: **almost nothing in today's asks is read-only.** Phase 1 on the phone will
+run very little until `/ask` writes self-contained lines and the allowlist grows with real
+evidence. That is acceptable; the pilot exists to prove the runner and the audit path, not to
+be useful on day one.
 
 Two findings shape the design:
 
@@ -73,9 +78,17 @@ device is the weak point and the TTY is absent, so classes are narrower and re-a
 
 A run request is `{ask, item, sha256}`. The runner re-reads the *current* journal, finds the
 open ask, takes `items[item]`, strips the leading `! `, and refuses unless the hash matches.
-This is the pattern `tower_actions.go` already uses (validate against the current model), and it
-kills stale tabs, hand-made requests and edited commands in one check. The front end shows the
-same text it hashed. Neither front end accepts typed commands.
+This is the pattern `tower_actions.go` (branch `feat/tower-tab-parity`) already uses for
+fold/close/pick (validate against the current model), and it kills stale tabs, hand-made requests
+and edited commands in one check. The front end shows the same text it hashed. Neither front
+end accepts typed commands.
+
+**Extraction boundary.** Runnable means: an entry of `data.items[]` whose text starts with
+exactly `! `; the command is that string with the two-character prefix stripped, nothing else.
+A `!` found in `data.detail`, in `data.text`, or inline in prose (what the TUI's `bangs()`
+fallback and `learnings_check.INLINE_RE` find, ending at a double space) is copy-only on both
+front ends. The regexes stay for display and for `learnings_check`; they are not in the trust
+path.
 
 ### 3.2 Classes
 
@@ -85,9 +98,9 @@ the **maximum** over segments. Unknown first word → `copy-only`.
 
 | class | rule | examples |
 |---|---|---|
-| **read-only** | allowlisted verbs that do not write: `git status/log/diff/fetch`, `kubectl get/describe/logs`, `flux get/reconcile` (reconcile is idempotent and already-declared), `vault kv metadata get`, `vault kv list`, `launchctl print/list`, `ls`, `cat`, `grep`, `wc`, `df`, `curl -s` without `-X`/`-d`, `python3 -I <abs path>` and `bash <abs path>` **only** when the script is in an allowlisted dir (`tower/scripts`, `tower/briefs`) and its name matches `*status*|*check*|*compare*|*recon*|fetch_*` | 8 of 41 |
-| **mutating** | `git pull/switch/checkout`, `ansible-playbook`, `kubectl apply/rollout`, `flux suspend/resume`, `launchctl bootstrap/kickstart/enable`, `ln`, `cp`, `mkdir`, `printf >`, `perl -pi`, `gh pr merge`, `sketchybar --reload`, `tick_lease.py takeover`, `sealkeep sync`, any `bash`/`python3` script not matched above | 12 |
-| **secret-reading** | `vault kv get/put`, `vault read`, `vault login`, anything that reads `.env` or `$VAULT_TOKEN`, `openssl rand`, `kubectl get secret -o jsonpath` without a `wc`/`sha` sink | 4 |
+| **read-only** | allowlisted verbs that do not write: `git status/log/diff/fetch`, `kubectl get/describe/logs` (not `get secret`), `flux get`, `vault kv metadata get`, `vault kv list`, `launchctl print/list`, `ls`, `cat`, `grep`, `wc`, `df`, `curl -s` without `-X`/`-d`. **No scripts**: `bash x`, `python3 x`, `sh x` are at least mutating whatever the file is called, because a worker can name a file `check.sh` and `briefs/` is writable by tower | ~2 of 40 |
+| **mutating** | `git pull/switch/checkout`, `ansible-playbook`, `kubectl apply/rollout`, `flux reconcile/suspend/resume` (a converge is an operator step, AGENTS.md:135), `launchctl bootstrap/kickstart/enable`, `ln`, `cp`, `mkdir`, `printf >`, `perl -pi`, `gh pr merge`, `sketchybar --reload`, `tick_lease.py takeover`, `sealkeep sync`, any `bash`/`python3`/`sh` script; a script may be demoted to read-only only when the ask pins `data.script_sha256` and the runner verifies it | ~17 |
+| **secret-reading** | `vault kv get/put`, `vault read`, `vault login`, anything that reads `.env` or `$VAULT_TOKEN`, `openssl rand`, any `kubectl get secret` (no sink detection; `… \| wc -c` goes rc-only and that is fine) | ~5 |
 | **destructive** | `rm -rf`, `rm -r`, `pkill`, `kill`, `launchctl bootout`, `vault kv metadata delete`, `kubectl delete`, `git push --force`, `--force`, `git reset --hard`, `flux delete`, `ssh … 'rm …'` (remote segment is classified too) | 3 |
 | **interactive / local-only** | `open`, `pbcopy`, `ssh -t`, `ssh -fN`, `tmux attach`, `vault login -method=oidc`, `sudo`, anything in `LEARNINGS.md`'s smartcard list, `agent-deck session send` | 9 |
 | **copy-only** | unknown first word, a relative path with no leading `cd <abs>`, a line that reads `$VAULT_TOKEN` or `.env` without setting it in the same line, lines over 2 kB | the rest |
@@ -122,9 +135,13 @@ dir, the timeout, and any `learnings_check.py` matches. The operator taps **Run*
 mutating and secret classes, Run requires re-auth (F2). The lean is a **laptop-armed nonce**:
 the TUI (or a hotkey) arms "phone may run mutating for 10 min", journaled as `grant`; the phone
 can only ask. This reuses tower's existing `grant` kind and needs no WebAuthn plumbing, and it
-means a stolen phone alone cannot apply anything. Passkey/biometric via WebAuthn
-(`navigator.credentials.get` with `userVerification: required`) is the stronger option if the
-PWA grows a credential store; it is more code and a second secret to back up.
+means a stolen phone alone cannot apply anything. Its cost is real: the reason to apply from the
+phone is being away from the laptop, and a short laptop-armed window covers only "I am leaving
+in a minute, let the rollout land from the train". A **passkey with Face ID** (WebAuthn,
+`navigator.credentials.get` with `userVerification: required`, the credential bound to
+deck-remote's origin) is the fit for the stolen-unlocked-phone case and works anywhere; it is
+more code, a server-side credential store, and a second secret to enrol and back up. The fork
+is F2.
 
 ## 4. Execution
 
@@ -156,9 +173,10 @@ barriers. Say that on the confirm screen for mutating lines.
 
 ### 4.3 Timeouts and streaming
 
-`towerExecTimeout` is 60 s and bound to the HTTP request, which fits `journal.py` and nothing
-else. The runner is detached: own process group, `setsid`, stdout+stderr spooled to
-`tower/state/runs/<run-id>.log` (`0600`). Per-class defaults: read-only 2 min, mutating 15 min,
+`towerExecTimeout` (`tower_actions.go`, branch `feat/tower-tab-parity`) is 60 s and bound to the
+HTTP request, which fits `journal.py` and nothing else. The runner is detached: `subprocess.Popen(start_new_session=True)` (macOS has no `setsid`
+binary; this is the portable form), stdout+stderr spooled to `tower/state/runs/<run-id>.log`
+(`0600`), kills sent to the process group. Per-class defaults: read-only 2 min, mutating 15 min,
 secret 5 min; `/ask` may set `data.timeout` up to 30 min. On timeout the process group gets
 `SIGTERM`, then `SIGKILL` after 10 s, rc=124.
 
@@ -167,6 +185,16 @@ deck-remote tails the log file and publishes `tower-run-output` events on the ex
 disconnects does not stop the run; reopening the tab resumes from the file. A deck-remote
 restart does not kill the run either, because the runner is a child of `run_bang.py`, not of
 deck-remote (F1).
+
+Interactive runs on the TUI (§4.4) hand over the TTY, so nothing is spooled or redacted; they
+journal `running` and `done` with rc only and no tail. That keeps one audit path with one
+documented gap rather than a second log.
+
+**Stale `running` records.** The `running` record carries `pid` and `pgid`. If the runner
+dies (laptop sleep, crash), a `running` record older than its timeout plus 60 s is treated as
+`done rc=-1` by `derive()` and by the refuse check, so it can neither block a rerun nor block
+auto-close forever. A rerun after rc≠0 or rc=-1 is a new record with an attempt suffix
+(`<ask>:<item>:<sha8>:2`); only `done rc=0` for the same `(ask, item, sha)` refuses a rerun.
 
 Redaction on every line, before it leaves disk: known token shapes (`hvs.`, `s.` Vault tokens,
 `ghp_`/`gho_`, `AKIA`, `xox[bp]-`, `eyJ` JWTs, `password=`, `token=`, `Bearer `, base64 runs over
@@ -228,7 +256,7 @@ Destructive from the phone is not a phase.
 | # | decision | options | lean |
 |---|---|---|---|
 | F1 | **Where the runner lives** | (a) `tower/scripts/run_bang.py`, deck-remote and the TUI both exec it; (b) Go code in deck-remote, the TUI calls deck-remote over loopback | **(a)**: one implementation, the TUI needs no daemon, detached runs survive a deck-remote restart, and it matches "journal.py is the only writer" |
-| F2 | **Re-auth for mutating/secret on the phone** | (a) laptop-armed 10 min grant, journaled; (b) WebAuthn passkey with user verification; (c) none, rely on the cap | **(a)** now, (b) if the PWA later gets a credential store; never (c) |
+| F2 | **Re-auth for mutating/secret on the phone** | (a) laptop-armed 10 min grant, journaled (cheap, but only covers "leaving the laptop shortly"); (b) WebAuthn passkey with Face ID (works away from the laptop, the real fit for a stolen unlocked phone, more code); (c) none, rely on the cap | **(a)** for phase 2's first weeks because it is a day of work; **(b)** before phase 2 is called done; never (c) |
 | F3 | **Shell semantics** | (a) one line, one fresh shell, env-carrying lines copy-only, `/ask` emits self-contained `cd … && …` lines; (b) run all of an ask's lines in one shell in order | **(a)**: per-line confirm and per-line rc need per-line runs; (b) makes one confirm cover a chain |
 | F4 | **Output policy per class** | (a) ro/mut: redacted stream + 20-line journal tail, secret: rc only; (b) everything rc only, log on disk; (c) full output to the phone | **(a)** |
 | F5 | **Who closes the ask** | (a) tower, on its next tick, from `run done rc=0`; (b) the runner journals `ask --to answered` itself | **(a)**: the runner never writes ask records, and tower's fan-out stays in one place |
@@ -257,8 +285,9 @@ Enter.
 
 ## 8. Open questions (not forks)
 
-- Should `flux reconcile` be read-only? It mutates cluster state by design but only toward
-  what git already says. Lean: read-only, because tower only proposes it after a merge.
+- `flux reconcile` is classified mutating (a converge, hard rule). If that makes the phone
+  pilot useless in practice, the operator can allowlist it per cluster context in phase 2, not
+  by loosening the class.
 - Retention of `state/runs/` logs: 30 days proposed; secret-reading logs could be dropped on
   `done` instead of kept redacted.
 - Does `/ask` grow a `cwd`/`timeout`/`class_override` schema, or does the runner infer
