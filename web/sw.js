@@ -10,14 +10,15 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v18';
+const CACHE = 'deck-remote-v19';
+const SHELL_NET_TIMEOUT = 1500; // ms before the shell is served from cache
 const SHELL = [
   '/',
   '/index.html',
-  '/thread.js?v=18',
-  '/markdown.js?v=18',
-  '/gestures.js?v=18',
-  '/app.js?v=18',
+  '/thread.js?v=19',
+  '/markdown.js?v=19',
+  '/gestures.js?v=19',
+  '/app.js?v=19',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.
@@ -61,20 +62,25 @@ self.addEventListener('fetch', (event) => {
     return; // let the network handle live endpoints
   }
 
-  event.respondWith(
-    fetch(req)
-      .then((res) => {
-        // Cache successful shell-ish responses for offline launch.
-        if (res && res.ok && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-        }
-        return res;
-      })
-      .catch(() =>
-        caches.match(req, { ignoreSearch: true }).then((hit) => hit || caches.match('/index.html'))
-      )
-  );
+  // Network-first (so a deploy shows up on the next launch) but never hang on a
+  // slow/unreachable server: after SHELL_NET_TIMEOUT answer from the cache and let
+  // the network response refresh it for next time.
+  const cached = () => caches.match(req, { ignoreSearch: true });
+  const net = fetch(req).then((res) => {
+    // Cache successful shell-ish responses for offline launch.
+    if (res && res.ok && res.type === 'basic') {
+      const copy = res.clone();
+      caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+    }
+    return res;
+  });
+  event.respondWith(new Promise((resolve) => {
+    const t = setTimeout(() => cached().then((hit) => { if (hit) resolve(hit); }), SHELL_NET_TIMEOUT);
+    net.then(
+      (res) => { clearTimeout(t); resolve(res); },
+      () => { clearTimeout(t); cached().then((hit) => (hit ? resolve(hit) : caches.match('/index.html').then(resolve))); }
+    );
+  }));
 });
 
 /* Push: render a notification from the server payload.

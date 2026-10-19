@@ -135,6 +135,7 @@ func main() {
 	defer watchCancel()
 	go srv.runWatcher(watchCtx)
 	go srv.runTowerWatch(watchCtx)
+	go srv.warmSessions()
 	log.Printf("push + watcher started (subject=%s vapid pub %s…)", pm.subject, pm.vapidPub[:min(12, len(pm.vapidPub))])
 
 	httpSrv := &http.Server{
@@ -192,10 +193,12 @@ type server struct {
 	tokens    *tokenStore // per-device tokens (additive to the shared bearer)
 	tower     *towerStore // optional tower overview (tower.go); nil = feature off
 	towerMu   sync.Mutex
-	towerLast map[string]time.Time // reply dedup (tower.go)
-	lists     *listCache           // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
-	views     *viewCache           // TTL-cached TUI view filter per profile (viewfilter.go)
-	replies   *replyCache          // per-session last-reply cache (transcript-first, mtime-gated)
+	towerLast map[string]time.Time                                        // reply dedup (tower.go)
+	sessBuild func(ctx context.Context, all bool) ([]byte, string, error) // test seam; nil = buildSessions
+	sess      *sessionsCache                                              // stale-while-revalidate session-list bodies (sessions.go)
+	lists     *listCache                                                  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
+	views     *viewCache                                                  // TTL-cached TUI view filter per profile (viewfilter.go)
+	replies   *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
 	// whole point of the polling rework is keeping execAdeck near zero at
@@ -244,6 +247,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(stateDir(home)),
 		tower:     newTowerStore(cfg.towerOverview),
+		sess:      newSessionsCache(),
 		lists:     newListCache(),
 		views:     newViewCache(),
 		replies:   newReplyCache(),

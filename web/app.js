@@ -2429,6 +2429,7 @@
         state.sessions.set(s.id, Object.assign({}, prev || {}, s));
       });
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
+      if (!state.showAll) saveDeckCache(list);
       setConn('Live', 'live');
     } catch (e) {
       setConn('Can\'t reach server: ' + e.message, 'bad');
@@ -2505,16 +2506,38 @@
     if (sel) sel.addEventListener('change', (e) => onProfileChange(e.target.value));
   })();
 
+  // Last-known deck, so the first paint after a (re)launch does not wait on the
+  // seconds-long /api/rc/sessions round trip. Replaced as soon as the fresh list lands.
+  const DECK_CACHE_KEY = 'dr-deck-cache';
+  function saveDeckCache(list) {
+    try { localStorage.setItem(DECK_CACHE_KEY, JSON.stringify({ at: Date.now(), profile: CURRENT_PROFILE, view: state.view, sessions: list })); } catch (_) {}
+  }
+  function paintCachedDeck() {
+    try {
+      const c = JSON.parse(localStorage.getItem(DECK_CACHE_KEY) || 'null');
+      if (!c || !Array.isArray(c.sessions) || (c.profile || '') !== (CURRENT_PROFILE || '')) return false;
+      c.sessions.forEach((s) => state.sessions.set(s.id, s));
+      state.view = c.view || {};
+      setConn('Updating…', 'bad');
+      renderDeck();
+      return true;
+    } catch (_) { return false; }
+  }
+
   async function boot() {
     showTab('deck');
     registerSW();
     wirePresence();
     startStreams();
-    await loadProfiles();
-    await loadSessions(true);
-    startRefresh();
+    paintCachedDeck();
+    // Everything below runs concurrently: the slow session list no longer gates
+    // the profile list, the inbox or the tower tab.
+    const profile0 = CURRENT_PROFILE;
     loadInbox();
     initTower().then(() => { if (tower.enabled) loadTower(); });
+    await Promise.all([loadProfiles(), loadSessions(true)]);
+    if (CURRENT_PROFILE !== profile0) await loadSessions(true); // profile defaulted/reset by loadProfiles
+    startRefresh();
     // Deep links from a tapped notification on a cold start (the service worker
     // opens /?notif=<id>, or /?session=<id> for pushes from older servers).
     const params = new URL(location.href).searchParams;
