@@ -2742,6 +2742,28 @@
     } catch (_) { return false; }
   }
 
+  // Server/web drift: the binary only changes on rebuild while web/ is served live
+  // from a checkout, so compare the two revisions (GET /api/rc/version).
+  const VERSION_RECHECK_MS = 5 * 60 * 1000;
+  const VERSION_DISMISS_KEY = 'dr-version-dismissed';
+  let versionBannerKey = '';
+  async function checkVersion() {
+    let v;
+    try { v = await api('GET', '/api/rc/version'); } catch (_) { return; } // older server: no endpoint, nothing to compare
+    const b = window.DeckVersion && DeckVersion.banner(v);
+    const box = $('#versionBanner');
+    if (!box) return;
+    if (!b || localStorage.getItem(VERSION_DISMISS_KEY) === b.key) { box.hidden = true; versionBannerKey = ''; return; }
+    versionBannerKey = b.key;
+    box.className = 'vbanner ' + b.level;
+    $('#versionText').textContent = b.text;
+    box.hidden = false;
+  }
+  $('#versionClose').addEventListener('click', () => {
+    if (versionBannerKey) localStorage.setItem(VERSION_DISMISS_KEY, versionBannerKey);
+    $('#versionBanner').hidden = true;
+  });
+
   async function boot() {
     showTab('deck');
     registerSW();
@@ -2752,6 +2774,8 @@
     // the profile list, the inbox or the tower tab.
     const profile0 = CURRENT_PROFILE;
     loadInbox();
+    checkVersion();
+    setInterval(checkVersion, VERSION_RECHECK_MS);
     initTower().then(() => { if (tower.enabled) loadTower(); });
     await Promise.all([loadProfiles(), loadSessions(true)]);
     if (CURRENT_PROFILE !== profile0) await loadSessions(true); // profile defaulted/reset by loadProfiles
@@ -2776,6 +2800,7 @@
       if (document.visibilityState !== 'visible') return;
       loadSessions(false);
       loadInbox(); // pushes that arrived while backgrounded (no SSE then)
+      checkVersion();
       if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
     }
     document.addEventListener('visibilitychange', onResume);

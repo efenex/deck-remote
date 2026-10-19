@@ -197,6 +197,7 @@ type server struct {
 	tokens     *tokenStore // per-device tokens (additive to the shared bearer)
 	tower      *towerStore // optional tower overview (tower.go); nil = feature off
 	towerMu    sync.Mutex
+	webVer     webVersionCache                                             // git HEAD of the --web checkout (version.go)
 	towerM     towerModel                                                  // cached tower_model.py output (tower_actions.go)
 	towerActMu sync.Mutex                                                  // serialises journal writes from the phone
 	towerExec  func(ctx context.Context, argv []string) (int, string)      // test seam; nil = exec
@@ -298,6 +299,7 @@ func (s *server) routes() http.Handler {
 	// tower overview tab (tower.go): reads on any token, actions on act-cap device token + tailscale identity
 	mux.Handle("GET /api/rc/tower", s.auth(http.HandlerFunc(s.handleTower)))
 	mux.Handle("GET /api/rc/tower/whoami", s.auth(http.HandlerFunc(s.handleTowerWhoami)))
+	mux.Handle("GET /api/rc/version", s.auth(http.HandlerFunc(s.handleVersion)))
 	mux.Handle("GET /api/rc/tower/model", s.auth(http.HandlerFunc(s.handleTowerModel)))
 	mux.Handle("POST /api/rc/tower/act", s.auth(s.authAct(http.HandlerFunc(s.handleTowerAct))))
 	mux.Handle("POST /api/rc/tower/reply", s.auth(s.authAct(http.HandlerFunc(s.handleTowerReply))))

@@ -22,6 +22,25 @@ private) or a full terminal (miserable on a phone — broken resize, on-screen
 keyboard covers half the screen). deck-remote gives a structured, private
 alternative over your own tailnet.
 
+## Version check (server vs web)
+
+The binary only changes on rebuild, but `web/` is served live from a git checkout, so the two can drift.
+Build with `make build` (stamps `main.buildSHA` / `buildAt` / `buildDirty` via `-ldflags`; a plain `go build`
+falls back to the VCS info Go embeds). `GET /api/rc/version` (read token) returns:
+
+```json
+{"server_sha":"9d03c95","server_dirty":false,"built_at":"2026-10-19T17:59:12Z",
+ "web_sha":"9d03c95","web_dirty":false,"web_dir":"/…/deck-remote/web","match":true}
+```
+
+`web_sha` is HEAD of the git checkout containing `--web` (short, 7 chars), `web_dirty` is true when that
+directory has uncommitted changes (cached 30 s). `match` is false when both SHAs are known and differ; unknown
+SHAs (no git, no stamp) never count as a mismatch. Any commit changes the SHA, so a docs-only commit also
+reads as a mismatch until the next rebuild. The PWA checks on load, on resume and every 5 min and shows a
+dismissible banner: "server <sha> ≠ web <sha>: rebuild + restart needed (server built …)" and/or "web has
+uncommitted changes". Poll it from tower with `curl -s -H "Authorization: Bearer $TOKEN" …/api/rc/version`
+and compare `match`.
+
 ## Architecture
 ```
  phone PWA ──HTTPS (tailscale serve)──> deck-remote (loopback :8781)

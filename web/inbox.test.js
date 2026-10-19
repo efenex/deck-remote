@@ -43,7 +43,7 @@ function makeEnv(notifs, seenAt, routes) {
     navigator: { serviceWorker: { addEventListener() {}, register: async () => ({}), ready: new Promise(() => {}) }, clipboard: {} }, location: { href: 'http://x/', origin: 'http://x', search: '', hash: '', pathname: '/' },
     history: { replaceState() {} }, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
     URL, URLSearchParams, EventSource: function () { this.close = () => {}; }, WebSocket: function () { this.close = () => {}; },
-    DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: { render: (s) => String(s) }, DeckThread: {}, Notification: { permission: 'default' },
+    DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: { render: (s) => String(s) }, DeckThread: {}, DeckVersion: require('./version.js'), Notification: { permission: 'default' },
     confirm: () => true, requestAnimationFrame: (f) => f(), AbortController, Date, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Error,
   };
   ctx.window = Object.assign(win, ctx);
@@ -123,4 +123,26 @@ test('Tower tab: Queue with tower POSTs op=pick for the suggestion after a confi
   dismiss._ls.click({ stopPropagation() {} });
   await new Promise((r) => setTimeout(r, 20));
   assert.deepStrictEqual(posts, []);
+});
+
+test('Version banner: shown on server/web mismatch, dismissal sticks until the situation changes', async () => {
+  let v = { server_sha: 'aaa1111', web_sha: 'bbb2222', built_at: new Date(Date.now() - 3600e3).toISOString(), web_dirty: false };
+  const env = makeEnv([], null, (u) => (u.startsWith('/api/rc/version') ? v : undefined));
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 80));
+  const box = env.els.get('#versionBanner');
+  assert.strictEqual(box.hidden, false);
+  assert.match(env.els.get('#versionText').textContent, /server aaa1111 \u2260 web bbb2222: rebuild \+ restart needed \(server built 1\.0 h ago\)/);
+  env.listeners.get('#versionClose').click();
+  assert.strictEqual(box.hidden, true);
+  assert.ok(env.store.get('dr-version-dismissed'), 'dismissal is remembered');
+});
+
+test('Version banner: no banner when the shas match', async () => {
+  const env = makeEnv([], null, (u) => (u.startsWith('/api/rc/version') ? { server_sha: 'aaa1111', web_sha: 'aaa1111', web_dirty: false } : undefined));
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.strictEqual(env.els.get('#versionBanner').hidden, true);
 });
