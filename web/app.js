@@ -236,7 +236,7 @@
   // Tailscale identity (the server refuses otherwise). Nothing is ever sent
   // automatically; "send to session" is deliberately not in this version.
   // ---------------------------------------------------------------------------
-  const tower = { enabled: false, data: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false };
+  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false };
 
   async function initTower() {
     try {
@@ -254,14 +254,18 @@
 
   async function loadTower() {
     if (!tower.enabled) return;
-    try {
-      const r = await api('GET', '/api/rc/tower');
-      if (r && r.overview) { tower.data = r.overview; tower.mtime = r.mtime || ''; tower.loaded = true; }
-      else if (r && r.error) { $('#towerList').innerHTML = '<div class="placeholder">' + esc(r.error) + '</div>'; return; }
-    } catch (e) {
-      if (!tower.loaded) $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc(e.message || String(e)) + '</div>';
-      return;
+    // The overview (cheap: counts + legacy fallback) and the TUI-derived model
+    // (python, cached server-side) load concurrently; the model is what is shown.
+    const [ov, md] = await Promise.allSettled([api('GET', '/api/rc/tower'), api('GET', '/api/rc/tower/model')]);
+    if (ov.status === 'fulfilled' && ov.value && ov.value.overview) {
+      tower.data = ov.value.overview; tower.mtime = ov.value.mtime || ''; tower.loaded = true;
+    } else if (ov.status === 'fulfilled' && ov.value && ov.value.error) {
+      $('#towerList').innerHTML = '<div class="placeholder">' + esc(ov.value.error) + '</div>'; return;
+    } else if (!tower.loaded) {
+      $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc((ov.reason && ov.reason.message) || 'error') + '</div>'; return;
     }
+    tower.model = (md.status === 'fulfilled' && md.value && md.value.model) || null;
+    tower.modelError = tower.model ? '' : ((md.status === 'fulfilled' && md.value && md.value.error) || (md.reason && md.reason.message) || 'model unavailable');
     renderTower();
   }
 
@@ -324,7 +328,221 @@
     return row;
   }
 
+  // --- Tower tab, model-driven (mirrors scripts/tower_tui.py via /api/rc/tower/model) ---
   function renderTower() {
+    if (!tower.model) { renderTowerLegacy(); return; }
+    renderTowerModel(tower.model);
+    renderTowerBadge();
+  }
+
+  const TOWER_URL = /https?:\/\/[^\s)\]>"']+/g;
+  // Plain text with http(s) URLs turned into links; everything else stays a text node.
+  function towerRich(parent, text, style) {
+    let pos = 0;
+    String(text || '').replace(TOWER_URL, (u, i) => {
+      let end = u.length;
+      while (end > 0 && '.,;:)'.includes(u[end - 1])) end--;
+      if (i > pos) parent.append(document.createTextNode(text.slice(pos, i)));
+      const a = document.createElement('a');
+      a.href = u.slice(0, end); a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u.slice(0, end);
+      a.className = 'tlink';
+      parent.append(a);
+      pos = i + end;
+      return u;
+    });
+    if (pos < text.length) parent.append(document.createTextNode(text.slice(pos)));
+    return parent;
+  }
+
+  function towerStyle(node, name) {
+    const p = tower.model && tower.model.palette && tower.model.palette[name];
+    if (!p) return node;
+    if (p.fg) node.style.color = p.fg;
+    if (p.bold) node.style.fontWeight = '600';
+    if (p.dim) node.style.opacity = '0.75';
+    return node;
+  }
+
+  function towerGlyph(it) {
+    const g = el('span', 'tglyph', (it.glyph || '○') + ' ');
+    return towerStyle(g, it.style || 'dim');
+  }
+
+  const TOWER_LEAD = /^(?:\(\d{1,2}\)|\([a-z]\)|\d{1,2}[.)]|NEED \d+|Q\d{1,3})\s/;
+  // split_detail blocks -> DOM: p / item / bullet lines, gaps, and one Copy row per `! ` command.
+  function towerBlocks(blocks) {
+    const box = el('div', 'tblocks');
+    (blocks || []).forEach((b) => {
+      if (b.k === 'gap') { box.append(el('div', 'tgap')); return; }
+      if (b.k === 'cmd') { box.append(towerCmdRow(b.t)); return; }
+      const line = el('div', 'tpara tk-' + b.k);
+      let t = b.t;
+      if (b.k === 'bullet') line.append(towerStyle(el('span', 'tmark', '• '), 'accent'));
+      else if (b.k === 'item') {
+        const m = TOWER_LEAD.exec(t + ' ');
+        if (m) { line.append(towerStyle(el('span', 'tmark', m[0]), 'accent')); t = t.slice(m[0].length); }
+      }
+      towerRich(line, t);
+      box.append(line);
+    });
+    return box;
+  }
+
+  async function towerAct(body, btn, okTitle) {
+    if (tower.busy) return;
+    tower.busy = true;
+    const label = btn && btn.textContent;
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    try {
+      const r = await api('POST', '/api/rc/tower/act', body);
+      toast(okTitle || 'Done', (r && r.msg) || '');
+      tower.localFold.clear();
+      await loadTower();
+    } catch (e) {
+      toast('Refused', e.message || String(e));
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    } finally { tower.busy = false; }
+  }
+
+  function towerBtn(label, cls, fn) {
+    const b = el('button', 'tbtn' + (cls ? ' ' + cls : ''), label);
+    b.addEventListener('click', (e) => { e.stopPropagation(); fn(b); });
+    return b;
+  }
+
+  function towerFoldedNow(it) { return tower.localFold.has(it.key) ? tower.localFold.get(it.key) : !!it.folded; }
+
+  function towerItemActions(it, card) {
+    const row = el('div', 'tactions');
+    if (it.kind === 'suggest') {
+      if (tower.act) {
+        row.append(towerBtn('Queue with tower', 'tprimary', (b) => {
+          if (!confirm('Queue "' + (it.title || it.id) + '" with tower?')) return;
+          towerAct({ op: 'pick', id: it.id }, b, 'Queued with tower');
+        }));
+        row.append(towerBtn('Dismiss', '', (b) => {
+          if (!confirm('Dismiss suggestion ' + it.id + '?')) return;
+          towerAct({ op: 'dismiss', id: it.id }, b, 'Dismissed');
+        }));
+      }
+      row.append(towerBtn('Copy prompt', '', (b) => towerCopy(it.prompt || it.id, b)));
+    } else {
+      if ((it.bangs || []).length) row.append(towerBtn('Copy ! lines', '', (b) => towerCopy(it.bangs.join('\n'), b)));
+      if (it.copy_text) row.append(towerBtn('Copy text', '', (b) => towerCopy(it.copy_text, b)));
+      if (tower.act && it.confirm_ok) {
+        const verb = it.kind === 'request' ? 'Confirm done' : 'Close';
+        row.append(towerBtn(verb, 'tprimary', (b) => {
+          if (!confirm(verb + ' ' + it.kind + ' ' + it.id + '?')) return;
+          towerAct({ op: 'close', kind: it.kind, id: it.id }, b, 'Closed ' + it.id);
+        }));
+      }
+      if (tower.act && it.fold_ok) {
+        row.append(towerBtn('Fold', '', (b) => towerAct({ op: 'fold', id: it.id }, b, 'Folded ' + it.id)));
+      }
+    }
+    return row;
+  }
+
+  function towerItemCard(it) {
+    const folded = it.fold_ok && towerFoldedNow(it);
+    const urgent = it.status === 'urgent';
+    const card = towerCard(urgent ? 'urgent' : (it.status === 'done' ? 'done' : ''), '');
+    card.innerHTML = '';
+    const head = el('div', 'thead');
+    head.append(towerGlyph(it));
+    if (folded) {
+      head.classList.add('tfoldhead');
+      const since = it.folded && it.folded.since ? ' (folded ' + String(it.folded.since).slice(11, 16) + 'Z)' : '';
+      head.append(towerStyle(el('span', 'tid', '▸ ' + it.id), 'dim'), el('span', 'tmeta', ' — ' + (it.summary || it.text || it.head) + since));
+      head.addEventListener('click', () => {
+        if (tower.act && it.folded) towerAct({ op: 'unfold', id: it.id }, null, 'Unfolded ' + it.id);
+        else { tower.localFold.set(it.key, false); renderTower(); }
+      });
+      card.append(head);
+      return card;
+    }
+    card.classList.add('topen');
+    if (it.kind === 'ask') {
+      if (it.tag) head.append(towerStyle(el('b', '', it.tag), 'st_urgent'));
+      head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta || '')));
+      card.append(head, towerBlocks(it.blocks));
+      if (tower.act) {
+        const rr = el('div', 'treply');
+        const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
+        const rb = el('button', '', 'Reply');
+        rb.addEventListener('click', () => towerReply(it.id, ta, rb));
+        rr.append(ta, rb); card.append(rr);
+      }
+    } else if (it.kind === 'request') {
+      head.append(towerStyle(el('b', '', it.lead + ' '), it.style), el('span', 'tid', '[' + it.id + ']'));
+      card.append(head);
+      const expanded = tower.open.has(it.key);
+      if (expanded) {
+        card.append(towerBlocks(it.blocks));
+        if ((it.tail_blocks || []).length) { const t = towerBlocks(it.tail_blocks); t.classList.add('ttail'); card.append(t); }
+      } else {
+        card.append(el('div', 'tbody', it.text || ''));
+        if (it.tail) card.append(towerStyle(el('div', 'tline ttail', '↳ ' + it.tail), 'dim'));
+      }
+      head.addEventListener('click', () => { if (expanded) tower.open.delete(it.key); else tower.open.add(it.key); renderTower(); });
+    } else if (it.kind === 'suggest') {
+      head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta ? '[' + it.meta + ']' : '')));
+      card.append(head, el('div', 'tbody ttitle', it.title || ''));
+      [['why', it.why_blocks], ['action', it.action_blocks]].forEach(([label, bl]) => {
+        if (!bl || !bl.length) return;
+        const w = el('div', 'twhy'); w.append(towerStyle(el('span', 'tlabel', label), 'accent'), towerBlocks(bl)); card.append(w);
+      });
+    } else {
+      const st = it.status === 'done' ? 'dim' : (urgent ? 'st_urgent' : '');
+      head.append(towerStyle(el('span', 'thtext', it.head || it.id), st));
+      card.append(head);
+      (it.body || []).forEach((bl) => { const b = towerBlocks(bl); b.classList.add('tsub'); card.append(b); });
+    }
+    const acts = towerItemActions(it, card);
+    if (acts.children.length) card.append(acts);
+    return card;
+  }
+
+  function renderTowerModel(m) {
+    const list = $('#towerList');
+    list.innerHTML = '';
+    const gen = m.generated_at || '';
+    const ageMin = Math.round((Date.now() - Date.parse(gen)) / 60000);
+    const asOf = $('#towerAsOf');
+    if (asOf) { asOf.textContent = 'rendered ' + towerAgo(gen) + ' ago'; asOf.classList.toggle('stale', ageMin > 30); }
+    list.append(el('div', 'thint', m.header + (ageMin > 30 ? ' · STALE render' : '')));
+    if (!tower.act) list.append(el('div', 'thint', 'Read-only here' + (tower.actReason ? ': ' + tower.actReason : '') + '. Queue / close / fold need an act-capable device token.'));
+    m.sections.forEach((sec, n) => {
+      const key = 'section:' + sec.id;
+      const folded = tower.localFold.has(key) ? tower.localFold.get(key) : !!sec.folded;
+      const hdr = el('div', 'tsechead');
+      hdr.append(el('span', 'tnum', n < 9 ? (n + 1) + '· ' : ''), el('span', 'tarrow', folded ? '▸ ' : '▾ '), towerStyle(el('span', 'tsectitle', sec.title), 'sec'), el('span', 'tcount', ' (' + sec.count + ')'));
+      if (folded && sec.urgent) hdr.append(towerStyle(el('span', 'tcount', '  !' + sec.urgent + ' urgent'), 'urgent'));
+      hdr.addEventListener('click', () => {
+        if (tower.act) towerAct({ op: folded ? 'unfold' : 'fold', id: key }, null, folded ? 'Section opened' : 'Section folded');
+        else { tower.localFold.set(key, !folded); renderTower(); }
+      });
+      list.append(hdr);
+      if (folded) return;
+      if (!sec.items.length) { list.append(el('div', 'thint', '(nothing)')); return; }
+      let grp = null;
+      sec.items.forEach((it) => {
+        if (it.group && it.group !== grp) { grp = it.group; list.append(towerStyle(el('div', 'tgroup', '── ' + grp + ' ──'), 'dim')); }
+        list.append(towerItemCard(it));
+      });
+    });
+    const lg = document.createElement('details');
+    lg.className = 'tlegend';
+    const sm = document.createElement('summary'); sm.textContent = 'Legend'; lg.append(sm);
+    (m.legend || []).forEach((l) => {
+      const row = el('div', 'tline');
+      row.append(towerStyle(el('span', '', l.glyph + ' '), l.style), document.createTextNode(l.label));
+      lg.append(row);
+    });
+    list.append(lg);
+  }
+
+  function renderTowerLegacy() {
     const o = tower.data;
     const list = $('#towerList');
     if (!o) return;

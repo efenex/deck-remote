@@ -154,6 +154,8 @@ path.
 | `--tower-overview` | `DECK_REMOTE_TOWER_OVERVIEW` | empty (no tower tab); path to tower's `state/overview/overview.json` |
 | `--tower-operator` | `DECK_REMOTE_TOWER_OPERATOR` | empty (tower actions refused); the Tailscale login (`Tailscale-User-Login` as stamped by `tailscale serve`) allowed to reply to asks, together with a device token minted with `"caps":["act"]`. Only honoured from a loopback peer (the `tailscale serve` hop, plain or `https+insecure`); refused from any other peer, e.g. the pf LAN fallback, where the header is client-controlled |
 | `--tower-session` | `DECK_REMOTE_TOWER_SESSION` | `tower`; the agent-deck session that receives reply-to-ask messages |
+| `--tower-root` | `DECK_REMOTE_TOWER_ROOT` | derived from `--tower-overview` (`<root>/state/overview/overview.json`); the tower checkout whose `scripts/journal.py` and `scripts/tower_tui.py` the Tower tab uses (read model + fold/close/queue/dismiss writes, all via `journal.py add`) |
+| `--tower-model-script` | `DECK_REMOTE_TOWER_MODEL_SCRIPT` | `scripts/tower_model.py` next to the binary |
 
 ## Operational note
 deck-remote is CLI-first precisely so it needs **no second long-running agent-deck

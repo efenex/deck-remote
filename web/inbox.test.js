@@ -8,16 +8,17 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-function makeEnv(notifs, seenAt) {
+function makeEnv(notifs, seenAt, routes) {
   const store = new Map([['deck_remote_token', 't']]);
   if (seenAt != null) store.set('dr-inbox-seen-at', String(seenAt));
   const listeners = new Map(); // selector -> {event -> fn}
   const els = new Map();
   const mkEl = (sel) => {
     const e = {
-      sel, hidden: false, textContent: '', innerHTML: '', className: '', dataset: {}, children: [], style: {},
+      sel, hidden: false, textContent: '', className: '', dataset: {}, children: [], style: {}, _ls: {}, _html: '',
+      get innerHTML() { return this._html; }, set innerHTML(v) { this._html = v; this.children = []; },
       classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
-      addEventListener(ev, fn) { if (!listeners.has(sel)) listeners.set(sel, {}); listeners.get(sel)[ev] = fn; },
+      addEventListener(ev, fn) { this._ls[ev] = fn; if (!listeners.has(sel)) listeners.set(sel, {}); listeners.get(sel)[ev] = fn; },
       removeEventListener() {}, append(...c) { this.children.push(...c); }, appendChild(c) { this.children.push(c); return c; },
       querySelector: () => mkEl('q'), querySelectorAll: () => [], remove() {}, focus() {}, scrollIntoView() {},
       closest: () => null, setAttribute() {}, getAttribute: () => null,
@@ -26,13 +27,14 @@ function makeEnv(notifs, seenAt) {
   };
   const get = (sel) => { if (!els.has(sel)) els.set(sel, mkEl(sel)); return els.get(sel); };
   const document = {
-    querySelector: get, querySelectorAll: () => [], createElement: () => mkEl('new'), addEventListener() {},
+    querySelector: get, querySelectorAll: () => [], createElement: () => mkEl('new'), createTextNode: (t) => ({ textContent: String(t), children: [] }), addEventListener() {},
     body: mkEl('body'), documentElement: mkEl('html'), visibilityState: 'visible', getElementById: get,
   };
   const win = { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
-  const fetch = async (url) => {
+  const fetch = async (url, opts) => {
     const u = String(url);
-    const body = u.includes('/api/rc/notifications') ? { notifications: notifs } : {};
+    let body = u.includes('/api/rc/notifications') ? { notifications: notifs } : {};
+    if (routes) { const r = routes(u, opts || {}); if (r !== undefined) body = r; }
     return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body, body: null };
   };
   const ctx = {
@@ -46,7 +48,7 @@ function makeEnv(notifs, seenAt) {
   };
   ctx.window = Object.assign(win, ctx);
   ctx.self = ctx.globalThis = ctx.window;
-  return { ctx, store, listeners, els };
+  return { ctx, store, listeners, els, mkEl };
 }
 
 test('Mark all read moves the cursor to the newest notification and clears the badge', async () => {
@@ -76,4 +78,49 @@ test('Mark all read also covers entries whose `at` is later than the newest-arri
   env.listeners.get('#inboxMarkRead').click();
   assert.strictEqual(env.store.get('dr-inbox-seen-at'), '5000');
   assert.strictEqual(badge.hidden, true, 'no entry may stay unread after Mark all read');
+});
+
+function walk(n, fn) { fn(n); (n.children || []).forEach((c) => c && typeof c === 'object' && walk(c, fn)); }
+
+test('Tower tab: Queue with tower POSTs op=pick for the suggestion after a confirm; declining sends nothing', async () => {
+  const model = {
+    header: 'TOWER 17:35Z', generated_at: new Date().toISOString(), palette: { sec: { fg: '#87d7ff', bold: true } }, legend: [],
+    sections: [
+      { id: 'waiting', title: 'WAITING ON YOU', count: '1', urgent: 0, folded: null, items: [
+        { kind: 'ask', id: 'hh-flux-pr', key: 'ask:hh-flux-pr', status: 'waiting', glyph: '◐', style: 'st_wait', fold_ok: true, confirm_ok: true, folded: { since: '2026-10-19T16:45:47Z' }, summary: 'merge the flux fix', blocks: [], bangs: [], head: 'x' }] },
+      { id: 'suggested', title: 'SUGGESTED', count: '1', urgent: 0, folded: null, items: [
+        { kind: 'suggest', id: 'sg1', key: 'suggest:sg1', status: 'suggest', glyph: '✦', style: 'st_suggest', title: 'Do the thing', prompt: 'p', why_blocks: [{ k: 'p', t: 'because' }], action_blocks: [], bangs: [], head: 'sg1' }] },
+    ],
+  };
+  const posts = [];
+  const env = makeEnv([], null, (u, opts) => {
+    if (u.startsWith('/api/rc/tower/whoami')) return { actions_enabled: true, act: true };
+    if (u.startsWith('/api/rc/tower/model')) return { enabled: true, actions: true, model };
+    if (u.startsWith('/api/rc/tower/act')) { posts.push(JSON.parse(opts.body)); return { ok: true, msg: 'queued → tower' }; }
+    if (u.startsWith('/api/rc/tower')) return { enabled: true, mtime: 'x', overview: { generated_at: model.generated_at, counts: { waiting: 1 } } };
+    return undefined;
+  });
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 100));
+  const list = env.els.get('#towerList');
+  const btns = []; const heads = [];
+  walk(list, (n) => { if (/\btbtn\b/.test(n.className)) btns.push(n); if (/tsechead/.test(n.className)) heads.push(n); });
+  assert.strictEqual(heads.length, 2, 'both sections rendered');
+  const queue = btns.find((b) => b.textContent === 'Queue with tower');
+  assert.ok(queue, 'a Queue button exists for the suggestion');
+  assert.ok(btns.some((b) => b.textContent === 'Dismiss'));
+  let asked = '';
+  env.ctx.confirm = (m) => { asked = m; return true; };
+  queue._ls.click({ stopPropagation() {} });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.match(asked, /Do the thing/);
+  assert.deepStrictEqual(posts, [{ op: 'pick', id: 'sg1' }]);
+  // declining the confirm sends nothing
+  posts.length = 0;
+  env.ctx.confirm = () => false;
+  const dismiss = (() => { const b = []; walk(list, (n) => { if (n.textContent === 'Dismiss') b.push(n); }); return b[0]; })();
+  dismiss._ls.click({ stopPropagation() {} });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(posts, []);
 });
