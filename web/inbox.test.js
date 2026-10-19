@@ -133,7 +133,7 @@ test('Version banner: shown on server/web mismatch, dismissal sticks until the s
   await new Promise((r) => setTimeout(r, 80));
   const box = env.els.get('#versionBanner');
   assert.strictEqual(box.hidden, false);
-  assert.match(env.els.get('#versionText').textContent, /server aaa1111 \u2260 web bbb2222: rebuild \+ restart needed \(server built 1\.0 h ago\)/);
+  assert.match(env.els.get('#versionText').textContent, /server aaa1111 \u2260 web bbb2222: rebuild \+ restart needed \(server built 60 min ago\)/);
   env.listeners.get('#versionClose').click();
   assert.strictEqual(box.hidden, true);
   assert.ok(env.store.get('dr-version-dismissed'), 'dismissal is remembered');
