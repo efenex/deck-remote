@@ -68,7 +68,7 @@ an LLM reads.
 | **Session hijack** (token theft from the PWA, XSS) | phone | tokens stay in the PWA's storage; the run endpoint accepts the bearer in the `Authorization` header only (`bearerHeaderOnly`), never `?token=`; same-origin PWA, no CORS. A stolen bearer alone can run only read-only lines: the passkey assertion is bound to the run's challenge and to deck-remote's origin, so it cannot be minted elsewhere or replayed. XSS inside the PWA could drive a `navigator.credentials.get` call, but Face ID still has to happen on the device and the prompt names the origin; the residual is "an XSS'd PWA runs a *signed, tower-proposed* mutating line the operator approves with Face ID", which is the same line they were about to run. |
 | **CSRF** | phone | POST with a JSON body and a bearer header; no cookie auth, so a cross-site form cannot carry the credential. Tailscale identity is stamped by `tailscale serve`, not by the client. |
 | **Replay / double tap** | both | the request names `(ask, item, sha256(cmd))`; the runner journals `run … --to running` before exec and refuses a second request while that record is `running` or already `done rc=0`. deck-remote's 10 s `towerDup` window stays as the first line. |
-| **Injected ask** (a compromised worker appends a plausible `kind=ask` with `--by tower`; prompt injection becomes a command) | both | the journal is a plain file, so `by=tower` is a claim, not proof. From phase 0 every runnable item carries an HMAC that only `journal.py` running with the signing key can produce (§3.5); the runner verifies against the current item text and refuses otherwise. Plus: the operator sees the exact text and confirms per line, the classifier drops destructive and unknown first words to copy-only, and `learnings_check.py` findings are on the confirm screen. **Limit, stated plainly:** workers run as the same uid as tower on the same laptop, so a worker that deliberately reads the key path can sign. The key lives outside every repo and every worker's cwd, its path appears in no brief, and reading it is a visible permission-classifier event; the signature defends against the realistic case (a worker or a prompt-injected tool call appending a journal line) not against a worker that has already decided to hunt for keys. Hardening beyond that is §8. A worker that can write the journal can also call the runner directly, so the runner is not the trust anchor for "the operator did this"; the front ends' logs are. |
+| **Injected ask** (a compromised worker appends a plausible `kind=ask` with `--by tower`; prompt injection becomes a command) | both | the journal is a plain file, so `by=tower` is a claim, not proof. From phase 0 every runnable item carries an HMAC that only `journal.py` running with the signing key can produce (§3.5); the runner verifies against the current item text and refuses otherwise. Plus: the operator sees the exact text and confirms per line, the classifier drops destructive and unknown first words to copy-only, and `learnings_check.py` findings are on the confirm screen. **Limit, stated plainly:** workers run as the same uid as tower on the same laptop, and `journal.py` is tower's documented API, so a worker that runs `journal.py add --kind ask --sign` gets signed items without ever touching the key. The signature therefore separates items that went through `journal.py --sign` on this laptop from everything else: raw `>>` appends, rsync or hand edits, writes from another host, a prompt-injected tool call that writes the file. It does **not** separate tower from a same-uid worker; a worker calling tower's `journal.py` is already a hard-rule-3 breach and leaves a transcript. Signing is behind an explicit `--sign` flag that only the `/ask` skill passes, so a worker signing is a deliberate, visible act and not a side effect of using the API. Hardening beyond that is §8. A worker that can write the journal can also call the runner directly, so the runner is not the trust anchor for "the operator did this"; the front ends' logs are. |
 | **Secrets in output** | both | output never goes to the phone or the journal unredacted; secret-reading lines keep no stdout at all (§4.4), only redacted stderr; the on-disk log is `0600` under `tower/state/runs/`, local only, 30 days; "unfold" on the phone returns the redacted full log, never a raw one, and each unfold is in the action log. |
 | **Output as prompt injection into tower** | both | tower reads the journal; a command's output can contain text aimed at the LLM. Only `rc` and a 20-line redacted tail enter the journal, under a `data.tail` key that `/ask` treats as evidence, not instructions. |
 | **Runner environment leaks** | both | the runner does not inherit deck-remote's environment (no `DECK_REMOTE_*`, no shared token), only a minimal env (§4.2). |
@@ -142,7 +142,7 @@ the start; there is no laptop-armed grant phase).
 
 **Enrolment** (once per phone). The phone must already hold an act-cap device token and come
 through `tailscale serve` as the operator. Enrolment additionally needs a **one-time code shown
-on the laptop** (TUI `P` key, or `deck-remote passkey enrol-code`, 6 digits, 5 min), so a stolen
+on the laptop** (TUI `P` key, which asks deck-remote over loopback; 6 digits, 5 min), so a stolen
 bearer cannot enrol its own passkey. deck-remote then runs the WebAuthn registration ceremony
 (`navigator.credentials.create`, `authenticatorAttachment: platform`, `residentKey: preferred`,
 `userVerification: required`) and stores `{credential id, public key, sign count, device-token
@@ -187,20 +187,23 @@ no entry. Binding the index and the ask id means an item cannot be transplanted 
 ask or reordered; binding the hash means one changed byte breaks it; expiry bounds how long an
 old ask stays executable.
 
-**Who signs.** `journal.py add --kind ask … --to open` signs automatically when the key is
-readable: it walks `data.items`, computes the MACs and writes `data.sig` before appending the
-record. Any later `add --kind ask` for the same id that changes `items` re-signs; one that only
-changes other data (answer, detail) leaves `sig` alone. The `/ask` skill changes nothing except
-emitting self-contained lines (§4.2). If the key is missing, `journal.py` appends without `sig`
-and prints a warning; the ask is then copy-only on both front ends, which is visible in the TUI
-badge and is the safe failure.
+**Who signs.** `journal.py add --kind ask … --sign` walks `data.items`, computes the MACs and
+writes `data.sig` before appending the record. The flag is explicit: only the `/ask` skill
+passes it, and an `add --kind ask` without it appends unsigned (a warning on stderr), which
+makes the ask copy-only on both front ends, visibly, and is the safe failure. Any later
+`add --kind ask --sign` for the same id that changes `items` re-signs; one that only changes
+other data (answer, detail) leaves `sig` alone. The `/ask` skill otherwise changes nothing
+except emitting self-contained lines (§4.2). Same-uid limit: §2.
 
 **Verification in the runner.** `run_bang.py run --ask A --item i --sha S` re-reads the
-journal, takes the latest `ask` record for A, requires `to=open`, takes `items[i]`, strips `! `,
+journal, derives A the way `derive()` does (`a.update(data)` per record, so `items` and `sig`
+are whichever record last set each), requires status `open`, takes `items[i]`, strips `! `,
 recomputes the sha and requires it to equal S, then recomputes the MAC with the key named by
 `kid` and compares it to `sig.items[i]` in constant time, and requires `now < exp`. Any failure
 is a refusal with a reason (`unsigned`, `expired`, `tampered`, `wrong kid`) that is journaled as
-`run … --to refused` and shown on the front end. Only then is the class computed and the line
+`run … --to refused` and shown on the front end. A later record that changed `items` without
+`--sign` leaves the old `sig` in the merged ask, so its hash no longer matches: `tampered`,
+refused, which is the right answer for an edit that bypassed the skill. Only then is the class computed and the line
 executed. `run_bang.py verify --ask A` is the dry-run both front ends call to draw the badge.
 
 ## 4. Execution
@@ -307,7 +310,8 @@ journal.py add --kind run --id <same> --to done --by operator \
   --data '{"rc":0,"secs":12.4,"log":"state/runs/<id>.log","tail":[…20 redacted lines…]}'
 ```
 
-`derive()` gets a `run` state machine (`running -> done`). The overview and `/ask` read it:
+`derive()` gets a `run` state machine (`running -> done | refused`; `refused` is terminal and
+never satisfies auto-close). The overview and `/ask` read it:
 when every runnable item of an ask has `done rc=0` and no copy-only items remain, tower closes
 the ask (`--to answered`, `answer: "ran from phone/tui, rc=0 ×N"`) and fans out. A non-zero rc
 leaves the ask open, marks the item ✗, and tower's next tick sees the tail. Who performs the
@@ -334,9 +338,11 @@ under the ask they belonged to; `/retro` can count refusals and non-zero exits.
    means phase 1 never runs an item that predates signatures.
 2. **Phase 1, read-only, plus passkey enrolment.** `run_bang.py`, `kind=run`, `run:ro` cap, TUI
    `!`. Phone runs signed read-only lines on a tap; TUI runs read-only, mutating (y/n) and
-   interactive (TTY hand-over). The passkey enrolment and assertion path (§3.4) is built and
-   exercised in this phase, gated to a no-op "dry assert" on read-only lines, so phase 2 is a cap
-   flip and not a new auth surface.
+   interactive (TTY hand-over). The passkey enrolment and assertion path (§3.4) is built in
+   this phase. Read-only lines still need only the tap; a Settings toggle ("ask Face ID for
+   read-only runs too", off by default) lets the operator exercise enrolment and assertion on
+   real runs without turning the pilot into a Face ID tax, so phase 2 is a cap flip and not a new
+   auth surface.
 3. **Phase 2, mutating from the phone** behind `run:mut` and a Face ID assertion per line.
    Still no destructive.
 4. **Phase 3, secret-reading from the phone**, rc and redacted stderr only, behind `run:secret`
@@ -425,7 +431,7 @@ after the operator sees it.
 | slice | builds | tests |
 |---|---|---|
 | **D1 caps** | `tokens.go`: `run:ro`, `run:mut`, `run:secret` in `knownCaps`; mint UI shows them; `whoami` reports them. | extend `tokens_test.go`: mint/refuse unknown cap; `hasCap` per class; shared token never has `run:*`. |
-| **D2 passkeys** | `passkeys.go` on `go-webauthn/webauthn`: enrol-code (6 digits, 5 min, printed by `deck-remote passkey enrol-code` and the TUI), `POST /api/rc/passkey/register/{begin,finish}`, `POST /api/rc/tower/run/challenge`, assertion verify (origin, rpIdHash, UV, signature, sign count), store `<state>/deck-remote-passkeys.json` `0600`, revoke with the device token. | `passkeys_test.go` with a software authenticator (the library's test helpers): enrol needs act cap + identity + a valid code; wrong origin, UV=false, stale sign count, spent or expired challenge, challenge for a different `(ask,item,sha)` → each refused and action-logged; revoking the token removes its credentials. |
+| **D2 passkeys** | `passkeys.go` on `go-webauthn/webauthn`: enrol-code (6 digits, 5 min, minted by `POST /api/rc/passkey/enrol-code` behind `authAct` on loopback only, shown by the TUI), `POST /api/rc/passkey/register/{begin,finish}`, `POST /api/rc/tower/run/challenge`, assertion verify (origin, rpIdHash, UV, signature, sign count), store `<state>/deck-remote-passkeys.json` `0600`, revoke with the device token. | `passkeys_test.go` with a software authenticator (the library's test helpers): enrol needs act cap + identity + a valid code; wrong origin, UV=false, stale sign count, spent or expired challenge, challenge for a different `(ask,item,sha)` → each refused and action-logged; revoking the token removes its credentials. |
 | **D3 run endpoints** | `tower_run.go`: `POST /api/rc/tower/run` `{ask,item,sha256[,assertion]}` behind `authAct` + class cap (+ assertion for mut/secret) → exec `run_bang.py run … --via phone --device --login`; `tower-run-output` SSE events tailing the log through the redactor; `GET /api/rc/tower/run/<id>/log` (§4.4); action-log lines for run, refuse and run-log. | `tower_run_test.go` with an injected `towerExec` (same seam as `tower_actions.go`): cap matrix × class matrix; stale-tab hash mismatch → 409; SSE carries redacted lines and ends with the `done` event; log endpoint caps at 1 MB and is refused for secret runs' stdout; every attempt is one action-log line. |
 | **D4 PWA** | Tower tab: class and signature badges on each `! ` line; per-line confirm sheet (verbatim text, class, cwd, timeout, learnings matches); Run button → challenge → `navigator.credentials.get` → run; stream pane; unfold; passkey enrolment screen in Settings; copy stays for copy-only lines. | manual checklist on a real iPhone (Face ID prompt names the origin; LAN fallback origin shows "mutating needs the tailnet URL"); a Playwright run against the software-authenticator server for the sheet, badges and the unfold cap. |
 
@@ -435,7 +441,7 @@ after the operator sees it.
 |---|---|---|
 | **U1 badges** | class and signature badges next to each `! ` line in the detail pane; `learnings` from `data.learnings`. This is the phase-0 deliverable together with T1/T2. | `test_tower_tui.py`: model rendering of the badges from a fixture ask (the TUI already exposes its model to `tower_model.py`, so deck-remote's tab gets the same badges for free). |
 | **U2 run** | `!` on a waiting item: pick a line or all runnable lines in order; y/n confirm, retyped last word for destructive; `Actions.run` → `run_bang.py run … --via tui`; log tail in the detail pane; `u` unfolds (`run_bang.py log`, `--raw` offered for ro/mut only); interactive class → `endwin()`, foreground run, resume, rc-only journal. | `test_tower_tui_actions.py` with a stubbed `subprocess.run`: argv shape per class; destructive requires the retyped word; interactive path journals rc only; non-curses pieces unit-tested, the curses hand-over checked manually. |
-| **U3 enrol code** | `P` shows the passkey enrol code by calling `deck-remote passkey enrol-code` over loopback (or the CLI); nothing else. | one test for the argv and the 5-min expiry message. |
+| **U3 enrol code** | `P` shows the passkey enrol code: `POST http://127.0.0.1:<port>/api/rc/passkey/enrol-code` over loopback with the operator's act-cap token (read from the TUI's config, never from argv), the same loopback-plus-act gate `tower.go` already trusts; no CLI path. | one test for the request shape and the 5-min expiry message, with a stubbed HTTP client. |
 
 ### Order
 
