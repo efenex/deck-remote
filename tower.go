@@ -73,17 +73,20 @@ func (t *towerStore) load() (map[string]any, []byte, time.Time, error) {
 	return doc, b, st.ModTime(), nil
 }
 
-// ask returns the waiting entry with this id (the overview's `waiting` list), if any.
+// ask returns the open ask with this id, if any. Folded asks (the operator hid
+// them in the laptop overview) are still open and live in `waiting_folded`.
 func (t *towerStore) ask(id string) (map[string]any, bool) {
 	doc, _, _, err := t.load()
 	if err != nil || id == "" {
 		return nil, false
 	}
-	items, _ := doc["waiting"].([]any)
-	for _, it := range items {
-		m, _ := it.(map[string]any)
-		if m != nil && m["id"] == id {
-			return m, true
+	for _, key := range []string{"waiting", "waiting_folded"} {
+		items, _ := doc[key].([]any)
+		for _, it := range items {
+			m, _ := it.(map[string]any)
+			if m != nil && m["id"] == id {
+				return m, true
+			}
 		}
 	}
 	return nil, false

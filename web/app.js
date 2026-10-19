@@ -334,13 +334,15 @@
     const asOf = $('#towerAsOf');
     if (asOf) { asOf.textContent = 'rendered ' + towerAgo(gen) + ' ago'; asOf.classList.toggle('stale', ageMin > 30); }
     const c = o.counts || {};
-    const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE render' : ''));
+    const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + (c.waiting_folded ? ' [' + c.waiting_folded + ' folded]' : '') + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE render' : ''));
     list.append(head);
 
     list.append(el('div', 'tsec', '1 · Waiting on you'));
     const waiting = o.waiting || [];
-    if (!waiting.length && !(o.notes || []).length) list.append(el('div', 'thint', 'nothing'));
-    waiting.forEach((w) => {
+    const seen = new Set(waiting.map((w) => w.id));
+    const folded = (o.waiting_folded || []).filter((w) => !seen.has(w.id));
+    const nFolded = c.waiting_folded != null ? c.waiting_folded : folded.length;
+    const askCard = (w) => {
       const card = towerCard(w.urgent ? 'urgent' : '',
         '<span class="tid">' + esc(w.id) + '</span><span class="tmeta">' + (w.urgent ? 'URGENT · ' : '') + esc(w.goal || '-') + ' · open ' + esc(towerAgo(w.opened)) + (w.blocks && w.blocks.length ? ' · blocks ' + esc(w.blocks.join(', ')) : '') + '</span>');
       const body = el('div', 'tbody', w.detail || w.text || '');
@@ -356,9 +358,29 @@
         rb.addEventListener('click', () => towerReply(w.id, ta, rb));
         rr.append(ta, rb); card.append(rr);
       }
-      list.append(card);
-    });
-    if (!tower.act && waiting.length) list.append(el('div', 'thint', 'Reply from here needs an act-capable device token on this phone' + (tower.actReason ? ' (' + tower.actReason + ')' : '') + '. Copy works for everyone.'));
+      return card;
+    };
+    // Never say "nothing" while the overview counts open asks: folded ones live in waiting_folded.
+    if (!waiting.length && !folded.length && !(c.waiting > 0) && !(o.notes || []).length) list.append(el('div', 'thint', 'nothing'));
+    waiting.forEach((w) => list.append(askCard(w)));
+    if (folded.length || (!waiting.length && c.waiting > 0)) {
+      const total = folded.length ? folded.length : c.waiting;
+      const det = document.createElement('details');
+      det.className = 'tfolded';
+      const sum = document.createElement('summary');
+      sum.textContent = total + ' waiting (' + (nFolded || total) + ' folded on laptop)';
+      det.append(sum);
+      folded.forEach((w) => {
+        const row = document.createElement('details');
+        row.className = 'tfrow';
+        const rs = document.createElement('summary');
+        rs.innerHTML = '<span class="tid">' + esc(w.id) + '</span> <span class="tmeta">' + (w.urgent ? 'URGENT · ' : '') + esc(oneLine(w.text || '', 90)) + '</span>';
+        row.append(rs, askCard(w));
+        det.append(row);
+      });
+      list.append(det);
+    }
+    if (!tower.act && (waiting.length || folded.length)) list.append(el('div', 'thint', 'Reply from here needs an act-capable device token on this phone' + (tower.actReason ? ' (' + tower.actReason + ')' : '') + '. Copy works for everyone.'));
     (o.notes || []).forEach((n) => list.append(el('div', 'tline', n)));
 
     list.append(el('div', 'tsec', '2 · What you asked for'));

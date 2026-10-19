@@ -258,3 +258,26 @@ func TestTowerReplyRetryAfterQueueFull(t *testing.T) {
 		t.Fatalf("double tap after a queued reply must be refused, got %d", w.Code)
 	}
 }
+
+// Folded asks are still open: counts.waiting includes them and they live in
+// waiting_folded, so ask() lookups (reply by id) must find them.
+const towerFoldedOnlyFixture = `{"generated_at":"2026-10-19T17:00:00Z","counts":{"waiting":2,"waiting_folded":2,"urgent":0,"in_flight":0,"finished_12h":0,"requests_open":0},
+"waiting":[],
+"waiting_folded":[{"id":"hh-flux-pr","urgent":false,"text":"merge the flux fix","items":[],"folded":{"since":"2026-10-19T16:45:47Z"}},{"id":"other-ask","text":"x","folded":{}}],
+"requests":[],"in_flight":[],"finished":[],"deadlines":[],"board":{"sessions":[]}}`
+
+func TestTowerAskFindsFoldedAsks(t *testing.T) {
+	s, _ := towerTestServer(t, "", towerFoldedOnlyFixture)
+	a, ok := s.tower.ask("hh-flux-pr")
+	if !ok || a["text"] != "merge the flux fix" {
+		t.Fatalf("folded ask not found: %v %v", a, ok)
+	}
+	if _, ok := s.tower.ask("nope"); ok {
+		t.Fatal("unknown ask must not resolve")
+	}
+	w := httptest.NewRecorder()
+	s.handleTower(w, httptest.NewRequest("GET", "/api/rc/tower", nil))
+	if !strings.Contains(w.Body.String(), `"waiting_folded":[{"id":"hh-flux-pr"`) {
+		t.Fatalf("overview must pass waiting_folded through: %s", w.Body.String())
+	}
+}
