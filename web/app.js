@@ -452,7 +452,10 @@
     b.textContent = n > 99 ? '99+' : String(n);
   }
   function markInboxSeen() {
-    const newest = inbox.items.length ? inbox.items[0].at : 0;
+    // Max over all entries, not items[0]: items are in arrival order, and a server
+    // clock step backwards leaves older entries with a later `at` that items[0].at
+    // would never cover (their unread dots would then survive "Mark all read").
+    const newest = inbox.items.reduce((m, x) => Math.max(m, x.at || 0), 0);
     if (newest > inboxSeenAt()) localStorage.setItem(INBOX_SEEN_KEY, String(newest));
     renderInboxBadge();
   }
