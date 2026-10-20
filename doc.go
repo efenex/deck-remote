@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -24,15 +25,73 @@ import (
 const (
 	docMaxBytes     = 1 << 20
 	defaultDocRoots = "~/shared-work/git,~/src/agent-deck-rebase"
+	defaultDocExts  = ".md,.markdown,.txt"
+	docLogPathMax   = 512
 )
 
-var docExts = map[string]bool{".md": true, ".markdown": true, ".txt": true, ".log": true}
-
-// Denied directory components (any depth, resolved path) and basename globs.
+// A name denylist cannot be the control on a root this large (hundreds of
+// thousands of files); it is a best-effort cut. The real bounds are the roots,
+// the extension set, and the auth on the route (authDoc). Matching is on
+// fold()ed names so APFS case/Unicode folding (ſ == s, K == k) cannot slip
+// past, and is repeated on the kernel's spelling of the opened file.
 var (
-	docDenyDirs  = []string{".git", "secrets", "vault"}
-	docDenyGlobs = []string{".env*", "*.key", "*.pem", "*.crt", "*.p12", "id_*", "state.db*", "*.sqlite*"}
+	// directory components, any depth (path.Match patterns)
+	docDenyDirs = []string{".git", "secrets", "secret", "vault*", ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config", "node_modules"}
+	// basenames (path.Match patterns)
+	docDenyGlobs = []string{
+		".env*", ".envrc*", "*.key", "*.pem", "*.crt", "*.p12", "*.pfx", "*.jks", "*.age", "*.sops*", "*.gpg", "*.asc",
+		"id_*", "state.db*", "*.sqlite*", "*.db",
+		"*secret*", "*credential*", "*token*", "*passw*", "*apikey*", "*api-key*", "*api_key*",
+		"kubeconfig*", "*.kube*", ".netrc*", ".npmrc*", ".pypirc*", "known_hosts*", "authorized_keys*",
+	}
 )
+
+// fold maps every rune to the smallest member of its Unicode simple-folding
+// orbit, so two names the filesystem treats as equal fold to the same string.
+func fold(s string) string {
+	return strings.Map(func(r rune) rune {
+		min := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < min {
+				min = f
+			}
+		}
+		return min
+	}, s)
+}
+
+// parseDocExts normalises a comma-separated extension list (".md,txt").
+func parseDocExts(spec string) map[string]bool {
+	if strings.TrimSpace(spec) == "" {
+		spec = defaultDocExts
+	}
+	out := map[string]bool{}
+	for _, e := range strings.Split(spec, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		out[e] = true
+	}
+	return out
+}
+
+// docCfg is the per-request policy: allowed roots and extensions.
+type docCfg struct {
+	roots []docRoot
+	exts  map[string]bool
+}
+
+func (s *server) docConfig() docCfg {
+	return docCfg{roots: s.docRootList(), exts: parseDocExts(s.cfg.docExts)}
+}
+
+func (c docCfg) extOK(name string) bool { return c.exts[strings.ToLower(filepath.Ext(name))] }
+
+const docExtMsg = "only the configured document extensions (default .md, .markdown, .txt) can be read"
 
 // docError carries the HTTP status for a refusal; msg is safe to return to the
 // client (it never contains file content).
@@ -96,20 +155,20 @@ func mustRel(base, p string) string {
 	return rel
 }
 
-// docDenied applies the denylist to every component of p (case-insensitive, as
-// the macOS filesystem is). p is the path relative to its root.
+// docDenied applies the denylist to every component of rel (the path relative
+// to its root), after folding.
 func docDenied(rel string) string {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	for i, c := range parts {
-		lc := strings.ToLower(c)
+		fc := fold(c)
 		for _, d := range docDenyDirs {
-			if lc == d {
+			if ok, _ := path.Match(fold(d), fc); ok {
 				return "path is in a denied directory (" + d + ")"
 			}
 		}
 		if i == len(parts)-1 {
 			for _, g := range docDenyGlobs {
-				if ok, _ := path.Match(g, lc); ok {
+				if ok, _ := path.Match(fold(g), fc); ok {
 					return "file name is denied (" + g + ")"
 				}
 			}
@@ -117,8 +176,6 @@ func docDenied(rel string) string {
 	}
 	return ""
 }
-
-func docExtOK(name string) bool { return docExts[strings.ToLower(filepath.Ext(name))] }
 
 type docResult struct {
 	Path    string `json:"path"` // resolved absolute path
@@ -134,7 +191,7 @@ type docResult struct {
 // lexical root check comes first so out-of-root probes cannot learn whether a
 // file exists; the denylist and extension are then checked on the RESOLVED
 // path, so a symlink cannot launder a denied or non-document target.
-func resolveDoc(roots []docRoot, home, req, base string) (real string, root docRoot, err *docError) {
+func resolveDoc(cfg docCfg, home, req, base string) (real string, root docRoot, err *docError) {
 	if req == "" || strings.ContainsRune(req, 0) {
 		return "", docRoot{}, docErr(400, "path required")
 	}
@@ -148,7 +205,7 @@ func resolveDoc(roots []docRoot, home, req, base string) (real string, root docR
 	p = filepath.Clean(p)
 
 	lexRel, lexOK := "", false
-	for _, r := range roots {
+	for _, r := range cfg.roots {
 		for _, b := range []string{r.lex, r.real} {
 			if within(b, p) {
 				lexRel, lexOK = mustRel(b, p), true
@@ -163,8 +220,8 @@ func resolveDoc(roots []docRoot, home, req, base string) (real string, root docR
 	if why := docDenied(lexRel); why != "" {
 		return "", docRoot{}, docErr(403, why)
 	}
-	if !docExtOK(p) {
-		return "", docRoot{}, docErr(415, "only .md, .markdown, .txt and .log files can be read")
+	if !cfg.extOK(p) {
+		return "", docRoot{}, docErr(415, docExtMsg)
 	}
 
 	real, e := filepath.EvalSymlinks(p)
@@ -174,7 +231,7 @@ func resolveDoc(roots []docRoot, home, req, base string) (real string, root docR
 		}
 		return "", docRoot{}, docErr(404, "not readable")
 	}
-	for _, r := range roots {
+	for _, r := range cfg.roots {
 		if within(r.real, real) {
 			root = r
 			break
@@ -187,23 +244,42 @@ func resolveDoc(roots []docRoot, home, req, base string) (real string, root docR
 	if why := docDenied(rel); why != "" {
 		return "", docRoot{}, docErr(403, why)
 	}
-	if !docExtOK(real) {
-		return "", docRoot{}, docErr(415, "only .md, .markdown, .txt and .log files can be read")
+	if !cfg.extOK(real) {
+		return "", docRoot{}, docErr(415, docExtMsg)
 	}
 	return real, root, nil
 }
 
-// readDoc opens an already-resolved path without following a final symlink or
-// blocking on a FIFO, then enforces regular-file, size and UTF-8.
-func readDoc(real string) (*docResult, *docError) {
-	f, e := os.OpenFile(real, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+// readDoc is the authority; resolveDoc is only the cheap pre-check. It opens
+// with O_NOFOLLOW_ANY (a directory swapped for a symlink after resolveDoc fails
+// with ELOOP instead of being followed), then re-applies root, denylist and
+// extension policy to the kernel's own spelling of the opened file, and refuses
+// anything that is not a single-link regular file within the size cap.
+func readDoc(real string, root docRoot, cfg docCfg) (*docResult, *docError) {
+	f, e := openDocFile(real)
 	if e != nil {
 		return nil, docErr(404, "not readable")
 	}
 	defer f.Close()
+	canon, e := fdPath(f)
+	if e != nil {
+		return nil, docErr(404, "not readable")
+	}
+	if !within(root.real, canon) {
+		return nil, docErr(403, "path resolves outside the allowed roots")
+	}
+	if why := docDenied(mustRel(root.real, canon)); why != "" {
+		return nil, docErr(403, why)
+	}
+	if !cfg.extOK(canon) {
+		return nil, docErr(415, docExtMsg)
+	}
 	fi, e := f.Stat()
 	if e != nil || !fi.Mode().IsRegular() {
-		return nil, docErr(415, "not a regular file")
+		return nil, docErr(404, "not found")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && uint64(st.Nlink) > 1 {
+		return nil, docErr(403, "hard-linked files cannot be read")
 	}
 	if fi.Size() > docMaxBytes {
 		return nil, docErr(413, "file is larger than 1 MB")
@@ -218,7 +294,7 @@ func readDoc(real string) (*docResult, *docError) {
 	if !utf8.Valid(b) {
 		return nil, docErr(415, "file is not valid UTF-8")
 	}
-	return &docResult{Size: int64(len(b)), MTime: fi.ModTime().UTC().Format(time.RFC3339), Content: string(b)}, nil
+	return &docResult{Path: canon, Size: int64(len(b)), MTime: fi.ModTime().UTC().Format(time.RFC3339), Content: string(b)}, nil
 }
 
 // docLog appends one JSON line per read attempt (path, device, login, outcome,
@@ -253,7 +329,11 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 		if real == "" {
 			real = req
 		}
-		s.docLog(map[string]any{"action": "doc", "allowed": status == 200, "status": status, "path": real, "device": device, "login": tsLogin(r), "reason": reason, "bytes": n})
+		f := map[string]any{"action": "doc", "allowed": status == 200, "status": status, "path": real, "device": device, "login": tsLogin(r), "reason": reason, "bytes": n}
+		if len(real) > docLogPathMax {
+			f["path"], f["truncated"] = strings.ToValidUTF8(real[:docLogPathMax], ""), true
+		}
+		s.docLog(f)
 	}
 	fail := func(e *docError, real string) {
 		logf(e.status, real, e.msg, 0)
@@ -273,19 +353,67 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 			base = s.cfg.towerRoot
 		}
 	}
-	real, root, de := resolveDoc(s.docRootList(), s.cfg.homeDir, req, base)
+	cfg := s.docConfig()
+	real, root, de := resolveDoc(cfg, s.cfg.homeDir, req, base)
 	if de != nil {
 		fail(de, "")
 		return
 	}
-	res, de := readDoc(real)
+	res, de := readDoc(real, root, cfg)
 	if de != nil {
 		fail(de, real)
 		return
 	}
-	res.Path, res.Root = real, root.real
-	logf(200, real, "", len(res.Content))
+	res.Root = root.real
+	logf(200, res.Path, "", len(res.Content))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	writeJSON(w, http.StatusOK, res)
+}
+
+// docReadOK decides whether r may read documents. The bar mirrors tower
+// actions minus the act cap: a header-only bearer (never ?token=, which lands
+// in proxy and referrer logs), a DEVICE token carrying the "doc" (or "act")
+// capability — the shared token is refused — and, when --tower-operator is set,
+// a loopback peer (the tailscale serve hop) whose Tailscale-User-Login is that
+// operator. The last clause disables the viewer over the pf LAN fallback, where
+// the login header is client-controlled. Returns the device name and a refusal
+// reason ("" = allowed); status distinguishes an unknown token (401) from a
+// known-but-unqualified one (403).
+func (s *server) docReadOK(r *http.Request) (device, reason string, status int) {
+	tok := bearerHeaderOnly(r)
+	dt, ok := s.tokens.find(tok)
+	if !ok {
+		if subtleConstantEq(tok, s.cfg.token) {
+			return "", "the shared token cannot read documents; mint a device token with caps [doc]", http.StatusForbidden
+		}
+		return "", "unauthorized", http.StatusUnauthorized
+	}
+	if !dt.hasCap("doc") && !dt.hasCap("act") {
+		return dt.Name, "device token " + dt.Name + " lacks the doc capability", http.StatusForbidden
+	}
+	if s.cfg.towerOperator != "" {
+		if ok, why := viaServeProxy(r); !ok {
+			return dt.Name, why, http.StatusForbidden
+		}
+		if !strings.EqualFold(tsLogin(r), s.cfg.towerOperator) {
+			return dt.Name, "Tailscale identity is not the operator", http.StatusForbidden
+		}
+	}
+	return dt.Name, "", 0
+}
+
+// authDoc gates the doc route (replaces s.auth for it). Refusals are logged.
+func (s *server) authDoc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		device, reason, status := s.docReadOK(r)
+		if reason != "" {
+			if status != http.StatusUnauthorized {
+				s.docLog(map[string]any{"action": "doc", "allowed": false, "status": status, "device": device, "login": tsLogin(r), "reason": reason})
+			}
+			httpError(w, status, reason)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

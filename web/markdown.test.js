@@ -70,7 +70,7 @@ test('document paths become links: absolute, ~/, relative, bare .md, :line, back
 });
 
 test('things that are not document references stay plain text', () => {
-  for (const t of ['https://example.com/a.md', 'notes.txt', 'a.mdx', 'x/y.md5', 'foo.md.exe', 'user@host.md', 'v1.2.md-ish']) {
+  for (const t of ['https://example.com/a.md', 'notes.txt', 'a.mdx', 'x/y.md5', 'foo.md.exe', 'user@host.md', 'v1.2.md-ish', '/var/log/deploy.log']) {
     assert.ok(!render(t).includes('doclink'), t + ' -> ' + render(t));
   }
   assert.ok(!render('```\n/a/b.md\n```').includes('doclink'));

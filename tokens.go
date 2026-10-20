@@ -36,8 +36,8 @@ type deviceToken struct {
 	Name    string `json:"name"`    // human label, e.g. "ruben-iphone"
 	Hash    string `json:"hash"`    // hex SHA-256 of the raw token (never the raw token)
 	Created int64  `json:"created"` // unix seconds
-	// Caps are capabilities beyond reading: today only "act" (tower actions,
-	// tower.go). Absent = read-only; existing tokens keep working unchanged.
+	// Caps are capabilities beyond reading: "act" (tower actions, tower.go) and
+	// "doc" (document viewer reads, doc.go; "act" implies it). Absent = read-only; existing tokens keep working unchanged.
 	Caps []string `json:"caps,omitempty"`
 }
 
@@ -53,7 +53,7 @@ func (t deviceToken) hasCap(c string) bool {
 
 // knownCaps is the closed set a mint may grant; anything else is refused so a
 // typo never silently mints a read-only token the operator believes can act.
-var knownCaps = map[string]bool{"act": true}
+var knownCaps = map[string]bool{"act": true, "doc": true}
 
 // tokenStore persists named device tokens to a 0600 JSON file. All methods are
 // safe for concurrent use; the auth path (verify) is the hot one.

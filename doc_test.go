@@ -52,7 +52,7 @@ func TestDocReadsAllowedFile(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &res) != nil || res.Content != "# hi\n" || res.Size != 5 || res.Root != root {
 		t.Fatalf("bad body %s", w.Body.String())
 	}
-	for _, name := range []string{"a.markdown", "a.txt", "a.LOG"} {
+	for _, name := range []string{"a.markdown", "a.txt", "a.TXT"} {
 		mustWrite(t, filepath.Join(root, name), "x")
 		docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, name)}}), 200)
 	}
@@ -76,7 +76,7 @@ func TestDocRefusesOutsideRootsAndTraversal(t *testing.T) {
 	// the lexical check answers before any stat: a missing outside file is 403, not 404
 	docWant(t, docGet(s, url.Values{"path": {filepath.Join(outside, "missing.md")}}), 403)
 	// relative traversal out of the session base is caught the same way
-	_, _, de := resolveDoc(s.docRootList(), s.cfg.homeDir, "../outside/o.md", root)
+	_, _, de := resolveDoc(s.docConfig(), s.cfg.homeDir, "../outside/o.md", root)
 	if de == nil || de.status != 403 {
 		t.Fatalf("relative traversal: %v", de)
 	}
@@ -160,7 +160,7 @@ func TestDocDenylist(t *testing.T) {
 		}
 	}
 	// a denied name that also carries an allowed extension is a 403, not a leak
-	for _, n := range []string{"id_rsa.txt", "state.db.log", ".env.txt"} {
+	for _, n := range []string{"id_rsa.txt", "state.db.txt", ".env.txt"} {
 		mustWrite(t, filepath.Join(root, n), "x")
 		docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, n)}}), 403)
 	}
@@ -170,7 +170,7 @@ func TestDocDenylist(t *testing.T) {
 
 func TestDocRefusesExtensions(t *testing.T) {
 	s, root, _ := docTestServer(t)
-	for _, n := range []string{"a.go", "a.json", "a", "a.md.exe", "a.html", "a.sh"} {
+	for _, n := range []string{"a.go", "a.json", "a", "a.md.exe", "a.html", "a.sh", "a.log"} {
 		mustWrite(t, filepath.Join(root, n), "x")
 		docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, n)}}), 415)
 	}
@@ -192,9 +192,7 @@ func TestDocNotFoundBadParamsAndNonRegular(t *testing.T) {
 	docWant(t, docGet(s, url.Values{}), 400)
 	docWant(t, docGet(s, url.Values{"path": {"notes.md"}}), 400) // relative, no session, no tower root
 	mustMkdir(t, filepath.Join(root, "dir.md"))
-	if w := docGet(s, url.Values{"path": {filepath.Join(root, "dir.md")}}); w.Code != 415 {
-		t.Fatalf("directory: status=%d", w.Code)
-	}
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "dir.md")}}), 404) // no 415 oracle for directories
 	docWant(t, docGet(s, url.Values{"path": {"a\x00b.md"}}), 400)
 }
 
@@ -202,7 +200,7 @@ func TestDocRelativeResolvesAgainstBase(t *testing.T) {
 	s, root, _ := docTestServer(t)
 	mustMkdir(t, filepath.Join(root, "proj", "docs"))
 	mustWrite(t, filepath.Join(root, "proj", "docs", "a.md"), "rel")
-	real, _, de := resolveDoc(s.docRootList(), s.cfg.homeDir, "docs/a.md", filepath.Join(root, "proj"))
+	real, _, de := resolveDoc(s.docConfig(), s.cfg.homeDir, "docs/a.md", filepath.Join(root, "proj"))
 	if de != nil || real != filepath.Join(root, "proj", "docs", "a.md") {
 		t.Fatalf("real=%q err=%v", real, de)
 	}
@@ -248,20 +246,205 @@ func TestDocReadsAreLoggedWithoutContent(t *testing.T) {
 	}
 }
 
-func TestDocRouteRequiresAuth(t *testing.T) {
+// --- security-review regressions (tower/reports/deckremote-doc-endpoint-secreview-2026-10-20) ---
+
+// P1: APFS folds U+017F (long s) to 's'; strings.ToLower does not.
+func TestDocDenylistSurvivesUnicodeCaseFolding(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	mustMkdir(t, filepath.Join(root, "secrets"))
+	mustWrite(t, filepath.Join(root, "secrets", "n.md"), "SECRET")
+	mustWrite(t, filepath.Join(root, "state.db.md"), "SECRET")
+	for _, p := range []string{"ſecrets/n.md", "ſtate.db.md", "SECRETS/n.md", "StAtE.dB.md"} {
+		if w := docGet(s, url.Values{"path": {filepath.Join(root, p)}}); w.Code != 403 {
+			t.Fatalf("%q -> %d %s", p, w.Code, w.Body.String())
+		}
+	}
+}
+
+// P3: a hard link inside a root to a file outside it passes EvalSymlinks.
+func TestDocRefusesHardLinks(t *testing.T) {
+	s, root, outside := docTestServer(t)
+	mustWrite(t, filepath.Join(outside, "private"), "PRIVATE")
+	if err := os.Link(filepath.Join(outside, "private"), filepath.Join(root, "notes.md")); err != nil {
+		t.Skip(err)
+	}
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "notes.md")}}), 403)
+}
+
+// P5: the read log must not grow with the request.
+func TestDocLogTruncatesRequestedPath(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	docGet(s, url.Values{"path": {filepath.Join(root, strings.Repeat("a", 20000)+".md")}})
+	b, err := os.ReadFile(filepath.Join(stateDir(s.cfg.homeDir), "deck-remote-doc-reads.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 1500 || !strings.Contains(string(b), `"truncated":true`) {
+		t.Fatalf("log line is %d bytes: %.200s", len(b), b)
+	}
+}
+
+// P6 + the report's lists: document-named secrets and secret-ish directories.
+func TestDocDenylistCoversSecretNamedDocuments(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	for _, n := range []string{"secrets.txt", "my-secret.md", "credentials-cloudflare.md", "token.md", "api-tokens.txt", "kubeconfig.txt", ".netrc.md", "known_hosts.txt", "api-keys.md", "apikey.md", "passwords.md", ".envrc.md", "a.age", "x.sops.md", "authorized_keys.txt", ".npmrc.md", "dump.db"} {
+		mustWrite(t, filepath.Join(root, n), "x")
+		if w := docGet(s, url.Values{"path": {filepath.Join(root, n)}}); w.Code != 403 && w.Code != 415 {
+			t.Fatalf("%s -> %d", n, w.Code)
+		}
+	}
+	for _, d := range []string{"vault-wt-litellm", "vault-wt-sealkeep/sub", "secret", ".ssh", ".aws", ".kube", ".gnupg", ".docker", "node_modules/x"} {
+		mustMkdir(t, filepath.Join(root, d))
+		mustWrite(t, filepath.Join(root, d, "README.md"), "x")
+		docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, d, "README.md")}}), 403)
+	}
+	// ordinary documents still read
+	mustMkdir(t, filepath.Join(root, "docs"))
+	mustWrite(t, filepath.Join(root, "docs", "design.md"), "x")
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "docs", "design.md")}}), 200)
+}
+
+// P2: a directory swapped for a symlink between resolveDoc and readDoc.
+func TestDocReadRefusesIntermediateSymlinkSwap(t *testing.T) {
+	s, root, outside := docTestServer(t)
+	mustMkdir(t, filepath.Join(root, "docs"))
+	mustWrite(t, filepath.Join(root, "docs", "a.md"), "benign")
+	mustWrite(t, filepath.Join(outside, "a.md"), "OUTSIDE-SECRET")
+	cfg := s.docConfig()
+	real, rt, de := resolveDoc(cfg, s.cfg.homeDir, filepath.Join(root, "docs", "a.md"), "")
+	if de != nil {
+		t.Fatal(de)
+	}
+	if err := os.Rename(filepath.Join(root, "docs"), filepath.Join(root, "docs.bak")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	if res, de := readDoc(real, rt, cfg); de == nil {
+		t.Fatalf("followed a swapped directory symlink: %q", res.Content)
+	}
+}
+
+// readDoc re-applies the policy to the kernel's spelling, so it holds even when
+// the pre-check was handed the client's (folded) spelling.
+func TestDocReadChecksKernelPathEvenIfPrecheckIsBypassed(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	mustMkdir(t, filepath.Join(root, "secrets"))
+	mustWrite(t, filepath.Join(root, "secrets", "n.md"), "SECRET")
+	cfg := s.docConfig()
+	rt := cfg.roots[0]
+	if _, de := readDoc(filepath.Join(root, "ſecrets", "n.md"), rt, cfg); de == nil || de.status != 403 {
+		// on a case-sensitive filesystem the open itself fails (404): also safe
+		if de == nil || de.status != 404 {
+			t.Fatalf("de=%v", de)
+		}
+	}
+}
+
+func docRouteReq(t *testing.T, root, token string, mutate func(*http.Request)) *http.Request {
+	r := httptest.NewRequest("GET", "/api/rc/doc?path="+url.QueryEscape(filepath.Join(root, "a.md")), nil)
+	r.RemoteAddr = "127.0.0.1:5555"
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	if mutate != nil {
+		mutate(r)
+	}
+	return r
+}
+
+func TestDocRouteAuth(t *testing.T) {
 	s, root, _ := docTestServer(t)
 	mustWrite(t, filepath.Join(root, "a.md"), "x")
-	h := s.auth(http.HandlerFunc(s.handleDoc))
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/rc/doc?path="+url.QueryEscape(filepath.Join(root, "a.md")), nil))
-	if w.Code != 401 {
-		t.Fatalf("status=%d", w.Code)
+	h := s.authDoc(http.HandlerFunc(s.handleDoc))
+	_, docTok, err := s.tokens.mint("phone-doc", "doc")
+	if err != nil {
+		t.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "/api/rc/doc?path="+url.QueryEscape(filepath.Join(root, "a.md")), nil)
-	r.Header.Set("Authorization", "Bearer shared-secret")
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("status=%d", w.Code)
+	_, actTok, _ := s.tokens.mint("phone-act", "act")
+	_, roTok, _ := s.tokens.mint("phone-ro")
+	do := func(r *http.Request) int { w := httptest.NewRecorder(); h.ServeHTTP(w, r); return w.Code }
+
+	if c := do(docRouteReq(t, root, "", nil)); c != 401 {
+		t.Fatalf("no token -> %d", c)
 	}
+	if c := do(docRouteReq(t, root, "nonsense", nil)); c != 401 {
+		t.Fatalf("bad token -> %d", c)
+	}
+	// P4: the query token must not authorise the route
+	r := docRouteReq(t, root, "", nil)
+	r.URL.RawQuery += "&token=shared-secret"
+	if c := do(r); c != 401 {
+		t.Fatalf("?token= -> %d", c)
+	}
+	r = docRouteReq(t, root, "", nil)
+	r.URL.RawQuery += "&token=" + docTok
+	if c := do(r); c != 401 {
+		t.Fatalf("?token=<device> -> %d", c)
+	}
+	if c := do(docRouteReq(t, root, "shared-secret", nil)); c != 403 {
+		t.Fatalf("shared token -> %d", c)
+	}
+	if c := do(docRouteReq(t, root, roTok, nil)); c != 403 {
+		t.Fatalf("read-only device token -> %d", c)
+	}
+	if c := do(docRouteReq(t, root, docTok, nil)); c != 200 {
+		t.Fatalf("doc token -> %d", c)
+	}
+	if c := do(docRouteReq(t, root, actTok, nil)); c != 200 {
+		t.Fatalf("act token implies doc -> %d", c)
+	}
+}
+
+func TestDocRouteBindsToOperatorWhenConfigured(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	s.cfg.towerOperator = "ruben@example.com"
+	mustWrite(t, filepath.Join(root, "a.md"), "x")
+	h := s.authDoc(http.HandlerFunc(s.handleDoc))
+	_, tok, _ := s.tokens.mint("phone-doc", "doc")
+	do := func(mutate func(*http.Request)) int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, docRouteReq(t, root, tok, mutate))
+		return w.Code
+	}
+	if c := do(func(r *http.Request) { r.Header.Set("Tailscale-User-Login", "ruben@example.com") }); c != 200 {
+		t.Fatalf("operator via serve -> %d", c)
+	}
+	if c := do(nil); c != 403 {
+		t.Fatalf("no login header -> %d", c)
+	}
+	if c := do(func(r *http.Request) { r.Header.Set("Tailscale-User-Login", "eve@example.com") }); c != 403 {
+		t.Fatalf("other login -> %d", c)
+	}
+	// pf LAN fallback / any non-loopback peer: the header is client-controlled
+	if c := do(func(r *http.Request) {
+		r.RemoteAddr = "100.64.0.9:4444"
+		r.Header.Set("Tailscale-User-Login", "ruben@example.com")
+	}); c != 403 {
+		t.Fatalf("non-loopback peer -> %d", c)
+	}
+	// refusals are logged without content
+	b, _ := os.ReadFile(filepath.Join(stateDir(s.cfg.homeDir), "deck-remote-doc-reads.log"))
+	if !strings.Contains(string(b), `"allowed":false`) {
+		t.Fatalf("refusals not logged: %s", b)
+	}
+}
+
+func TestDocExtensionsAreConfigurable(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	mustWrite(t, filepath.Join(root, "deploy.log"), "x")
+	mustWrite(t, filepath.Join(root, "a.md"), "x")
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "deploy.log")}}), 415)
+	s.cfg.docExts = "md, LOG"
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "deploy.log")}}), 200)
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "a.md")}}), 200)
+	mustWrite(t, filepath.Join(root, "b.txt"), "x")
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "b.txt")}}), 415)
+}
+
+func TestDocDirectoryNamedLikeADocumentIs404(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	mustMkdir(t, filepath.Join(root, "dir.md"))
+	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "dir.md")}}), 404)
 }

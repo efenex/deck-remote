@@ -20,7 +20,7 @@
   // counts for .md. Existence is not checked here; the viewer reports
   // "not readable" on tap. Matched against already-escaped text, so the
   // character class deliberately excludes & and ;.
-  const DOC_EXT = '(?:md|markdown|txt|log)';
+  const DOC_EXT = '(?:md|markdown|txt)'; // the server's default --doc-exts; .log is opt-in there
   const DOC_BODY = '(?:~\\/|\\.{0,2}\\/)?[\\w.+-]+(?:\\/[\\w.+-]+)*';
   const DOC_PATH = new RegExp('(^|[^\\w./~@+-])(' + DOC_BODY + '\\.' + DOC_EXT + ')(?::(\\d{1,6}))?(?![\\w/@+-]|\\.\\w)', 'gi');
   const DOC_WHOLE = new RegExp('^(' + DOC_BODY + '\\.' + DOC_EXT + ')(?::(\\d{1,6}))?$', 'i');
