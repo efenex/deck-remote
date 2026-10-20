@@ -15,6 +15,7 @@ import (
 type sseHub struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
+	tap     func(event any) // sees every published event first (the phone-row log)
 }
 
 func newSSEHub() *sseHub {
@@ -41,6 +42,9 @@ func (h *sseHub) unsubscribe(ch chan []byte) {
 // publish marshals an event and fans it out. Slow clients drop the event rather
 // than block the publisher (the phone re-fetches /reply on reconnect anyway).
 func (h *sseHub) publish(event any) {
+	if h.tap != nil {
+		h.tap(event)
+	}
 	b, err := json.Marshal(event)
 	if err != nil {
 		return

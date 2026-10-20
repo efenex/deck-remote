@@ -251,7 +251,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		}
 	}
 	home := cfg.homeDir
-	return &server{
+	s := &server{
 		cfg:       cfg,
 		proxy:     proxy,
 		hub:       newSSEHub(),
@@ -271,6 +271,8 @@ func newServer(cfg config, upstream *url.URL) *server {
 		views:     newViewCache(),
 		replies:   newReplyCache(),
 	}
+	s.hub.tap = newPhoneLog(home).tap
+	return s
 }
 
 func (s *server) routes() http.Handler {
