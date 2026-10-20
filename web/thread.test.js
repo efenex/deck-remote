@@ -83,3 +83,26 @@ test('turnKey: bash rows with the same command but different output differ', () 
   const b = { role: 'bash', content: 'date', stdout: '2' };
   assert.notStrictEqual(turnKey(a), turnKey(b));
 });
+
+const { newTailTurns } = require('./thread.js');
+
+test('newTailTurns: a bash row in the tail is appended once, not on every poll', () => {
+  const tail = [
+    h('me', 'run it', 10),
+    { role: 'bash', content: 'ls', stdout: 'a\nb', stderr: '', ts: 11, hist: true },
+    h('reply', 'done', 12),
+  ];
+  const conv = [];
+  const reconcile = () => newTailTurns(conv, tail).forEach((t) => conv.push(t));
+  reconcile();
+  reconcile();
+  reconcile();
+  assert.strictEqual(conv.filter((e) => e.role === 'bash').length, 1);
+  assert.strictEqual(conv.length, 3);
+});
+
+test('newTailTurns: a genuine repeat bash row (same cmd and output) still counts', () => {
+  const b = { role: 'bash', content: 'date', stdout: 'x', stderr: '', ts: 1, hist: true };
+  const conv = [{ ...b }];
+  assert.strictEqual(newTailTurns(conv, [b, { ...b }]).length, 1);
+});

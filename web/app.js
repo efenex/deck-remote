@@ -1759,25 +1759,10 @@
     if (!msgs.length) return;
     const conv = ensureConvo(id);
 
-    // Build a per-role multiset of trimmed contents already present so repeated
-    // identical messages still dedup one-for-one (don't drop a genuine repeat).
-    const seen = new Map(); // key `${role}\n${kind}\n${trimmedContent}` -> remaining count
-    conv.forEach((e) => {
-      if (e.role !== 'me' && e.role !== 'reply') return;
-      if (e.content == null) return;
-      const key = e.role + '\n' + (e.kind || '') + '\n' + String(e.content).trim();
-      seen.set(key, (seen.get(key) || 0) + 1);
-    });
-
-    let appended = 0;
-    msgs.forEach((m) => {
-      const turn = historyToTurn(m); // {role:'me'|'reply', content, ts}
-      const key = turn.role + '\n' + (turn.kind || '') + '\n' + String(turn.content || '').trim();
-      const left = seen.get(key) || 0;
-      if (left > 0) { seen.set(key, left - 1); return; } // already in thread
-      conv.push(turn);
-      appended++;
-    });
+    // One-for-one multiset dedup on turnKey across every role (bash rows too).
+    const fresh = DeckThread.newTailTurns(conv, msgs.map(historyToTurn));
+    fresh.forEach((turn) => conv.push(turn));
+    const appended = fresh.length;
 
     if (!appended) return; // common case: nothing new — cheap no-op
     // Keep the scroll-back offset aligned with what the thread holds.

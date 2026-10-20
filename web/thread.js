@@ -79,7 +79,26 @@
     return older;
   }
 
-  const api = { turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap };
+  // Which tail turns (oldest-first, already mapped to convo turns) are missing
+  // from the thread? One-for-one multiset match on turnKey over every role, so a
+  // genuine repeat still counts but a row seen on the last poll (bash rows
+  // included) is not appended again.
+  function newTailTurns(conv, tail) {
+    const seen = new Map();
+    conv.forEach((e) => {
+      if (e.content == null) return;
+      const k = turnKey(e);
+      seen.set(k, (seen.get(k) || 0) + 1);
+    });
+    return tail.filter((t) => {
+      const k = turnKey(t);
+      const left = seen.get(k) || 0;
+      if (left > 0) { seen.set(k, left - 1); return false; }
+      return true;
+    });
+  }
+
+  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);
