@@ -33,6 +33,7 @@ const (
 	recallOffTTL      = 60 * time.Second // recall disabled/unsupported: do not re-probe sooner
 	recallFailTTL     = 10 * time.Second // per-session error backoff
 	recallMaxSessions = 32
+	recallChainOffTTL = 10 * time.Minute // binary without `timeline --chain`: do not re-probe sooner
 )
 
 // recallRow is the part of an agent-deck.recall.rows/v2 row this server keeps.
@@ -120,6 +121,7 @@ type recallSess struct {
 	rows      []recallRow // kept rows, source order
 	through   string
 	before    string // cursor for older rows; "" = none left
+	chain     bool   // rows (and the before cursor) span /clear segments (timeline --chain)
 	lastFetch time.Time
 	failUntil time.Time
 
@@ -133,7 +135,8 @@ type recallStore struct {
 	mu         sync.Mutex
 	off        time.Time // recall unavailable until
 	sessions   map[string]*recallSess
-	follow     bool // stream with `recall follow` instead of polling --since
+	chainOff   time.Time // `timeline --chain` unsupported until (older agent-deck)
+	follow     bool      // stream with `recall follow` instead of polling --since
 	nFollowers atomic.Int32
 }
 
@@ -205,11 +208,12 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 	}
 
 	open := func() error {
-		tl, err := a.s.recallRead(ctx, se.ID, "--tail", strconv.Itoa(recallTail))
+		tl, chained, err := a.s.recallReadChain(ctx, rs, se.ID, "--tail", strconv.Itoa(recallTail))
 		if err != nil {
 			return err
 		}
 		sv.stopFollow()
+		sv.chain = chained
 		sv.native, sv.rows, sv.before = tl.Session.NativeID, nil, tl.BeforeCursor
 		sv.apply(tl)
 		sv.lastFetch = now
@@ -244,9 +248,19 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 	a.s.ensureFollow(sv, se.ID, profileFrom(ctx, a.s.cfg.profile))
 	msgs = recallMessages(sv.rows)
 	for pages := 0; len(msgs) < need && sv.before != "" && pages < recallMaxPages; pages++ {
-		tl, err := a.s.recallRead(ctx, se.ID, "--before", sv.before, "--limit", strconv.Itoa(recallPage))
+		var tl recallTimeline
+		var err error
+		if sv.chain { // the cursor may be a "seg:<id>" one: only --chain reads it
+			tl, err = a.s.recallRead(ctx, se.ID, "--chain", "--before", sv.before, "--limit", strconv.Itoa(recallPage))
+		} else {
+			tl, err = a.s.recallRead(ctx, se.ID, "--before", sv.before, "--limit", strconv.Itoa(recallPage))
+		}
 		if err != nil {
 			break // serve what is cached; scroll-back retries on the next request
+		}
+		if len(tl.Turns) == 0 && len(tl.Updates) == 0 {
+			sv.before = "" // an empty page is the start of the chain
+			break
 		}
 		older := make([]recallRow, 0, len(tl.Turns))
 		for _, r := range tl.Turns {
@@ -259,6 +273,39 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 		msgs = recallMessages(sv.rows)
 	}
 	return msgs, sv.before != "", true
+}
+
+// recallReadChain is a tail read that spans /clear when the binary can
+// (`recall timeline --chain`, rows carry seg and boundary rows mark each clear);
+// an older agent-deck rejects the flag, which is remembered for
+// recallChainOffTTL, and the read repeats as a single-segment one.
+func (s *server) recallReadChain(ctx context.Context, rs *recallStore, id string, flags ...string) (tl recallTimeline, chained bool, err error) {
+	if os.Getenv("DECK_REMOTE_RECALL_CHAIN") != "off" && !rs.chainDisabled() {
+		tl, err = s.recallRead(ctx, id, append([]string{"--chain"}, flags...)...)
+		if err == nil {
+			return tl, true, nil
+		}
+		if !recallChainUnsupported(err) {
+			return tl, false, err
+		}
+		rs.mu.Lock()
+		rs.chainOff = time.Now().Add(recallChainOffTTL)
+		rs.mu.Unlock()
+	}
+	tl, err = s.recallRead(ctx, id, flags...)
+	return tl, false, err
+}
+
+func (rs *recallStore) chainDisabled() bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return time.Now().Before(rs.chainOff)
+}
+
+// recallChainUnsupported: this agent-deck has no `timeline --chain`.
+func recallChainUnsupported(err error) bool {
+	m := strings.ToLower(err.Error())
+	return (strings.Contains(m, "flag provided but not defined") || strings.Contains(m, "unknown flag")) && strings.Contains(m, "chain")
 }
 
 // recallRead runs `agent-deck recall timeline --json <flags> <id>` (flags first:

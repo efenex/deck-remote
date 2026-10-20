@@ -178,6 +178,8 @@ path.
 | `--doc-exts` | `DECK_REMOTE_DOC_EXTS` | `.md,.markdown,.txt`; add `.log` knowingly (logs carry tokens and env dumps). The PWA only auto-links the default extensions |
 | `--tower-model-script` | `DECK_REMOTE_TOWER_MODEL_SCRIPT` | `scripts/tower_model.py` next to the binary |
 | — | `DECK_REMOTE_RECALL=off` | unset. Claude history is read from `agent-deck recall timeline` (rows/v2) when `[recall] enabled = true` in agent-deck's config, else from the transcript parser; `off` forces the parser |
+| — | `DECK_REMOTE_RECALL_FOLLOW=off` | unset. An open session streams its rows from one long-lived `agent-deck recall follow` (max 8 at once, stops 60 s after the last history request) instead of a `recall timeline --since` exec per poll; `off` restores the poll |
+| — | `DECK_REMOTE_RECALL_CHAIN=off` | unset. History spans `/clear` through `recall timeline --chain` when this agent-deck has it (feature-detected, falls back to the current conversation); `off` forces the single-conversation read |
 
 ## Operational note
 deck-remote is CLI-first precisely so it needs **no second long-running agent-deck

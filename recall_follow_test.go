@@ -47,15 +47,7 @@ exec sleep 30`
 	bin, log := followBin(t, followTail, followTail, frames)
 	s := testServer(t, config{bin: bin, token: "tok"})
 	s.recall.follow = true
-	defer func() {
-		s.recall.mu.Lock()
-		for _, sv := range s.recall.sessions {
-			sv.mu.Lock()
-			sv.stopFollow()
-			sv.mu.Unlock()
-		}
-		s.recall.mu.Unlock()
-	}()
+	defer s.recall.stopAll()
 	ca := claudeAdapter{s: s}
 	se := sessionInfo{ID: "s1", Tool: "claude"}
 	ctx := context.Background()

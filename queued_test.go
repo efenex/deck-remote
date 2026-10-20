@@ -214,9 +214,9 @@ func TestRecallRowsMapped(t *testing.T) {
 	}
 	argv, _ := os.ReadFile(log)
 	lines := strings.Split(strings.TrimSpace(string(argv)), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[0], "recall timeline --json --tail 120 s1") ||
+	if len(lines) != 3 || !strings.Contains(lines[0], "recall timeline --json --chain --tail 120 s1") ||
 		!strings.Contains(lines[1], "recall timeline --json --since c1 s1") ||
-		!strings.Contains(lines[2], "recall timeline --json --before b1 --limit 400 s1") {
+		!strings.Contains(lines[2], "recall timeline --json --chain --before b1 --limit 400 s1") {
 		t.Errorf("argv log:\n%s", argv)
 	}
 }

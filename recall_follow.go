@@ -292,3 +292,15 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// stopAll ends every follower (shutdown): an orphaned follow process would keep
+// polling its transcript until its next write hit the closed pipe.
+func (rs *recallStore) stopAll() {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	for _, sv := range rs.sessions {
+		sv.mu.Lock()
+		sv.stopFollow()
+		sv.mu.Unlock()
+	}
+}
