@@ -72,6 +72,9 @@ type histMsg struct {
 	Kind   string `json:"kind,omitempty"`
 	Queued bool   `json:"queued,omitempty"`
 	Origin string `json:"origin,omitempty"`
+	// Sender is a peer row's display name when the envelope names one; the
+	// client otherwise resolves the id from its session list.
+	Sender string `json:"sender,omitempty"`
 }
 
 var peerPrefixRE = regexp.MustCompile(`^\s*\[agent-deck from:([^\]\s]*)\]`)
@@ -189,15 +192,14 @@ func addBash(msgs []histMsg, cmd, stdout, stderr string, isInput bool, ts int64,
 	return append(msgs, histMsg{Role: "bash", Stdout: stdout, Stderr: stderr, Ts: ts, ID: id})
 }
 
-// queuedHumanMsg turns an attachment.queued_command typed by the operator while
-// Claude was working into a user (or `!` bash) row. Peer messages and
-// task-notifications are other origins and stay out of the thread (they are the
-// operator's open peer/slash decision, design §6.4); the prompt goes through the
-// same synthetic-text gates as an idle-typed one, so a mid-turn slash command is
-// dropped like its idle twin.
+// queuedHumanMsg turns an attachment.queued_command into a row: what the
+// operator typed while Claude was working (user, or `!` bash, or a slash
+// command), or a peer's message sent meanwhile. Task-notifications and other
+// origins stay out of the thread. The prompt goes through the same gates as an
+// idle-typed one.
 func queuedHumanMsg(l jsonlLine) (histMsg, bool) {
 	a := l.Attachment
-	if a.Type != "queued_command" || a.Origin.Kind != "human" || (a.CommandMode != "" && a.CommandMode != "prompt") {
+	if a.Type != "queued_command" || (a.CommandMode != "" && a.CommandMode != "prompt") {
 		return histMsg{}, false
 	}
 	ts := a.Timestamp
@@ -205,14 +207,21 @@ func queuedHumanMsg(l jsonlLine) (histMsg, bool) {
 		ts = l.Timestamp
 	}
 	raw, _ := json.Marshal(a.Prompt)
-	if cmd, _, _, isIn, ok := bashEntry(raw); ok && isIn {
-		return histMsg{Role: "bash", Content: cmd, Ts: tsUnix(ts), ID: queuedID(ts, a.Prompt), Queued: true, Origin: "human"}, true
-	}
-	txt := humanText(raw)
-	if txt == "" {
+	id := queuedID(ts, a.Prompt)
+	if a.Origin.Kind != "human" {
+		if from, name, text, ok := parsePeer(strings.TrimSpace(a.Prompt)); ok && text != "" {
+			return peerMsg(from, name, text, tsUnix(ts), id, true), true
+		}
 		return histMsg{}, false
 	}
-	return histMsg{Role: "user", Content: txt, Ts: tsUnix(ts), ID: queuedID(ts, a.Prompt), Queued: true, Origin: "human"}, true
+	if cmd, _, _, isIn, ok := bashEntry(raw); ok && isIn {
+		return histMsg{Role: "bash", Content: cmd, Ts: tsUnix(ts), ID: id, Queued: true, Origin: "human"}, true
+	}
+	m, ok := userEntryRow(raw, tsUnix(ts), id, true)
+	if ok && m.Role == "user" {
+		m.Origin = "human"
+	}
+	return m, ok
 }
 
 var reminderBlockRE = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
@@ -428,7 +437,19 @@ func parseTranscriptFrom(path string, from int64) ([]histMsg, int64, error) {
 			continue
 		}
 		var l jsonlLine
-		if json.Unmarshal(line, &l) != nil || l.IsMeta {
+		if json.Unmarshal(line, &l) != nil {
+			continue
+		}
+		if l.IsMeta {
+			// Claude Code files some peer messages as meta; nothing else meta is shown.
+			if l.Type == "user" {
+				var s string
+				if json.Unmarshal(l.Message.Content, &s) == nil {
+					if from, name, text, ok := parsePeer(strings.TrimSpace(s)); ok && text != "" {
+						msgs = append(msgs, peerMsg(from, name, text, tsUnix(l.Timestamp), l.UUID, false))
+					}
+				}
+			}
 			continue
 		}
 		switch l.Type {
@@ -441,8 +462,8 @@ func parseTranscriptFrom(path string, from int64) ([]histMsg, int64, error) {
 				msgs = addBash(msgs, cmd, so, se, isIn, tsUnix(l.Timestamp), l.UUID)
 				break
 			}
-			if txt := humanText(l.Message.Content); txt != "" {
-				msgs = append(msgs, histMsg{Role: "user", Content: txt, Ts: tsUnix(l.Timestamp), ID: l.UUID})
+			if m, ok := userEntryRow(l.Message.Content, tsUnix(l.Timestamp), l.UUID, false); ok {
+				msgs = append(msgs, m)
 			}
 		case "attachment":
 			if m, ok := queuedHumanMsg(l); ok {

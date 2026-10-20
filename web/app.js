@@ -1753,6 +1753,14 @@
     if (m.role === 'bash') {
       return { role: 'bash', content: m.content || '', stdout: m.stdout || '', stderr: m.stderr || '', ts: m.ts, hist: true };
     }
+    if (m.role === 'peer' || m.role === 'slash') {
+      // Collapsed one-liners (decision D4); expand on tap. Not 'me': those are
+      // phone-sent bubbles in the delivery logic.
+      return { role: m.role, content: m.content || '', origin: m.origin || '', sender: m.sender || '', queued: false, ts: m.ts, hist: true };
+    }
+    if (m.role === 'boundary') {
+      return { role: 'boundary', content: m.content || 'Conversation cleared', ts: m.ts, hist: true };
+    }
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
     // hist: from the transcript, so a fresh history page may replace it.
@@ -1942,7 +1950,7 @@
   // other side, more than 5 minutes later, or there is no next row.
   function closesRun(e, next) {
     if (!next) return true;
-    const side = (r) => (r === 'me' || r === 'bash' ? 'me' : 'agent');
+    const side = (r) => (r === 'me' || r === 'bash' || r === 'slash' ? 'me' : 'agent');
     if (side(e.role) !== side(next.role)) return true;
     return !!(e.ts && next.ts && next.ts - e.ts > 300);
   }
@@ -1984,6 +1992,18 @@
           }
           convo.appendChild(ts);
         }
+      } else if (e.role === 'peer' || e.role === 'slash') {
+        // Collapsed to one line; tap to expand. Peer: sender + first line.
+        // Slash: the command + args.
+        const d = el('details', 'msg-fold ' + e.role);
+        const nameOf = (pid) => { const ss = state.sessions.get(pid); return ss && ss.title || ''; };
+        d.appendChild(el('summary', null, DeckThread.foldSummary(e, nameOf)));
+        const body = el('div', 'fold-body');
+        linkifyDocs(body, e.content);
+        d.appendChild(body);
+        convo.appendChild(d);
+      } else if (e.role === 'boundary') {
+        convo.appendChild(el('div', 'boundary', e.content));
       } else if (e.role === 'bash') {
         // Operator's `!` shell line: compact `$ cmd` + output block (escaped).
         const html = DeckThread.bashBlockHTML(e);

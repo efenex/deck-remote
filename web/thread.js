@@ -36,6 +36,23 @@
     return h;
   }
 
+  function firstLine(text) {
+    const lines = String(text == null ? '' : text).split('\n');
+    for (const l of lines) { if (l.trim()) return l.trim(); }
+    return '';
+  }
+
+  // One-line summary of a collapsed peer / slash row. A peer shows who sent it
+  // (the envelope's display name, else the session title for its id, else a short
+  // id) and the first line of the message; a slash row shows the command + args.
+  // nameOf(id) -> a title or ''.
+  function foldSummary(t, nameOf) {
+    if (t.role === 'slash') return firstLine(t.content);
+    const id = String(t.origin || '').replace(/^peer:/, '');
+    const who = t.sender || (id && nameOf && nameOf(id)) || (id ? id.slice(0, 8) : 'peer');
+    return who + ' \u00b7 ' + firstLine(t.content);
+  }
+
   // A transcript row is the same message as a live row if its key matches and
   // it is not older than the live row by more than this (the live stamp is
   // taken when the PWA sends or receives; the transcript's can lag or lead).
@@ -176,7 +193,7 @@
   // one can already be sitting in the composer.
   function canRetry(e) { return e.status === 'failed' && e.retryable !== false; }
 
-  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  const api = { firstLine, foldSummary, newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

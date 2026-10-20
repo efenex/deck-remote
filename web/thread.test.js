@@ -2,7 +2,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry, promoteDelivered } = require('./thread.js');
+const { mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry, promoteDelivered, foldSummary, firstLine } = require('./thread.js');
 
 const h = (role, content, ts) => ({ role, content, ts, hist: true });
 const live = (role, content, ts) => ({ role, content, ts });
@@ -171,4 +171,16 @@ test('promotion is one-for-one and an older identical row proves nothing', () =>
   assert.strictEqual(promoteDelivered(conv, [h('me', 'yes', 1005)]), 1); // one row, one bubble
   assert.deepStrictEqual(conv.map((e) => e.status), ['delivered', 'sent']);
   assert.strictEqual(promoteDelivered([me('a', { ts: 1 })], [h('reply', 'a', 5)]), 0); // only user rows count
+});
+
+test('peer rows collapse to sender + first line; slash rows to the command', () => {
+  const names = { abc12345: 'tower' };
+  const nameOf = (id) => names[id] || '';
+  const peer = { role: 'peer', origin: 'peer:abc12345', content: '\n  [tower → dr] task x\nmore detail' };
+  assert.strictEqual(foldSummary(peer, nameOf), 'tower \u00b7 [tower → dr] task x');
+  // unknown session: a short id; an envelope-provided name wins
+  assert.strictEqual(foldSummary({ role: 'peer', origin: 'peer:zzzzzzzz-1792', content: 'hi' }, nameOf), 'zzzzzzzz \u00b7 hi');
+  assert.strictEqual(foldSummary({ role: 'peer', origin: 'peer:q', sender: 'ga-offload', content: 'eta' }, nameOf), 'ga-offload \u00b7 eta');
+  assert.strictEqual(foldSummary({ role: 'slash', content: '/model opus\nignored' }, nameOf), '/model opus');
+  assert.strictEqual(firstLine(null), '');
 });

@@ -39,11 +39,19 @@ type recallRow struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
 	TS      string `json:"ts"`
+	Title   string `json:"title"`
 	Body    string `json:"body"`
 	Queued  *bool  `json:"queued"`
 	RawType string `json:"raw_type"`
-	Meta    struct {
-		Delivery string `json:"delivery"`
+	// Origin and Seg are additive rows/v2 fields from forks that carry them
+	// (human | peer:<id> | hook | task-notification | system; the conversation id
+	// of the segment a row belongs to). Older binaries omit both.
+	Origin string `json:"origin"`
+	Seg    string `json:"seg"`
+	Meta   struct {
+		Delivery  string `json:"delivery"`
+		UserShell bool   `json:"user_shell"`
+		Boundary  string `json:"boundary"`
 	} `json:"meta"`
 }
 
@@ -64,10 +72,45 @@ func recallKeep(r recallRow) bool {
 	switch r.Kind {
 	case "user", "assistant":
 		return true
+	case "command":
+		_, ok := parseSlash(r.Body)
+		return ok
+	case "bash": // the Bash tool, unless the fork marks it as the operator's `!` line
+		return r.Meta.UserShell
 	case "system":
-		return r.RawType == "attachment/queued_command"
+		if r.Meta.Boundary != "" || r.RawType == "chain/boundary" {
+			return true
+		}
+		if r.RawType == "attachment/queued_command" {
+			return true
+		}
+		_, _, _, ok := recallPeer(r)
+		return ok
 	}
 	return false
+}
+
+// recallHiddenOrigin: rows the fork attributes to hooks, background-task
+// notifications or the system are never thread messages.
+func recallHiddenOrigin(o string) bool {
+	return o == "hook" || o == "task-notification" || o == "system"
+}
+
+// recallPeer reports whether a row is another session's message: by the fork's
+// origin field when present, else by the envelope (Claude's preamble,
+// agent-deck's [agent-deck from:], the cross-session form).
+func recallPeer(r recallRow) (from, name, text string, ok bool) {
+	if strings.HasPrefix(r.Origin, "peer:") {
+		from, name, text, ok = parsePeer(strings.TrimSpace(r.Body))
+		if !ok {
+			text = strings.TrimSpace(r.Body)
+		}
+		return strings.TrimPrefix(r.Origin, "peer:"), name, text, text != ""
+	}
+	if r.Origin != "" && r.Origin != "human" {
+		return "", "", "", false
+	}
+	return parsePeer(strings.TrimSpace(r.Body))
 }
 
 type recallSess struct {
@@ -267,25 +310,38 @@ func (sv *recallSess) index(id string) int {
 	return -1
 }
 
-// queuedPeerRE marks a queued prompt as another session's (or the TUI's), not
-// the operator's. rows/v2 has no origin field, so this is a stopgap for the
-// transcript path's origin.kind filter until the fork carries one.
-var queuedPeerRE = regexp.MustCompile(`^\s*(\[agent-deck from:|<cross-session-message|\[tui\] )`)
+// queuedTUIRE marks a queued prompt the TUI itself typed (suggestion picks), not
+// the operator's: left out of the thread.
+var queuedTUIRE = regexp.MustCompile(`^\s*\[tui\] `)
 
 // recallMessages maps rows/v2 rows onto the thread's histMsg rows, with the same
 // filters the transcript parser applies (synthetic-text gates, `!` lines folded
-// into bash rows). Peer messages and task-notifications are left out, as in the
-// transcript path (design §6.4 is open); rows/v2 has no origin field, so
-// a queued prompt is recognised as a peer's by its prefix (queuedPeerRE)
-// until the fork adds one.
+// into bash rows). Peer messages and slash commands become collapsed "peer" /
+// "slash" rows (operator decision D4); task-notifications stay out. A row's
+// origin field wins when the fork provides it, otherwise a peer is recognised by
+// its envelope (peers.go).
 func recallMessages(rows []recallRow) []histMsg {
 	var msgs []histMsg
 	for _, r := range rows {
 		ts := tsUnix(r.TS)
+		if recallHiddenOrigin(r.Origin) {
+			continue
+		}
 		switch r.Kind {
 		case "assistant":
 			if t := strings.TrimSpace(r.Body); t != "" {
 				msgs = append(msgs, histMsg{Role: "reply", Content: t, Ts: ts, ID: r.ID})
+			}
+		case "command":
+			if cmd, ok := parseSlash(r.Body); ok {
+				msgs = append(msgs, slashMsg(cmd, ts, r.ID))
+			}
+		case "bash": // only reached for the operator's `!` line (recallKeep)
+			raw, _ := json.Marshal(r.Body)
+			if cmd, so, se, isIn, ok := bashEntry(raw); ok {
+				msgs = addBash(msgs, cmd, so, se, isIn, ts, r.ID)
+			} else if t := strings.TrimSpace(r.Body); t != "" {
+				msgs = addBash(msgs, t, "", "", true, ts, r.ID)
 			}
 		case "user":
 			raw, _ := json.Marshal(r.Body)
@@ -296,17 +352,29 @@ func recallMessages(rows []recallRow) []histMsg {
 				msgs = addBash(msgs, cmd, so, se, isIn, ts, r.ID)
 				continue
 			}
+			queued := strings.HasPrefix(r.ID, "queue:") || r.Meta.Delivery != ""
+			if from, name, text, ok := recallPeer(r); ok {
+				msgs = append(msgs, peerMsg(from, name, text, ts, r.ID, queued))
+				continue
+			}
 			t := humanText(raw)
 			if t == "" {
 				continue
 			}
-			queued := strings.HasPrefix(r.ID, "queue:") || r.Meta.Delivery != ""
-			if queued && queuedPeerRE.MatchString(t) {
-				continue // a peer's message sent while busy: hidden, like the transcript path (design §6.4)
+			if queued && queuedTUIRE.MatchString(t) {
+				continue
 			}
 			msgs = append(msgs, histMsg{Role: "user", Content: t, Ts: ts, ID: r.ID, Queued: queued})
-		case "system": // attachment/queued_command (recallKeep)
-			if queuedPeerRE.MatchString(r.Body) {
+		case "system":
+			if r.Meta.Boundary != "" || r.RawType == "chain/boundary" {
+				msgs = append(msgs, histMsg{Role: "boundary", Kind: "boundary", Content: boundaryLabel(r), Ts: ts, ID: r.ID})
+				continue
+			}
+			if from, name, text, ok := recallPeer(r); ok {
+				msgs = append(msgs, peerMsg(from, name, text, ts, r.ID, r.RawType == "attachment/queued_command"))
+				continue
+			}
+			if r.RawType != "attachment/queued_command" || queuedTUIRE.MatchString(r.Body) {
 				continue
 			}
 			raw, _ := json.Marshal(r.Body)
@@ -318,6 +386,13 @@ func recallMessages(rows []recallRow) []histMsg {
 		}
 	}
 	return msgs
+}
+
+func boundaryLabel(r recallRow) string {
+	if r.Title != "" {
+		return r.Title
+	}
+	return "Conversation cleared"
 }
 
 // dropQueuedTwin removes the raw queued copy of a `!` line typed while the agent

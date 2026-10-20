@@ -13,8 +13,8 @@ import (
 
 // TestParseTranscriptQueuedCommand: prompts the operator typed while Claude was
 // working exist in the transcript only as attachment.queued_command lines. The
-// human ones become queued user rows; peer messages, task-notifications and
-// unrelated attachments produce nothing.
+// human ones become queued user rows and peer messages collapsed peer rows;
+// task-notifications and unrelated attachments produce nothing.
 func TestParseTranscriptQueuedCommand(t *testing.T) {
 	msgs, err := parseTranscriptFile("testdata/claude/queued-command.jsonl")
 	if err != nil {
@@ -28,6 +28,7 @@ func TestParseTranscriptQueuedCommand(t *testing.T) {
 		"user:start the kong upgrade",
 		"reply:Working on it.",
 		"user:ok so the upgrade is done, now back to the vpn issue",
+		"peer:[ad-hang → tower] Handoff (reply only).",
 		"user:what is needed for the ga-griffin-jobs ?",
 		"reply:Both noted.",
 	}
@@ -71,7 +72,7 @@ func TestQueuedCommandIncrementalTail(t *testing.T) {
 	next := time.Now().Add(2 * time.Second)
 	os.Chtimes(p, next, next)
 	all, err := parseTranscript(p)
-	if err != nil || len(all) != 5 || !all[2].Queued || all[2].Content != "ok so the upgrade is done, now back to the vpn issue" {
+	if err != nil || len(all) != 6 || !all[2].Queued || all[2].Content != "ok so the upgrade is done, now back to the vpn issue" {
 		t.Fatalf("after append: %v %+v", err, all)
 	}
 }
@@ -164,17 +165,20 @@ func TestRecallRowsMapped(t *testing.T) {
 		got = append(got, m.Kind+"/"+m.Origin+"/"+m.Role+":"+m.Content)
 	}
 	// "need" 3 is met without paging; the older cursor is still advertised.
-	want := "user/human/user:typed while idle|assistant//reply:Working on it.|user/human/user:ok so the upgrade is done|user/human/user:typed while busy, enqueue row|bash//bash:echo hi"
+	want := "user/human/user:typed while idle|assistant//reply:Working on it.|user/human/user:ok so the upgrade is done|peer/peer:60b6d3ab-1/peer:Handoff|peer/peer:60b6d3ab-1/peer:sent while busy|user/human/user:typed while busy, enqueue row|bash//bash:echo hi"
 	if strings.Join(got, "|") != want {
 		t.Fatalf("rows:\n got %q\nwant %q", strings.Join(got, "|"), want)
 	}
 	if !older {
 		t.Error("hasOlder should be true while a before cursor exists")
 	}
+	if p := msgs[3]; p.Sender != "" || p.Queued != true || p.Content != "Handoff" {
+		t.Errorf("peer row = %+v", p)
+	}
 	if q := msgs[2]; !q.Queued || !strings.HasPrefix(q.ID, "queue:2026-10-20T11:11:57.687Z:") {
 		t.Errorf("queued_command row = %+v", q)
 	}
-	if b := msgs[4]; b.Stdout != "hi" {
+	if b := msgs[6]; b.Stdout != "hi" {
 		t.Errorf("bash stdout not folded: %+v", b)
 	}
 	if msgs[0].ID != "u2" || msgs[1].ID != "as2" {
@@ -201,7 +205,7 @@ func TestRecallRowsMapped(t *testing.T) {
 	for _, m := range msgs {
 		contents = append(contents, m.Content)
 	}
-	wantC := "start the kong upgrade|typed while idle (edited)|ok so the upgrade is done|typed while busy, enqueue row|echo hi|Both noted."
+	wantC := "start the kong upgrade|typed while idle (edited)|ok so the upgrade is done|Handoff|sent while busy|typed while busy, enqueue row|echo hi|Both noted."
 	if strings.Join(contents, "|") != wantC {
 		t.Fatalf("after delta:\n got %q\nwant %q", strings.Join(contents, "|"), wantC)
 	}
@@ -276,7 +280,7 @@ func TestHistoryEndpointRowFields(t *testing.T) {
 	var resp struct {
 		Messages []map[string]any `json:"messages"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp.Messages) != 5 {
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp.Messages) != 6 {
 		t.Fatalf("decode: %v %s", err, rec.Body)
 	}
 	q := resp.Messages[2]
