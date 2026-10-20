@@ -2,7 +2,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { mergeFreshHistory, trimOverlap } = require('./thread.js');
+const { mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry } = require('./thread.js');
 
 const h = (role, content, ts) => ({ role, content, ts, hist: true });
 const live = (role, content, ts) => ({ role, content, ts });
@@ -112,4 +112,46 @@ test('newTailTurns: a genuine repeat bash row (same cmd and output) still counts
   const b = { role: 'bash', content: 'date', stdout: 'x', stderr: '', ts: 1, hist: true };
   const conv = [{ ...b }];
   assert.strictEqual(newTailTurns(conv, [b, { ...b }]).length, 1);
+});
+
+// ----- phone-message delivery status -----
+const me = (content, extra) => ({ role: 'me', content, queued: true, status: 'sent', ...extra });
+
+test('ask-state walks a bubble sent -> queued (n) -> delivering -> delivered', () => {
+  const conv = [me('hi')];
+  applyAskState(conv, { requestId: 'r1', state: 'sent' });
+  assert.strictEqual(conv[0].requestId, 'r1'); // tagged even if it beat the POST response
+  assert.strictEqual(sendStatusLabel(conv[0]), 'sent');
+  applyAskState(conv, { requestId: 'r1', state: 'queued', position: 3 });
+  assert.strictEqual(sendStatusLabel(conv[0]), 'queued (3)');
+  applyAskState(conv, { requestId: 'r1', state: 'delivering' });
+  assert.strictEqual(conv[0].queued, true);
+  applyAskState(conv, { requestId: 'r1', state: 'delivered' });
+  assert.strictEqual(sendStatusLabel(conv[0]), 'delivered');
+  assert.strictEqual(conv[0].queued, false);
+});
+
+test('events land on their own bubble, not a neighbour', () => {
+  const conv = [me('one', { requestId: 'r1' }), me('two', { requestId: 'r2' })];
+  applyAskState(conv, { requestId: 'r2', state: 'queued', position: 2 });
+  assert.strictEqual(conv[0].status, 'sent');
+  assert.strictEqual(conv[1].status, 'queued');
+  assert.strictEqual(applyAskState(conv, { requestId: 'nope', state: 'delivered' }), null);
+});
+
+test('failed shows its reason and offers Retry; unconfirmed does not', () => {
+  const conv = [me('a', { requestId: 'r1' }), me('b', { requestId: 'r2' })];
+  applyAskState(conv, { requestId: 'r1', state: 'failed', error: 'Not delivered: target not running', retryable: true });
+  assert.strictEqual(sendStatusLabel(conv[0]), 'failed: Not delivered: target not running');
+  assert.strictEqual(conv[0].queued, false);
+  assert.ok(canRetry(conv[0]));
+  applyAskState(conv, { requestId: 'r2', state: 'unconfirmed' });
+  assert.ok(!canRetry(conv[1])); // may already be in the composer: no blind resend
+  assert.match(sendStatusLabel(conv[1]), /unconfirmed/);
+});
+
+test('a reply clearing queued silences a stale in-flight label', () => {
+  const e = me('x', { status: 'queued', position: 1 });
+  e.queued = false;
+  assert.strictEqual(sendStatusLabel(e), '');
 });

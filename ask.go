@@ -210,90 +210,24 @@ func (s *server) handleCodexAsk(w http.ResponseWriter, r *http.Request, se sessi
 	})
 }
 
-// runTurn sends the prompt with --wait in a background goroutine (off the HTTP
-// request) so a multi-minute turn is fine, then publishes the reply over SSE.
-// --wait reuses agent-deck's own turn-completion + fresh-output logic, so we
-// don't reimplement busy/idle detection.
+// runTurn hands the prompt to agent-deck's durable send queue and returns at
+// once (see askqueue.go), so the per-session worker is never held for a turn.
+// agent-deck delivers queued sends in order, at most once, when the composer
+// can take them (Claude queues a mid-turn send natively and runs it after the
+// current turn); sendTracker follows each one and publishes
+// queued/delivering/delivered/failed. The reply reaches the PWA through the
+// watcher reply-settle push and the transcript reconcile, not a per-ask event.
 func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
-	ctx, cancel := context.WithTimeout(withProfile(context.Background(), prof), maxTurn)
+	ctx, cancel := context.WithTimeout(withProfile(context.Background(), prof), 30*time.Second)
 	defer cancel()
-
-	// If the session is mid-turn, deliver with --no-wait: agent-deck injects the
-	// text into Claude's live composer immediately and Claude QUEUES it natively
-	// (runs it after the current turn). The alternative (--wait) gates on the
-	// session going idle first (waitForAgentReady), which stalls indefinitely when
-	// the session is driven elsewhere (e.g. the laptop) and also blocks this
-	// session's queue. --no-wait still verifies delivery (agent-deck #876), and the
-	// reply surfaces via the watcher reply-settle + transcript reconcile.
-	if s.sessionBusy(ctx, se.ID) {
-		dctx, dcancel := context.WithTimeout(withProfile(context.Background(), prof), 30*time.Second)
-		defer dcancel()
-		log.Printf("ask: runTurn QUEUE (busy) session=%s req=%s text=%q", se.ID, reqID, text)
-		if err := s.sendNoWait(dctx, se.ID, text); err != nil {
-			log.Printf("ask: runTurn QUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
-			msg := "couldn't deliver while busy: " + err.Error()
-			if f := sendErrorFields(err); f["delivery"] == "menu_open" || f["delivery"] == "composer_blocked" {
-				msg = "Not sent: a menu or permission prompt is open in the session. Answer it first, then resend."
-			}
-			ev := map[string]any{
-				"type": "reply", "requestId": reqID, "sessionId": se.ID,
-				"error": msg, "ts": time.Now().Unix(),
-			}
-			for k, v := range sendErrorFields(err) {
-				ev[k] = v
-			}
-			s.hub.publish(ev)
-			return
-		}
-		s.hub.publish(map[string]any{
-			"type": "ask-state", "state": "queued",
-			"requestId": reqID, "sessionId": se.ID, "ts": time.Now().Unix(),
-		})
+	rec, err := s.enqueueSend(ctx, se.ID, text)
+	if err != nil {
+		log.Printf("ask: runTurn ENQUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
+		s.publishAskFailed(se, reqID, err)
 		return
 	}
-
-	log.Printf("ask: runTurn START session=%s req=%s text=%q", se.ID, reqID, text)
-	// --json makes agent-deck emit its delivery status object first and the
-	// reply body after it; adeckSend hands back only the body.
-	out, err := s.sendMessage(ctx, se.ID, text,
-		"--wait", "--timeout", fmt.Sprintf("%.0fs", maxTurn.Seconds()))
-	if err != nil {
-		log.Printf("ask: runTurn ERROR session=%s req=%s: %v", se.ID, reqID, err)
-		ev := map[string]any{
-			"type": "reply", "requestId": reqID, "sessionId": se.ID,
-			"error": err.Error(), "ts": time.Now().Unix(),
-		}
-		for k, v := range sendErrorFields(err) {
-			ev[k] = v
-		}
-		s.hub.publish(ev)
-		return
-	}
-	reply := cleanReplyContent(strings.TrimRight(out, "\n"))
-	log.Printf("ask: runTurn OK session=%s req=%s replyLen=%d", se.ID, reqID, len(reply))
-	s.hub.publish(map[string]any{
-		"type": "reply", "requestId": reqID, "sessionId": se.ID,
-		"content": reply, "ts": time.Now().Unix(),
-	})
-}
-
-// sessionBusy reports whether the session is mid-turn, to choose the delivery
-// mode for runTurn. It reads the pane FRESH (not just the activity cache) so a
-// stale entry can't misroute delivery; on a read failure it falls back to the
-// cache, else assumes idle (the --wait path, which gates for readiness anyway).
-func (s *server) sessionBusy(ctx context.Context, id string) bool {
-	pctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-	defer cancel()
-	pane, err := s.sessionPane(pctx, id)
-	if err != nil {
-		if st, ok := s.acts.get(id); ok {
-			return st.Working
-		}
-		return false
-	}
-	parsed := parseActivity(pane)
-	s.acts.update(id, parsed) // keep the cache warm with this read
-	return parsed.Working
+	log.Printf("ask: runTurn QUEUED session=%s req=%s send=%s text=%q", se.ID, reqID, rec.SendID, text)
+	s.trackSend(&trackedSend{RequestID: reqID, SessionID: se.ID, SendID: rec.SendID, Profile: prof}, rec)
 }
 
 // printingSlashes are slash commands that render output INTO the pane (rather

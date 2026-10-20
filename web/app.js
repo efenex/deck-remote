@@ -1860,7 +1860,17 @@
         body.textContent = e.content;
         row.appendChild(body);
         convo.appendChild(row);
-        if (e.queued || closesRun(e, conv[i + 1])) convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
+        if (e.queued || e.status === 'failed' || e.status === 'unconfirmed' || closesRun(e, conv[i + 1])) {
+          const label = DeckThread.sendStatusLabel(e);
+          const ts = el('div', 'ts' + (e.status === 'failed' ? ' failed' : ''), fmtTime(e.ts) + (label ? ' · ' + label : ''));
+          if (DeckThread.canRetry(e)) {
+            const retry = el('button', 'retry', 'Retry');
+            retry.type = 'button';
+            retry.addEventListener('click', () => retrySend(id, e));
+            ts.appendChild(retry);
+          }
+          convo.appendChild(ts);
+        }
       } else if (e.role === 'bash') {
         // Operator's `!` shell line: compact `$ cmd` + output block (escaped).
         const html = DeckThread.bashBlockHTML(e);
@@ -1975,7 +1985,8 @@
 
   async function doSend(id, text, slash, delivery) {
     const conv = ensureConvo(id);
-    conv.push({ role: 'me', content: text, ts: Date.now() / 1000, queued: true });
+    const bubble = { role: 'me', content: text, ts: Date.now() / 1000, queued: true, status: slash ? '' : 'sent' };
+    conv.push(bubble);
     // Non-blocking pending state shown immediately.
     state.pending.set(id, { ctx: slash ? text : 'thinking' });
     renderConvo(id);
@@ -1989,13 +2000,23 @@
         const pend = state.pending.get(id) || {};
         pend.requestId = r.requestId;
         state.pending.set(id, pend);
+        if (!bubble.requestId) bubble.requestId = r.requestId;
       }
     } catch (e) {
       state.pending.delete(id);
-      conv.push({ role: 'error', content: 'Send failed: ' + e.message, ts: Date.now() / 1000 });
+      bubble.queued = false; bubble.status = 'failed'; bubble.error = 'Send failed: ' + e.message; bubble.retryable = true;
       renderConvo(id);
       renderDeck();
     }
+  }
+
+  // Re-send a message agent-deck reported failed (nothing was typed, so a
+  // resend cannot double-deliver). The failed bubble is replaced by the new one.
+  function retrySend(id, entry) {
+    const conv = ensureConvo(id);
+    const i = conv.indexOf(entry);
+    if (i >= 0) conv.splice(i, 1);
+    sendAsk(id, entry.content);
   }
 
   // ----- attention: guarded approvals + request_user_input forms -----
@@ -2247,18 +2268,22 @@
     const id = ev.sessionId;
     if (ev.type === 'ask-state' && (ev.state === 'sent' || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
+      if (ev.state === 'sent') DeckThread.applyAskState(ensureConvo(id), ev);
       if (id && !state.pending.has(id)) state.pending.set(id, { ctx: 'thinking', requestId: ev.requestId });
       renderConvo(id);
       if (ev.state === 'steered' && id && state.openSheetId === id) toast('Steered', 'Injected into the current Codex turn.');
-    } else if (ev.type === 'ask-state' && ev.state === 'queued') {
-      // Busy-session delivery: the message was injected into Claude's live composer
-      // and queued natively (runs after the current turn). No "reply" event follows
-      // this requestId — the reply arrives via the transcript reconcile — so clear
-      // the per-message pending to avoid a perpetual "thinking" spinner.
+    } else if (ev.type === 'ask-state' && ['queued', 'delivering', 'delivered', 'unconfirmed', 'failed'].includes(ev.state)) {
+      // Delivery progress of a queued send (agent-deck's durable queue). The
+      // reply arrives through the transcript reconcile / reply push, never as
+      // a per-request "reply" event, so drop the per-message "thinking"
+      // spinner; the bubble itself carries the status (queued (n) / delivered
+      // / failed + Retry).
+      const bubble = DeckThread.applyAskState(ensureConvo(id), ev);
       state.pending.delete(id);
       renderConvo(id);
       renderDeck();
-      if (state.openSheetId === id) toast('Queued', 'The agent will run it after the current turn.');
+      if (ev.state === 'failed') notifyForeground(id, 'error', 'Message not delivered', ev.error || '');
+      else if (ev.state === 'queued' && !ev.position && state.openSheetId === id && bubble) toast('Queued', 'The agent will run it after the current turn.');
     } else if (ev.type === 'ask-state' && ev.state === 'stopping') {
       if (id && state.openSheetId === id) toast('Stopping', 'Interrupt sent; waiting for rollout confirmation.');
     } else if (ev.type === 'reply') {

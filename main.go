@@ -138,6 +138,7 @@ func main() {
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 	defer watchCancel()
 	go srv.runWatcher(watchCtx)
+	srv.resumeSends()
 	go srv.runTowerWatch(watchCtx)
 	go srv.warmSessions()
 	go srv.warmTower()
@@ -208,6 +209,7 @@ type server struct {
 	sess       *sessionsCache                                              // stale-while-revalidate session-list bodies (sessions.go)
 	lists      *listCache                                                  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
 	views      *viewCache                                                  // TTL-cached TUI view filter per profile (viewfilter.go)
+	sends      *sendTracker                                                // queued phone messages being followed to delivery (askqueue.go)
 	replies    *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
@@ -249,6 +251,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		proxy:     proxy,
 		hub:       newSSEHub(),
 		queue:     newSessionQueues(),
+		sends:     newSendTracker(stateDir(home)),
 		acts:      newActivityCache(),
 		recall:    newRecallStore(),
 		codex:     newCodexRolloutStore(),

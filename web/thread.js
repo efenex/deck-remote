@@ -99,7 +99,56 @@
     });
   }
 
-  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap };
+
+  // ----- phone-message delivery status -----
+  // A bubble the operator sent from the phone walks sent (server accepted) ->
+  // queued (n) (waiting its turn in agent-deck's queue) -> delivering ->
+  // delivered (in the session's transcript), or failed / unconfirmed.
+  const IN_FLIGHT = { sent: 1, queued: 1, delivering: 1 };
+
+  // Apply an `ask-state` SSE event to the matching 'me' bubble. The bubble is
+  // matched by requestId; the first event of a send (state "sent") can beat the
+  // POST response that tags it, so an untagged 'sent' bubble is claimed too.
+  // Returns the bubble, or null when none matches.
+  function applyAskState(conv, ev) {
+    let e = null;
+    for (let i = conv.length - 1; i >= 0; i--) {
+      if (conv[i].role === 'me' && conv[i].requestId === ev.requestId) { e = conv[i]; break; }
+    }
+    if (!e) {
+      for (let i = 0; i < conv.length; i++) {
+        if (conv[i].role === 'me' && !conv[i].requestId && conv[i].status === 'sent') { e = conv[i]; break; }
+      }
+      if (e) e.requestId = ev.requestId;
+    }
+    if (!e) return null;
+    e.status = ev.state;
+    e.position = ev.position || 0;
+    e.error = ev.error || '';
+    e.retryable = !!ev.retryable;
+    e.queued = !!IN_FLIGHT[ev.state];
+    return e;
+  }
+
+  function sendStatusLabel(e) {
+    // A reply/slash-result clears `queued`: stale in-flight statuses go quiet.
+    if (IN_FLIGHT[e.status] && !e.queued) return '';
+    switch (e.status) {
+      case 'queued': return e.position ? 'queued (' + e.position + ')' : 'queued';
+      case 'delivering': return 'delivering…';
+      case 'delivered': return 'delivered';
+      case 'unconfirmed': return 'unconfirmed — check the terminal before resending';
+      case 'failed': return 'failed' + (e.error ? ': ' + e.error : '');
+      case 'sent': return 'sent';
+      default: return e.queued ? 'sent' : '';
+    }
+  }
+
+  // Only a send agent-deck says typed nothing may be resent: an "unconfirmed"
+  // one can already be sitting in the composer.
+  function canRetry(e) { return e.status === 'failed' && e.retryable !== false; }
+
+  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);
