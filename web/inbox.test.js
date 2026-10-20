@@ -198,4 +198,6 @@ test('A refused doc shows a Not readable toast and leaves the viewer closed', as
   env.docLs.click.forEach((fn) => fn({ target: a, preventDefault() {} }));
   await new Promise((r) => setTimeout(r, 20));
   assert.ok(!env.els.has('#docTitle'), 'the viewer was never populated');
+  const toastEl = env.ctx.document.body.children.find((c) => /Not readable/.test(c.innerHTML));
+  assert.ok(toastEl && toastEl.innerHTML.includes('path is outside the allowed roots'), 'toast carries the server refusal');
 });
