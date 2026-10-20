@@ -510,6 +510,37 @@
   .token-screen .btn-enable{max-width:340px}
   .token-screen .err{color:var(--red);font-size:12.5px;min-height:16px}
 
+
+  /* Document viewer: a full-screen overlay (not a tab) above the sheet, so the
+     thread / tower tab underneath is exactly where it was on back. */
+  .docview{position:fixed;inset:0;z-index:90;background:var(--panel);display:flex;flex-direction:column;
+    height:100%;height:100dvh;overflow:hidden;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
+  .docview[hidden]{display:none}
+  .docbar{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:calc(6px + var(--safe-top)) 12px 8px;border-bottom:1px solid var(--border)}
+  .docbar .doc-titles{flex:1;min-width:0}
+  .docbar .doc-title{font-size:17px;font-weight:800;color:var(--title);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .docbar .doc-sub{font-size:11.5px;color:var(--muted);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+  .docscroll{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:14px 16px calc(24px + var(--safe-bottom))}
+  .docbody{max-width:78ch;margin:0 auto;color:var(--text);font-size:var(--font-msg);line-height:var(--lh-msg);overflow-wrap:anywhere}
+  .docbody p{margin:0 0 10px}
+  .docbody code{background:rgba(122,162,247,.16);color:var(--accent);padding:1px 5px;border-radius:calc(5px*var(--round));font-size:12.5px;font-family:var(--mono)}
+  .docbody .md-h{font-weight:700;color:var(--title);margin:16px 0 6px}
+  .docbody .md-h1{font-size:1.5em;font-weight:800;border-bottom:1px solid var(--border);padding-bottom:4px}
+  .docbody .md-h2{font-size:1.25em}.docbody .md-h3{font-size:1.1em}
+  .docbody .md-h:first-child{margin-top:0}
+  .docbody ul,.docbody ol{margin:4px 0 10px;padding-left:22px}
+  .docbody li{margin:3px 0}.docbody li>ul,.docbody li>ol{margin:2px 0 4px}
+  .docbody .code pre code{background:none;color:inherit;padding:0;border-radius:0;font-size:inherit}
+  .md-table{overflow-x:auto;margin:6px 0 12px;-webkit-overflow-scrolling:touch}
+  .md-table table{border-collapse:collapse;font-size:.93em}
+  .md-table th,.md-table td{border:1px solid var(--border);padding:5px 9px;text-align:left;vertical-align:top}
+  .md-table th{background:var(--card);color:var(--title);font-weight:700;white-space:nowrap}
+  .docbody pre.doc-pre{margin:0;font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg)}
+  .docbody .dl.hit{background:rgba(224,175,104,.22);box-shadow:-3px 0 0 var(--yellow)}
+  a.doclink{color:var(--cyan);text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;overflow-wrap:anywhere}
+  a.doclink code{color:inherit}
+  html[data-theme=light] a.doclink{color:var(--accent)}
+
   /* in-app toast (foreground notify / errors) */
   .toast{position:fixed;left:12px;right:12px;top:calc(8px + var(--safe-top));z-index:300;background:var(--toast-bg);
     backdrop-filter:blur(12px);border:1px solid var(--border);border-radius:calc(16px*var(--round));padding:12px 14px;
@@ -765,6 +796,15 @@ html[data-turns=block] .ts{margin-left:4px}
     <button class="tab" data-tab="tower" id="tabTower" hidden><svg class="ico" viewBox="0 0 24 24"><path d="M9 21V9l3-6 3 6v12"/><path d="M6 21h12M9 13h6M9 17h6"/></svg>Tower<span class="badge" id="towerBadge" hidden></span></button>
     <button class="tab" data-tab="settings"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>Settings</button>
   </div>
+</div>
+
+<!-- DOC viewer overlay (GET /api/rc/doc); opened from .doclink anywhere -->
+<div class="docview" id="docView" hidden role="dialog" aria-label="Document">
+  <div class="docbar">
+    <button class="icon-btn sheet-back" id="docBack" type="button" aria-label="Back"><span class="gi">‹</span></button>
+    <div class="doc-titles"><div class="doc-title" id="docTitle"></div><div class="doc-sub" id="docSub"></div></div>
+  </div>
+  <div class="docscroll" id="docScroll"><div class="docbody" id="docBody"></div></div>
 </div>
 
 <!-- ?v= matches CACHE in sw.js; bump both on any web change. Without it a

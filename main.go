@@ -56,6 +56,8 @@ type config struct {
 	towerSession     string // agent-deck session (id or title) that receives reply-to-ask messages
 	towerRoot        string // tower checkout (journal.py, tower_tui.py); default derived from towerOverview
 	towerModelScript string // scripts/tower_model.py; default next to the binary
+
+	docRoots string // comma-separated roots the doc viewer may read (doc.go); empty = defaultDocRoots
 }
 
 func loadConfig() config {
@@ -83,6 +85,7 @@ func loadConfig() config {
 	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")
 	flag.StringVar(&c.towerRoot, "tower-root", def("DECK_REMOTE_TOWER_ROOT", ""), "tower checkout holding scripts/journal.py + tower_tui.py (default: derived from --tower-overview)")
 	flag.StringVar(&c.towerModelScript, "tower-model-script", def("DECK_REMOTE_TOWER_MODEL_SCRIPT", ""), "path to scripts/tower_model.py (default: next to the binary)")
+	flag.StringVar(&c.docRoots, "doc-roots", def("DECK_REMOTE_DOC_ROOTS", ""), "comma-separated directories the doc viewer (GET /api/rc/doc) may read; ~/ expands; default "+defaultDocRoots)
 	flag.Parse()
 
 	if c.token == "" {
@@ -305,6 +308,7 @@ func (s *server) routes() http.Handler {
 	// tower overview tab (tower.go): reads on any token, actions on act-cap device token + tailscale identity
 	mux.Handle("GET /api/rc/tower", s.auth(http.HandlerFunc(s.handleTower)))
 	mux.Handle("GET /api/rc/tower/whoami", s.auth(http.HandlerFunc(s.handleTowerWhoami)))
+	mux.Handle("GET /api/rc/doc", s.auth(http.HandlerFunc(s.handleDoc)))
 	mux.Handle("GET /api/rc/version", s.auth(http.HandlerFunc(s.handleVersion)))
 	mux.Handle("GET /api/rc/tower/model", s.auth(http.HandlerFunc(s.handleTowerModel)))
 	mux.Handle("POST /api/rc/tower/act", s.auth(s.authAct(http.HandlerFunc(s.handleTowerAct))))

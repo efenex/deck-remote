@@ -13,6 +13,7 @@ function makeEnv(notifs, seenAt, routes) {
   if (seenAt != null) store.set('dr-inbox-seen-at', String(seenAt));
   const listeners = new Map(); // selector -> {event -> fn}
   const els = new Map();
+  const docLs = {};
   const mkEl = (sel) => {
     const e = {
       sel, hidden: false, textContent: '', className: '', dataset: {}, children: [], style: {}, _ls: {}, _html: '',
@@ -27,7 +28,7 @@ function makeEnv(notifs, seenAt, routes) {
   };
   const get = (sel) => { if (!els.has(sel)) els.set(sel, mkEl(sel)); return els.get(sel); };
   const document = {
-    querySelector: get, querySelectorAll: () => [], createElement: () => mkEl('new'), createTextNode: (t) => ({ textContent: String(t), children: [] }), addEventListener() {},
+    querySelector: get, querySelectorAll: () => [], createElement: () => mkEl('new'), createTextNode: (t) => ({ textContent: String(t), children: [] }), addEventListener(ev, fn) { (docLs[ev] = docLs[ev] || []).push(fn); },
     body: mkEl('body'), documentElement: mkEl('html'), visibilityState: 'visible', getElementById: get,
   };
   const win = { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
@@ -43,12 +44,12 @@ function makeEnv(notifs, seenAt, routes) {
     navigator: { serviceWorker: { addEventListener() {}, register: async () => ({}), ready: new Promise(() => {}) }, clipboard: {} }, location: { href: 'http://x/', origin: 'http://x', search: '', hash: '', pathname: '/' },
     history: { replaceState() {} }, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
     URL, URLSearchParams, EventSource: function () { this.close = () => {}; }, WebSocket: function () { this.close = () => {}; },
-    DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: { render: (s) => String(s) }, DeckThread: {}, DeckVersion: require('./version.js'), Notification: { permission: 'default' },
+    DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckVersion: require('./version.js'), Notification: { permission: 'default' },
     confirm: () => true, requestAnimationFrame: (f) => f(), AbortController, Date, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Error,
   };
   ctx.window = Object.assign(win, ctx);
   ctx.self = ctx.globalThis = ctx.window;
-  return { ctx, store, listeners, els, mkEl };
+  return { ctx, store, listeners, els, mkEl, docLs };
 }
 
 test('Mark all read moves the cursor to the newest notification and clears the badge', async () => {
@@ -160,4 +161,41 @@ test('Tower badge paints from the cheap overview without waiting for the slow mo
   await new Promise((r) => setTimeout(r, 200));
   assert.strictEqual(env.els.get('#towerBadge').textContent, '3', 'badge is set while the model is still loading');
   assert.ok(env.els.get('#towerList').children.length > 0, 'the legacy list shows meanwhile');
+});
+
+test('Tapping a .doclink opens the viewer via /api/rc/doc (tower tab: no session; thread: the open session)', async () => {
+  const calls = [];
+  const env = makeEnv([], null, async (u) => {
+    if (u.includes('/api/rc/doc')) { calls.push(u); return { path: '/r/docs/a.md', root: '/r', size: 5, mtime: '', content: '# hi\n' }; }
+  });
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 50));
+  let prevented = false;
+  const tap = (anchorPath, line, inTower) => {
+    const a = { dataset: { path: anchorPath, line }, closest: (sel) => (sel === 'a.doclink' ? a : (inTower && sel === '#screenTower' ? a : null)) };
+    env.docLs.click.forEach((fn) => fn({ target: a, preventDefault() { prevented = true; } }));
+  };
+  tap('docs/a.md', '12', true);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(prevented);
+  assert.strictEqual(calls.length, 1);
+  assert.ok(calls[0].includes('path=docs%2Fa.md') && !calls[0].includes('session='), calls[0]);
+  assert.strictEqual(env.els.get('#docView').hidden, false, 'overlay opened');
+  assert.strictEqual(env.els.get('#docTitle').textContent, 'a.md');
+});
+
+test('A refused doc shows a Not readable toast and leaves the viewer closed', async () => {
+  const env = makeEnv([], null, async () => undefined);
+  const baseFetch = env.ctx.fetch;
+  env.ctx.fetch = async (u, o) => (String(u).includes('/api/rc/doc')
+    ? { ok: false, status: 403, text: async () => JSON.stringify({ error: 'path is outside the allowed roots' }) }
+    : baseFetch(u, o));
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  await new Promise((r) => setTimeout(r, 50));
+  const a = { dataset: { path: '/etc/x.md' }, closest: (sel) => (sel === 'a.doclink' ? a : null) };
+  env.docLs.click.forEach((fn) => fn({ target: a, preventDefault() {} }));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(!env.els.has('#docTitle'), 'the viewer was never populated');
 });

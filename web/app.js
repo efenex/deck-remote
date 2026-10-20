@@ -230,6 +230,109 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Document viewer. Any `a.doclink` (rendered by markdown.js, or built by
+  // linkifyDocs for plain-text rows) opens a full-screen overlay that GETs
+  // /api/rc/doc. There is no up-front existence check: the server decides on
+  // tap and a refusal shows a "Not readable" toast. Links inside a document
+  // resolve relative to that document; elsewhere, relative paths resolve against
+  // the open session's project directory (or tower's checkout in the Tower tab).
+  // ---------------------------------------------------------------------------
+  const docv = { stack: [], seq: 0 };
+
+  // Plain text -> parent, with document references as .doclink anchors.
+  function linkifyDocs(parent, text) {
+    text = String(text == null ? '' : text);
+    const re = new RegExp(DeckMarkdown.DOC_PATH.source, 'gi');
+    let pos = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      if (!DeckMarkdown.docOK(m[2])) continue;
+      const start = m.index + m[1].length;
+      if (start > pos) parent.append(document.createTextNode(text.slice(pos, start)));
+      const a = el('a', 'doclink', m[2] + (m[3] ? ':' + m[3] : ''));
+      a.href = '#';
+      a.dataset.path = m[2];
+      if (m[3]) a.dataset.line = m[3];
+      parent.append(a);
+      pos = m.index + m[0].length;
+    }
+    if (pos < text.length) parent.append(document.createTextNode(text.slice(pos)));
+    return parent;
+  }
+
+  function docDir(p) { const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : '/'; }
+  function docJoin(dir, rel) {
+    const out = [];
+    (dir + '/' + rel).split('/').forEach((seg) => {
+      if (!seg || seg === '.') return;
+      if (seg === '..') out.pop(); else out.push(seg);
+    });
+    return '/' + out.join('/');
+  }
+
+  function showDoc(d, line) {
+    const view = $('#docView');
+    $('#docTitle').textContent = d.path.split('/').pop();
+    $('#docSub').textContent = d.path + ' · ' + (d.size < 1024 ? d.size + ' B' : Math.round(d.size / 1024) + ' KB');
+    const body = $('#docBody');
+    body.innerHTML = '';
+    if (/\.(?:md|markdown)$/i.test(d.path)) {
+      body.innerHTML = DeckMarkdown.render(d.content, { levels: true });
+    } else {
+      const pre = el('pre', 'doc-pre');
+      d.content.split('\n').forEach((t, i) => {
+        const row = el('span', 'dl', t + '\n');
+        row.id = 'dl-' + (i + 1);
+        pre.append(row);
+      });
+      body.append(pre);
+    }
+    view.hidden = false;
+    const sc = $('#docScroll');
+    sc.scrollTop = 0;
+    // Line targets work for .txt/.log (one span per source line); rendered
+    // markdown has no source mapping, so it opens at the top.
+    const hit = line && $('#dl-' + line, body);
+    if (hit) { hit.classList.add('hit'); hit.scrollIntoView({ block: 'center' }); }
+  }
+
+  async function openDoc(path, line, session) {
+    const seq = ++docv.seq;
+    let q = '/api/rc/doc?path=' + encodeURIComponent(path);
+    if (session) q += '&session=' + encodeURIComponent(session);
+    let d;
+    try { d = await api('GET', q); } catch (e) {
+      if (seq === docv.seq) toast('Not readable', path.split('/').pop() + ': ' + (e.message || String(e)));
+      return;
+    }
+    if (seq !== docv.seq) return; // a newer tap won
+    if (!$('#docView').hidden) docv.stack.push($('#docBody').dataset.doc);
+    $('#docBody').dataset.doc = d.path;
+    showDoc(d, line);
+  }
+
+  async function docBack() {
+    const prev = docv.stack.pop();
+    if (!prev) { $('#docView').hidden = true; $('#docBody').innerHTML = ''; delete $('#docBody').dataset.doc; docv.seq++; return; }
+    try { const d = await api('GET', '/api/rc/doc?path=' + encodeURIComponent(prev)); $('#docBody').dataset.doc = d.path; showDoc(d); }
+    catch (e) { toast('Not readable', e.message || String(e)); }
+  }
+
+  $('#docBack').addEventListener('click', docBack);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#docView').hidden) docBack(); });
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest && e.target.closest('a.doclink');
+    if (!a) return;
+    e.preventDefault();
+    let path = a.dataset.path;
+    let session = '';
+    const cur = $('#docBody').dataset.doc;
+    if (a.closest('#docView') && cur && !path.startsWith('/') && !path.startsWith('~/')) path = docJoin(docDir(cur), path);
+    else if (!a.closest('#docView') && !a.closest('#screenTower')) session = state.openSheetId || '';
+    openDoc(path, a.dataset.line, session);
+  });
+
+  // ---------------------------------------------------------------------------
   // Tower tab (optional feature): the operator's "what's open" overview, served
   // by deck-remote from tower's overview.json (--tower-overview). Copy is free;
   // "Reply" answers an open ask and needs an act-capable device token plus the
@@ -348,7 +451,7 @@
     String(text || '').replace(TOWER_URL, (u, i) => {
       let end = u.length;
       while (end > 0 && '.,;:)'.includes(u[end - 1])) end--;
-      if (i > pos) parent.append(document.createTextNode(text.slice(pos, i)));
+      if (i > pos) linkifyDocs(parent, text.slice(pos, i));
       const a = document.createElement('a');
       a.href = u.slice(0, end); a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u.slice(0, end);
       a.className = 'tlink';
@@ -356,7 +459,7 @@
       pos = i + end;
       return u;
     });
-    if (pos < text.length) parent.append(document.createTextNode(text.slice(pos)));
+    if (pos < text.length) linkifyDocs(parent, text.slice(pos));
     return parent;
   }
 
@@ -487,13 +590,13 @@
         card.append(towerBlocks(it.blocks));
         if ((it.tail_blocks || []).length) { const t = towerBlocks(it.tail_blocks); t.classList.add('ttail'); card.append(t); }
       } else {
-        card.append(el('div', 'tbody', it.text || ''));
+        card.append(towerRich(el('div', 'tbody'), it.text || ''));
         if (it.tail) card.append(towerStyle(el('div', 'tline ttail', '↳ ' + it.tail), 'dim'));
       }
       head.addEventListener('click', () => { if (expanded) tower.open.delete(it.key); else tower.open.add(it.key); renderTower(); });
     } else if (it.kind === 'suggest') {
       head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta ? '[' + it.meta + ']' : '')));
-      card.append(head, el('div', 'tbody ttitle', it.title || ''));
+      card.append(head, towerRich(el('div', 'tbody ttitle'), it.title || ''));
       [['why', it.why_blocks], ['action', it.action_blocks]].forEach(([label, bl]) => {
         if (!bl || !bl.length) return;
         const w = el('div', 'twhy'); w.append(towerStyle(el('span', 'tlabel', label), 'accent'), towerBlocks(bl)); card.append(w);
@@ -569,7 +672,7 @@
     const askCard = (w) => {
       const card = towerCard(w.urgent ? 'urgent' : '',
         '<span class="tid">' + esc(w.id) + '</span><span class="tmeta">' + (w.urgent ? 'URGENT · ' : '') + esc(w.goal || '-') + ' · open ' + esc(towerAgo(w.opened)) + (w.blocks && w.blocks.length ? ' · blocks ' + esc(w.blocks.join(', ')) : '') + '</span>');
-      const body = el('div', 'tbody', w.detail || w.text || '');
+      const body = towerRich(el('div', 'tbody'), w.detail || w.text || '');
       card.append(body);
       const bodyRow = el('div', 'tcmd');
       const cb = el('button', 'tcopy', 'Copy'); cb.addEventListener('click', () => towerCopy(w.detail || w.text || '', cb));
@@ -623,7 +726,7 @@
       const runMin = Math.round((Date.now() - Date.parse(t.dispatched_at)) / 60000);
       const card = towerCard(t.overdue ? 'overdue' : '',
         '<span class="tid">' + esc(t.id) + '</span><span class="tmeta">' + esc(t.owner || '?') + ' · ' + (isNaN(runMin) ? '?' : runMin) + ' m' + (t.expected_min ? ' / ' + esc(t.expected_min) + ' m' : '') + (t.eta ? ' · eta ' + esc(t.eta) + (t.eta_step ? ' ' + esc(t.eta_step) : '') : '') + '</span>');
-      card.append(el('div', 'tbody', t.title || ''));
+      card.append(towerRich(el('div', 'tbody'), t.title || ''));
       if (t.progress) card.append(el('div', 'thint', '↳ ' + t.progress + (t.progress_at ? ' (' + t.progress_at + ')' : '')));
       list.append(card);
     });
@@ -1867,7 +1970,7 @@
         const row = el('div', 'msg me' + (e.queued ? ' queued' : ''));
         row.appendChild(el('span', 'gutter', '›'));
         const body = el('div', 'body');
-        body.textContent = e.content;
+        linkifyDocs(body, e.content);
         row.appendChild(body);
         convo.appendChild(row);
         if (e.queued || e.status === 'failed' || e.status === 'unconfirmed' || closesRun(e, conv[i + 1])) {
