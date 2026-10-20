@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -58,7 +59,7 @@ func (s *server) runWatcher(ctx context.Context) {
 	defer t.Stop()
 	stats := time.NewTicker(execStatsEvery)
 	defer stats.Stop()
-	var lastAdeck, lastTmux int64
+	var lastAdeck, lastTmux, lastThrottled, lastFaults int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -69,8 +70,9 @@ func (s *server) runWatcher(ctx context.Context) {
 			// CLI polling burn coming back — catch it in the log, not in
 			// powermetrics DEAD_TASKS.
 			a, tm := s.execAdeck.Load(), s.execTmux.Load()
-			log.Printf("exec stats: agent-deck=%d tmux=%d followers=%d (last %s)", a-lastAdeck, tm-lastTmux, s.recall.nFollowers.Load(), execStatsEvery)
-			lastAdeck, lastTmux = a, tm
+			th, fl := s.tmux.throttled.Load(), s.tmux.faults.Load()
+			log.Printf("exec stats: agent-deck=%d tmux=%d throttled=%d tmux-faults=%d followers=%d (last %s)", a-lastAdeck, tm-lastTmux, th-lastThrottled, fl-lastFaults, s.recall.nFollowers.Load(), execStatsEvery)
+			lastAdeck, lastTmux, lastThrottled, lastFaults = a, tm, th, fl
 			continue
 		case <-t.C:
 		}
@@ -90,6 +92,12 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 	if err != nil {
 		return
 	}
+	// One list-panes per socket tells which sessions are alive at all; the rest
+	// are never captured (tmuxbudget.go). Then the sessions longest without a
+	// refresh go first, so a tick that runs out of tmux budget starves nobody.
+	sessions = append([]sessionInfo(nil), sessions...) // the list may be a shared cached slice
+	s.refreshLive(sctx, sessions)
+	s.tmux.order(sessions)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 	var mu sync.Mutex // guards `seen`
@@ -109,6 +117,9 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			pctx, pc := context.WithTimeout(sctx, 5*time.Second)
 			pane, paneErr := s.paneFor(pctx, se)
 			pc()
+			if errors.Is(paneErr, errTmuxThrottled) {
+				return // over the tmux budget this tick: keep the cached state, first in line next tick
+			}
 			adapter := s.adapterFor(se)
 			snap, snapErr := adapter.Snapshot(sctx, se, pane, paneErr == nil)
 			if snapErr != nil || snap.DegradedReason != "" {

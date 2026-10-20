@@ -178,6 +178,7 @@ path.
 | `--doc-exts` | `DECK_REMOTE_DOC_EXTS` | `.md,.markdown,.txt`; add `.log` knowingly (logs carry tokens and env dumps). The PWA only auto-links the default extensions |
 | `--tower-model-script` | `DECK_REMOTE_TOWER_MODEL_SCRIPT` | `scripts/tower_model.py` next to the binary |
 | — | `DECK_REMOTE_RECALL=off` | unset. Claude history is read from `agent-deck recall timeline` (rows/v2) when `[recall] enabled = true` in agent-deck's config, else from the transcript parser; `off` forces the parser |
+| — | (built in) tmux budget | every tmux exec (capture-pane, list-panes, show-environment) is paced to one per 500 ms (2/s sustained), backs off 1 s → 30 s after a tmux fault, and is skipped for sessions a fresh `list-panes -a` does not list. The 10-min `exec stats` log line reports `tmux=N throttled=M tmux-faults=F` |
 | — | `DECK_REMOTE_RECALL_FOLLOW=off` | unset. An open session streams its rows from one long-lived `agent-deck recall follow` (max 8 at once, stops 60 s after the last history request) instead of a `recall timeline --since` exec per poll; `off` restores the poll |
 | — | `DECK_REMOTE_RECALL_CHAIN=off` | unset. History spans `/clear` through `recall timeline --chain` when this agent-deck has it (feature-detected, falls back to the current conversation); `off` forces the single-conversation read |
 

@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -24,23 +24,12 @@ func (s *server) tmuxCapturePane(ctx context.Context, socket, tmuxSession string
 	if tmuxSession == "" {
 		return "", fmt.Errorf("no tmux session name")
 	}
-	bin := s.cfg.tmuxBin
-	if bin == "" {
-		bin = "tmux"
-	}
-	args := []string{}
-	if socket != "" {
-		args = append(args, "-L", socket)
-	}
-	args = append(args, "capture-pane", "-t", tmuxSession+":^", "-p", "-e", "-S", "-2000")
-	s.execTmux.Add(1)
-	out, err := exec.CommandContext(ctx, bin, args...).Output()
+	out, err := s.tmuxExec(ctx, socket, "capture-pane", "-t", tmuxSession+":^", "-p", "-e", "-S", "-2000")
 	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
+		if errors.Is(err, errTmuxThrottled) {
+			return "", err
 		}
-		return "", fmt.Errorf("tmux capture-pane %s: %w: %s", tmuxSession, err, stderr)
+		return "", fmt.Errorf("tmux capture-pane %s: %w", tmuxSession, err)
 	}
 	return string(out), nil
 }
@@ -66,12 +55,21 @@ func tmuxSessionGone(err error) bool {
 // paneFor captures the pane for an already-resolved session: tmux directly,
 // agent-deck CLI as fallback for non-definitive failures only.
 func (s *server) paneFor(ctx context.Context, se sessionInfo) (string, error) {
+	if s.tmux.gone(se.TmuxSocket, se.TmuxSession) {
+		// A recent list-panes did not list it: no exec, no CLI fallback.
+		return "", fmt.Errorf("tmux capture-pane %s: can't find session (not in list-panes)", se.TmuxSession)
+	}
 	out, err := s.tmuxCapturePane(ctx, se.TmuxSocket, se.TmuxSession)
 	if err == nil {
+		s.tmux.touched(se.ID)
 		return out, nil
 	}
 	if tmuxSessionGone(err) {
+		s.tmux.touched(se.ID)
 		return "", err
+	}
+	if errors.Is(err, errTmuxThrottled) {
+		return "", err // budget or backoff: not a reason to spend an agent-deck exec instead
 	}
 	return s.cliSessionPane(ctx, se.ID)
 }

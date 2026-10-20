@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -456,12 +455,10 @@ func cleanCodexHome(path, home string) string {
 }
 
 func (s *server) tmuxEnvironment(ctx context.Context, target, name string) (string, error) {
-	bin := s.cfg.tmuxBin
-	if bin == "" {
-		bin = "tmux"
+	if s.tmux.gone("", target) {
+		return "", fs.ErrNotExist // not in the last list-panes: nothing to read
 	}
-	s.execTmux.Add(1)
-	out, err := exec.CommandContext(ctx, bin, "show-environment", "-t", target, name).Output()
+	out, err := s.tmuxExec(ctx, "", "show-environment", "-t", target, name)
 	if err != nil {
 		return "", err
 	}

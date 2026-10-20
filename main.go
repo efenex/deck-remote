@@ -223,6 +223,7 @@ type server struct {
 	// steady state — these make a regression visible without powermetrics.
 	execAdeck atomic.Int64
 	execTmux  atomic.Int64
+	tmux      *tmuxBudget // pacing, backoff and live-session set for every tmux exec (tmuxbudget.go)
 }
 
 func newServer(cfg config, upstream *url.URL) *server {
@@ -260,6 +261,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		sends:     newSendTracker(stateDir(home)),
 		acts:      newActivityCache(),
 		recall:    newRecallStore(),
+		tmux:      newTmuxBudget(),
 		codex:     newCodexRolloutStore(),
 		pi:        newPiTranscriptStore(),
 		oc:        newOpencodeClient(),
