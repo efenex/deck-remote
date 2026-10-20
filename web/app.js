@@ -1189,7 +1189,10 @@
     sheet.style.top = kb ? vv.offsetTop + 'px' : '';
     sheet.style.height = kb ? vv.height + 'px' : '';
     sheet.style.bottom = kb ? 'auto' : '';
-    if (kb !== was) {
+    // Snap to the tail only when the keyboard appears (the thread shrinks); on
+    // dismiss the thread just grows, and snapping would throw away the scroll
+    // position that dragging the thread (which blurs the composer) was after.
+    if (kb && !was) {
       const convo = $('#convo');
       if (convo) convo.scrollTop = convo.scrollHeight;
     }
