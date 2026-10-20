@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +105,89 @@ func TestCleanReplyContent(t *testing.T) {
 				t.Errorf("cleanReplyContent(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// TestBashModeEntries covers the operator's `!` shell lines: the <bash-input>
+// entry and its separate <bash-stdout>/<bash-stderr> entry fold into one "bash"
+// message (command, stdout, stderr); empty output keeps the command; output
+// with nothing to attach to and no content is dropped; content stays verbatim
+// (escaping is the renderer's job).
+func TestBashModeEntries(t *testing.T) {
+	mk := func(s string) json.RawMessage { b, _ := json.Marshal(s); return b }
+	run := func(entries ...string) []histMsg {
+		var msgs []histMsg
+		for _, e := range entries {
+			cmd, so, se, isIn, ok := bashEntry(mk(e))
+			if !ok {
+				t.Fatalf("bashEntry(%q) not recognised", e)
+			}
+			msgs = addBash(msgs, cmd, so, se, isIn, 1)
+		}
+		return msgs
+	}
+	cases := []struct {
+		name    string
+		in      []string
+		cmd     string
+		so, se  string
+		nothing bool
+	}{
+		{"stdout", []string{"<bash-input> ls -l</bash-input>", "<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>"}, "ls -l", "a\nb", "", false},
+		{"empty stdout and stderr keeps the command", []string{"<bash-input>true</bash-input>", "<bash-stdout></bash-stdout><bash-stderr></bash-stderr>"}, "true", "", "", false},
+		{"stderr only", []string{"<bash-input>ls /nope</bash-input>", "<bash-stdout></bash-stdout><bash-stderr>ls: /nope: No such file</bash-stderr>"}, "ls /nope", "", "ls: /nope: No such file", false},
+		{"multi-line stdout and stderr", []string{"<bash-input>x</bash-input>", "<bash-stdout>l1\nl2\n\nl4\n</bash-stdout><bash-stderr>e1\ne2</bash-stderr>"}, "x", "l1\nl2\n\nl4", "e1\ne2", false},
+		{"markup in output kept verbatim", []string{"<bash-input>echo '<b>'</bash-input>", "<bash-stdout><b>&</b></bash-stdout><bash-stderr></bash-stderr>"}, "echo '<b>'", "<b>&</b>", "", false},
+		{"input only (output pending)", []string{"<bash-input>sleep 1</bash-input>"}, "sleep 1", "", "", false},
+		{"empty output, no input: dropped", []string{"<bash-stdout></bash-stdout><bash-stderr></bash-stderr>"}, "", "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := run(c.in...)
+			if c.nothing {
+				if len(got) != 0 {
+					t.Fatalf("got %+v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d msgs, want 1: %+v", len(got), got)
+			}
+			m := got[0]
+			if m.Role != "bash" || m.Content != c.cmd || m.Stdout != c.so || m.Stderr != c.se {
+				t.Errorf("got %+v, want cmd=%q stdout=%q stderr=%q", m, c.cmd, c.so, c.se)
+			}
+		})
+	}
+	if _, _, _, _, ok := bashEntry(mk("just a human message")); ok {
+		t.Error("plain message recognised as bash")
+	}
+	if _, _, _, _, ok := bashEntry(json.RawMessage(`[{"type":"text","text":"<bash-input>x</bash-input>"}]`)); ok {
+		t.Error("content-block list recognised as bash")
+	}
+}
+
+// TestParseTranscriptBashMode runs the full parser over a transcript with a
+// bash-mode pair between two human messages.
+func TestParseTranscriptBashMode(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2026-10-20T10:00:00Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"user","timestamp":"2026-10-20T10:00:01Z","message":{"role":"user","content":"<bash-input>echo hi</bash-input>"}}`,
+		`{"type":"user","timestamp":"2026-10-20T10:00:02Z","message":{"role":"user","content":"<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"}}`,
+		`{"type":"user","timestamp":"2026-10-20T10:00:03Z","message":{"role":"user","content":"thanks"}}`,
+	}
+	p := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := parseTranscriptFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 3 || msgs[0].Role != "user" || msgs[2].Content != "thanks" {
+		t.Fatalf("msgs = %+v", msgs)
+	}
+	if b := msgs[1]; b.Role != "bash" || b.Content != "echo hi" || b.Stdout != "hi" || b.Stderr != "" {
+		t.Errorf("bash msg = %+v", b)
 	}
 }

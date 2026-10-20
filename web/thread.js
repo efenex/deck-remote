@@ -10,7 +10,29 @@
   // live SSE rows carry ms-precision Date.now() stamps, the transcript whole
   // seconds.
   function turnKey(t) {
-    return t.role + '\n' + (t.kind || '') + '\n' + String(t.content == null ? '' : t.content).trim();
+    const k = t.role + '\n' + (t.kind || '') + '\n' + String(t.content == null ? '' : t.content).trim();
+    // Bash-mode rows share a command across runs: their output tells them apart.
+    return t.role === 'bash' ? k + '\n' + (t.stdout || '') + '\n' + (t.stderr || '') : k;
+  }
+
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // One compact block for an operator `!` shell line: "$ cmd", stdout below,
+  // stderr in its own (red) element. Everything is escaped — transcript content
+  // is untrusted. Returns '' when there is nothing to show.
+  function bashBlockHTML(t) {
+    const cmd = String(t.content == null ? '' : t.content).trim();
+    const out = String(t.stdout == null ? '' : t.stdout);
+    const err = String(t.stderr == null ? '' : t.stderr);
+    if (!cmd && !out.trim() && !err.trim()) return '';
+    let h = '';
+    if (cmd) h += '<div class="bash-cmd"><span class="bash-prompt">$ </span>' + escHtml(cmd) + '</div>';
+    if (out.trim()) h += '<pre class="bash-out">' + escHtml(out) + '</pre>';
+    if (err.trim()) h += '<pre class="bash-err">' + escHtml(err) + '</pre>';
+    return h;
   }
 
   // A transcript row is the same message as a live row if its key matches and
@@ -57,7 +79,7 @@
     return older;
   }
 
-  const api = { turnKey, mergeFreshHistory, trimOverlap };
+  const api = { turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

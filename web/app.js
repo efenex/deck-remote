@@ -1618,6 +1618,9 @@
   // Map a history entry (role "user"|"reply"|"commentary", unix-seconds ts)
   // onto a convo turn. Commentary is reply-shaped but remains a distinct row.
   function historyToTurn(m) {
+    if (m.role === 'bash') {
+      return { role: 'bash', content: m.content || '', stdout: m.stdout || '', stderr: m.stderr || '', ts: m.ts, hist: true };
+    }
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
     // hist: from the transcript, so a fresh history page may replace it.
@@ -1812,7 +1815,7 @@
   // other side, more than 5 minutes later, or there is no next row.
   function closesRun(e, next) {
     if (!next) return true;
-    const side = (r) => (r === 'me' ? 'me' : 'agent');
+    const side = (r) => (r === 'me' || r === 'bash' ? 'me' : 'agent');
     if (side(e.role) !== side(next.role)) return true;
     return !!(e.ts && next.ts && next.ts - e.ts > 300);
   }
@@ -1844,6 +1847,17 @@
         row.appendChild(body);
         convo.appendChild(row);
         if (e.queued || closesRun(e, conv[i + 1])) convo.appendChild(el('div', 'ts', fmtTime(e.ts) + (e.queued ? ' · sent' : '')));
+      } else if (e.role === 'bash') {
+        // Operator's `!` shell line: compact `$ cmd` + output block (escaped).
+        const html = DeckThread.bashBlockHTML(e);
+        if (!html) return;
+        const row = el('div', 'msg bash');
+        row.appendChild(el('span', 'gutter', '$'));
+        const body = el('div', 'body');
+        body.innerHTML = html;
+        row.appendChild(body);
+        convo.appendChild(row);
+        if (closesRun(e, conv[i + 1])) convo.appendChild(el('div', 'ts', fmtTime(e.ts)));
       } else if (e.role === 'reply') {
         // Merge consecutive 'reply' entries (one Claude turn can yield several
         // assistant text entries) into a single row. Codex commentary remains

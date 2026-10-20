@@ -48,8 +48,12 @@ type histMsg struct {
 	Role    string `json:"role"` // "user" | "reply" | "commentary"
 	Content string `json:"content"`
 	Ts      int64  `json:"ts"` // unix seconds, 0 if unknown
-	TurnID  string `json:"-"`
-	Seq     int64  `json:"-"`
+	// Role "bash" (operator's `!` shell line): Content is the command; Stdout and
+	// Stderr are the captured output when the output entry was merged in.
+	Stdout string `json:"stdout,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
+	TurnID string `json:"-"`
+	Seq    int64  `json:"-"`
 }
 
 type jsonlLine struct {
@@ -70,6 +74,55 @@ var syntheticUserPrefixes = []string{
 	"<local-command", "<command-name", "<command-message", "<command-args",
 	"<command-stdout", "<system-reminder", "caveat:", "[request interrupted",
 	"<task-notification", "<task-prompt",
+}
+
+var (
+	bashInputRE  = regexp.MustCompile(`(?s)^\s*<bash-input>(.*)</bash-input>\s*$`)
+	bashStdoutRE = regexp.MustCompile(`(?s)<bash-stdout>(.*)</bash-stdout>`)
+	bashStderrRE = regexp.MustCompile(`(?s)<bash-stderr>(.*)</bash-stderr>`)
+)
+
+// bashEntry recognises the user entries Claude Code writes for a `!` shell line:
+// "<bash-input>cmd</bash-input>", then (as its own entry)
+// "<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>". It returns the
+// command (isInput) or the captured output; ok=false for anything else.
+func bashEntry(raw json.RawMessage) (cmd, stdout, stderr string, isInput, ok bool) {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return
+	}
+	if m := bashInputRE.FindStringSubmatch(s); m != nil {
+		return strings.TrimSpace(m[1]), "", "", true, true
+	}
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "<bash-stdout>") && !strings.HasPrefix(t, "<bash-stderr>") {
+		return
+	}
+	if m := bashStdoutRE.FindStringSubmatch(t); m != nil {
+		stdout = strings.Trim(m[1], "\r\n")
+	}
+	if m := bashStderrRE.FindStringSubmatch(t); m != nil {
+		stderr = strings.Trim(m[1], "\r\n")
+	}
+	return "", stdout, stderr, false, true
+}
+
+// addBash folds a bash-mode entry into msgs: an input starts a "bash" message;
+// an output fills the immediately preceding input (or stands alone, Content "",
+// when the input was parsed in an earlier incremental pass). Empty output with
+// no input to attach to is dropped.
+func addBash(msgs []histMsg, cmd, stdout, stderr string, isInput bool, ts int64) []histMsg {
+	if isInput {
+		return append(msgs, histMsg{Role: "bash", Content: cmd, Ts: ts})
+	}
+	if n := len(msgs); n > 0 && msgs[n-1].Role == "bash" && msgs[n-1].Content != "" && msgs[n-1].Stdout == "" && msgs[n-1].Stderr == "" {
+		msgs[n-1].Stdout, msgs[n-1].Stderr = stdout, stderr
+		return msgs
+	}
+	if stdout == "" && stderr == "" {
+		return msgs
+	}
+	return append(msgs, histMsg{Role: "bash", Stdout: stdout, Stderr: stderr, Ts: ts})
 }
 
 var reminderBlockRE = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
@@ -286,6 +339,10 @@ func parseTranscriptFrom(path string, from int64) ([]histMsg, int64, error) {
 				msgs = append(msgs, histMsg{Role: "reply", Content: txt, Ts: tsUnix(l.Timestamp)})
 			}
 		case "user":
+			if cmd, so, se, isIn, ok := bashEntry(l.Message.Content); ok {
+				msgs = addBash(msgs, cmd, so, se, isIn, tsUnix(l.Timestamp))
+				break
+			}
 			if txt := humanText(l.Message.Content); txt != "" {
 				msgs = append(msgs, histMsg{Role: "user", Content: txt, Ts: tsUnix(l.Timestamp)})
 			}

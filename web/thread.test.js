@@ -44,3 +44,42 @@ test('a live row is matched to its transcript copy by time', () => {
   const fresh = [h('me', 'yes', 1000), h('reply', 'ok', 4990), h('me', 'yes', 5001)];
   assert.deepStrictEqual(mergeFreshHistory(fresh, conv).map((t) => t.ts), [1000, 4990, 5001]);
 });
+
+const { bashBlockHTML, turnKey } = require('./thread.js');
+
+test('bashBlockHTML: command and stdout, escaped', () => {
+  const html = bashBlockHTML({ role: 'bash', content: "echo '<b>'", stdout: '<script>alert(1)</script> & "x"', stderr: '' });
+  assert.match(html, /<div class="bash-cmd"><span class="bash-prompt">\$ <\/span>echo &#39;&lt;b&gt;&#39;<\/div>/);
+  assert.match(html, /<pre class="bash-out">&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;x&quot;<\/pre>/);
+  assert.ok(!html.includes('<script>') && !html.includes('<b>'));
+  assert.ok(!html.includes('bash-err'));
+});
+
+test('bashBlockHTML: empty stdout and stderr shows just the command', () => {
+  const html = bashBlockHTML({ role: 'bash', content: 'true', stdout: '', stderr: '' });
+  assert.match(html, /bash-cmd/);
+  assert.ok(!html.includes('<pre'));
+});
+
+test('bashBlockHTML: stderr only renders in the error element', () => {
+  const html = bashBlockHTML({ role: 'bash', content: 'ls /nope', stdout: '', stderr: 'ls: /nope: No such file' });
+  assert.ok(!html.includes('bash-out'));
+  assert.match(html, /<pre class="bash-err">ls: \/nope: No such file<\/pre>/);
+});
+
+test('bashBlockHTML: multi-line output keeps its lines', () => {
+  const html = bashBlockHTML({ role: 'bash', content: 'x', stdout: 'l1\nl2\n\nl4', stderr: 'e1\ne2' });
+  assert.ok(html.includes('l1\nl2\n\nl4'));
+  assert.ok(html.includes('e1\ne2'));
+});
+
+test('bashBlockHTML: nothing at all renders nothing; output-only is kept', () => {
+  assert.strictEqual(bashBlockHTML({ role: 'bash', content: '', stdout: '', stderr: ' \n' }), '');
+  assert.match(bashBlockHTML({ role: 'bash', content: '', stdout: 'late', stderr: '' }), /bash-out/);
+});
+
+test('turnKey: bash rows with the same command but different output differ', () => {
+  const a = { role: 'bash', content: 'date', stdout: '1' };
+  const b = { role: 'bash', content: 'date', stdout: '2' };
+  assert.notStrictEqual(turnKey(a), turnKey(b));
+});

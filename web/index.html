@@ -253,6 +253,12 @@
   .msg.me .gutter{color:var(--muted-2)}
   .msg.me .body{color:var(--text);font-weight:500;white-space:pre-wrap}
   /* assistant row: accent left border + '‹' marker. */
+  .msg.bash .gutter{color:var(--muted-2)}
+  .msg.bash .bash-cmd{font-family:var(--mono);font-size:12.5px;color:var(--text);font-weight:600;white-space:pre-wrap;word-break:break-word}
+  .msg.bash .bash-prompt{color:var(--muted-2)}
+  .msg.bash pre{margin:2px 0 0;font-family:var(--mono);font-size:12px;line-height:1.35;white-space:pre;overflow-x:auto}
+  .msg.bash .bash-out{color:var(--muted)}
+  .msg.bash .bash-err{color:var(--red)}
   .msg.reply{border-left:2px solid var(--accent);padding-left:8px;margin-left:1px}
   .msg.reply .gutter{color:var(--accent)}
   .msg.reply .body{color:var(--text)}
@@ -670,10 +676,10 @@
 
 <!-- ?v= matches CACHE in sw.js; bump both on any web change. Without it a
      phone can pair a fresh index.html with a stale cached app.js. -->
-<script src="/version.js?v=20"></script>
-<script src="/thread.js?v=20"></script>
-<script src="/markdown.js?v=20"></script>
-<script src="/gestures.js?v=20"></script>
-<script src="/app.js?v=20"></script>
+<script src="/version.js?v=21"></script>
+<script src="/thread.js?v=21"></script>
+<script src="/markdown.js?v=21"></script>
+<script src="/gestures.js?v=21"></script>
+<script src="/app.js?v=21"></script>
 </body>
 </html>
