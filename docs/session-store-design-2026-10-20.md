@@ -1,12 +1,14 @@
 # Session store: decoupling deck-remote from Claude Code transcripts (design, 2026-10-20)
 
-Task `deckremote-session-store-design`. Repo HEAD 2ebfe30. Evidence gathered 2026-10-20T17:25Z–18:10Z by reading code, and with read-only probes of local files. No code was changed and nothing was restarted. Input: `tower/reports/deckremote-input-history-2026-10-20.md` (below: "the input report").
+Task `deckremote-session-store-design`. Repo HEAD 2ebfe30. Evidence gathered 2026-10-20T17:25Z–18:25Z by reading code, and with read-only probes of local files and of the running agent-deck binary. The recall probe used a throw-away `HOME` under /tmp, so no live config was touched. No code was changed and nothing was restarted. Input: `tower/reports/deckremote-input-history-2026-10-20.md` (below: "the input report").
 
 ## TL;DR
 
-- **Half of the operator's idea already exists.** deck-remote already has a per-harness adapter boundary (`harnessAdapter`, harness.go:69-77) and one common row type (`histMsg`, history.go:47-57). Three of the four adapters already keep state in memory and read incrementally. What is missing: a turn model rich enough to say *who* wrote a row and *what kind* of row it is; stable ids and a cursor; push delivery; durability across restarts and `/clear`.
-- **The dropped-input bug is in the Claude parser, not in the architecture.** No architecture choice alone brings back mid-turn prompts, peer messages or slash commands. Slices 2-5 of the input report are needed under every option. A store makes them cheaper to ship and to test, but it does not replace them.
-- **Recommendation: build option A in steps, behind the endpoint that exists today.** (1) a richer turn model with stable ids, emitted by all four adapters through the current `History()`; (2) an in-memory per-session turn log with a `since=` cursor and a `turns` SSE event; (3) persist that log (append files or SQLite), which brings restart continuity and history across `/clear`; (4) native live ingest where the harness offers it (opencode `/api/event`, Claude hooks), with file tailing kept as the fallback. Pushing the stream into agent-deck itself (option C) is not worth doing now. §5 says why.
+- **The store the operator described already exists, unused, inside the agent-deck binary we run.** The live binary is `v1.16.28+fork.3c4ef685`, built from `/Users/rdesmet/src/agent-deck-rebase/stealguard`, branch `local/deck-remote-support-2026-10-20`. It ships `agent-deck recall timeline|follow`: a typed per-session row stream (schema `agent-deck.recall.rows/v2`) for Claude, Codex, pi, Gemini, OpenCode and Hermes, with stable native ids, `since`/`before` cursors, `updates`/`removed` frames, queued-message handling and forwarding to remote hosts over ssh. agent-deck's `state.db` also records every native conversation id a session has had (`session_links`). For tower that is 6 ids across `/clear`, two more than the input report's sibling heuristic found. It is switched off (`[recall]` is not enabled), so nothing uses it. §1.4.
+- **Half of the rest exists in deck-remote too.** `harnessAdapter` (harness.go:69-77) is the adapter boundary and `histMsg` (history.go:47-57) the common row. What is missing: ids and kinds on the wire, a cursor, push, and history across `/clear`.
+- **The dropped-input bug is a parser problem under every option.** recall handles mid-turn (queued) prompts and slash commands, but it files peer messages as `system` or plain `user`, leaves `!` bash rows raw, and emits 2.2k `other` rows on a 108 MB transcript (measured, §1.4). Someone has to classify those, either in the fork or in deck-remote.
+- **Recommendation (option F): deck-remote keeps a thin turn API of its own, and its turn model is a projection of recall rows/v2.** Claude and Codex are ingested through `recall` (local, and remote via `agent-deck remote HOST recall …`). The parsers deck-remote has today stay as the fallback for opencode 2.x, pi, recall switched off, and remotes without the fork. Persist only what has no native source: rows the phone sent. Building a new store in agent-deck (C1) or a full store in deck-remote (A) duplicates work that is already done.
+- **First slice this week:** rows/v2-shaped `id`/`kind`/`queued` on `/api/rc/history`, plus the Claude `queued_command` parse. It needs no operator gate and no new dependency, and it makes the later switch to recall a change of source, not of schema. **Before anything is dispatched**, tower needs to know that fork-side deck-remote work already exists on that branch (§6.0).
 
 ## 1. Current state
 
@@ -48,16 +50,53 @@ More detail (survey 17:5xZ, spot-checked):
 
 | harness | durable files | API / push | hooks | notes |
 |---|---|---|---|---|
-| claude | JSONL per conversation, append-only, `uuid`/`parentUuid` per line (tree: rewind/edit can branch, *not verified here*) | none for a TUI session | SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, PermissionRequest, PreCompact, Stop, SessionEnd are all wired to `agent-deck hook-handler` in `~/.claude/settings.json` (read 17:3xZ). The payloads carry the prompt text and `transcript_path` | agent-deck keeps only status: `~/.agent-deck/hooks/<id>.events.jsonl` lines are `{at,event,status,session_id,pid}` with **no content**, and the file is a rolling buffer (tower's holds 200 lines, back to 14:21Z, so it **does not** preserve the `/clear` chain of session ids) |
+| claude | JSONL per conversation, append-only, `uuid`/`parentUuid` per line (tree: rewind/edit can branch, *not verified here*) | none for a TUI session | SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, PermissionRequest, PreCompact, Stop, SessionEnd are all wired to `agent-deck hook-handler` in `~/.claude/settings.json` (read 17:3xZ). The payloads carry the prompt text and `transcript_path` | agent-deck keeps only status: `~/.agent-deck/hooks/<id>.events.jsonl` lines are `{at,event,status,session_id,pid}` with **no content**, and the file is a rolling buffer (tower's holds 200 lines, back to 14:21Z, so it **does not** preserve the `/clear` chain of session ids, but `session_links` does: §1.4) |
 | codex | rollout JSONL segments, with `event_msg` + `response_item` | (codex has an app-server/MCP mode; not used under agent-deck tmux) | agent-deck writes a `.sid` sidecar (codex_rollout.go:428) | turn-structured already (`turn_started`/`turn_complete`) |
 | pi / omp | JSONL tree per session file | none used (pi has an RPC mode; not used under agent-deck) | none | branches are first-class: the store has to support "branch switched" |
 | opencode 2.x | `~/.local/share/opencode/opencode.db` (SQLite, owned by opencode) | full HTTP API, and **`/api/event` exists** (found in the 2.0.30 binary strings 17:4xZ). The service was *stopped* at probe time, so the event shape is **not verified** | plugins | also ships `opencode acp` (Agent Client Protocol server) |
 
 **Multi-host.** deck-remote runs per host. griffin's sessions are served by griffin's own deck-remote (tower/LEARNINGS.md:18-19). deck-remote reads `SSHHost` from agent-deck's web list but never uses it for transcripts (adeckweb.go:61,86; cli.go:130-133; the only tmux consumer is pane.go:69). Remote files are therefore out of reach today, under every option.
 
-<!-- AD-SURVEY -->
+### 1.4 What agent-deck already has (surveyed 17:5xZ–18:2xZ)
 
-### 1.4 Where Claude-specific assumptions leak today
+Two checkouts. The brief's `/Users/rdesmet/shared-work/git/ai-tooling/agent-deck` is at f8e8b27 (about v1.16.7). It is **1262 commits behind** the binary that actually runs (`agent-deck version` → `v1.16.28+fork.3c4ef685`). That binary is built from the worktree `/Users/rdesmet/src/agent-deck-rebase/stealguard` (below: `SG/`), branch **`local/deck-remote-support-2026-10-20`**, last commit 3c4ef685 at 2026-10-20T12:10Z. Paths without a prefix are relative to `SG/`.
+
+- **Hooks carry status, not content.**
+  - `agent-deck hook-handler` maps hook events to running/waiting/dead. It writes `hooks/<id>.json`, the `.sid` anchor and a rolling `hooks/<id>.events.jsonl` (200 lines, diagnostic only).
+  - It never writes the DB. The TUI's fsnotify watcher picks the status up instead.
+  - Hooks exist for Claude, Gemini, Hermes, Cursor and Copilot. Codex has only `notify`. pi has an extension.
+  - (survey; the HEAD checkout's `claude_hooks.go:40-66` and `hook_handler.go:120-176,381-427`)
+- **Session identity across `/clear`:**
+  - The rebind gates (instance.go:6487-6574) accept a newer conversation id from any non-terminal hook.
+  - The `session_links(session_id, harness, native_id, host, authoritative, first_seen, last_seen)` table keeps the whole history (internal/statedb/recall_hints.go:107-115).
+  - **Verified read-only 18:1xZ:** tower (`f8593170-…`) has 6 claude ids in order: 17295b8f, f1062fa0, fcf66e7c, 31edd4d9, 8caea8db, 4cce9561 (the last one authoritative). The table holds 108 rows for 60 sessions.
+- **The `recall` subsystem** (`internal/recall/`; `docs/recall-timeline.md`, `docs/remote-recall.md`):
+  - `recall timeline <session> --json [--tail N | --since C | --before C --limit N]` and `recall follow <session> --after C --jsonl [--status]`.
+  - The row ids are native and stable: Claude `uuid` (`uuid#n` per block), tool_use id, `queue:<ts>:<hash>` for typed-while-busy. Never a line index.
+  - Kinds: `user, assistant, thinking, tool, bash, edit, read, subagent, todo, question, skill, command, system, compaction, turn_end, other`.
+  - `--since` returns new rows plus `updates` and `removed`.
+  - Follow polls the native file every 250 ms and emits `resync_required` when the source is rewritten.
+  - The Claude queue mapping (enqueue, then absorbed or dequeued) is spelled out in rows.go:530+ and the docs. Classification is at internal/recall/query/rows.go:252-270: `isMeta` and `[INBOX]` become `system`, `<command-name>` becomes `command`.
+  - Claude and Codex are read directly from the native file and need **no index**. pi, Gemini, OpenCode and Hermes are served only from the `recall.db` index (`source:"index"`), which needs a sweep.
+  - `agent-deck remote HOST recall timeline|follow` forwards the same reads over ssh to the owning host. That covers griffin without copying files. Not verified against griffin: tower/FOLLOWUPS.md:5 recorded `remote events follow` returning no frames, which is a different verb over the same SSH path.
+- **The switch:** `[recall] enabled` (internal/session/userconfig.go:3136-3178) is off in `~/.agent-deck/config.toml`, so `recall timeline` exits 2 (checked 18:1xZ). Turning it on also enables `backfill_on_enable` (a one-time background index of every transcript, default true) and `hook_sweep` (the SessionEnd hook indexes its transcript, default true). Both can be turned off, which keeps only the direct-read path.
+- **Measured** with the binary in a temp `HOME` (`--transcript <file> --harness claude`), on tower's 108 MB `17295b8f`:
+
+  | call | time | output | notes |
+  |---|---|---|---|
+  | `--tail 30` | 0.06 s | 3.2 MB | tool bodies (up to 32 KiB each) come along, and there is no kind or body filter flag (`recall timeline --help`) |
+  | full read | 1.41 s | 250 MB | 5143 rows, all ids unique |
+
+  Kinds in the full read: other 2209 (api-request 1049, api-request-blob 1128), system 708, bash (the Bash tool) 555, user 422, assistant 415, turn_end 374, thinking 368, tool 49, edit 29, subagent 10, command 2, compaction 1.
+
+  Of the 422 `user` rows: 235 are queued, 115 plain, **54 are raw `<bash-input>` `!` lines** and **18 are peer messages** (`[agent-deck from:` / "Another Claude session") with no origin. Not tested: resolving a deck session id instead of `--transcript`, and `follow`.
+- **Other agent-deck surfaces:**
+  - `agent-deck web` (127.0.0.1:8420) serves sessions REST, `/events/menu` SSE and a tmux WebSocket. There is no transcript endpoint.
+  - The event bus `events follow --jsonl --since` (`<data>/bus/<profile>/active.ndjson`) carries `session.status/turn/transcript/…` frames with numeric cursors (docs/events.md).
+  - `session send --stream` tails the Claude JSONL only.
+  - agent-deck's own opencode integration is the **1.x per-TUI `--port` model** (instance.go:2033-2046, `GET /event`). deck-remote targets the 2.x host-wide service (harness_opencode.go:20-29). Whether recall's opencode reader (`~/.local/share/opencode/storage/…`, internal/recall/reader/opencode.go:16-23) covers 2.x sessions is **unverified**: 2.x keeps `opencode.db`, but a `storage/` directory also exists.
+
+### 1.5 Where Claude-specific assumptions leak today
 
 Inside the adapter boundary, which is fine: `claudeAdapter` (harness_claude.go), the transcript parser (history.go:38-461), the pane permission-prompt parser.
 
@@ -88,21 +127,29 @@ The turn store removes only the *history* coupling (history.go, the poll, the ro
 
 ## 2. A common turn model (needed by every option)
 
-One normalized row, emitted by every adapter. It is a superset of `histMsg`, so the current JSON stays valid:
+**Do not invent a new schema. Project recall rows/v2** (§1.4), so that ingesting from recall is a field mapping and our own adapters emit the same shape:
+- **Taken as is from rows/v2:** `id` (native, stable), `kind`, `ts`, `title`, `body`, `queued`, `meta.delivery`, and the `row`/`update`/`remove` frames.
+- **Two additions on the deck-remote side:**
+  - `origin` ∈ human | phone | peer:<from-id> | system. rows/v2 has no origin field: today peer messages come out as `system` or `user`.
+  - `seg`: the native conversation id, so that a `/clear` chain is several segments.
+- **Two post-filters on the deck-remote side until the fork does them:** `<bash-input>`/`<bash-stdout>` folded into a `bash` row (reuse `bashEntry`, history.go:89-108), and `other`/`thinking`/tool bodies dropped for the phone.
+
+The sketch below is the projected shape (field names follow rows/v2 where one exists):
 
 ```
 turn {
   sid      string   // agent-deck instance id (the session as the operator sees it)
   seg      string   // harness conversation id: claude uuid / codex id / opencode sid / pi file
   seq      int64    // per-sid, monotonic, assigned by the store or adapter: THE cursor
-  nid      string   // native id: claude uuid / opencode msg id / pi entry id / codex "<seg>:<byteoff>"
+  id       string   // rows/v2 id: claude uuid(#n) / queue:<ts>:<hash> / codex item id / opencode msg id / pi entry id
   kind     user | slash | bash | peer | reply | commentary | tool | notice | boundary
   origin   human | phone | peer:<from-id> | system
   queued   bool     // typed while the agent worked (claude queued_command, pi steer/follow-up)
   ts       int64    // ms
-  text     string
+  title    string   // one-line summary (rows/v2)
+  body     string   // full text (rows/v2)
   meta     {stdout, stderr, tool, args, requestId, boundary: clear|compact|new|branch}
-  replaces nid      // pi branch switch / edit: hide the old rows from here on
+  replaces id       // pi branch switch / edit: hide the old rows from here on
 }
 ```
 
@@ -110,7 +157,7 @@ turn {
 - **Turn kinds by harness:** user typed (all); mid-turn/queued (claude `attachment.queued_command`, pi steer/follow-up, opencode `delivery`); slash (claude `<command-name>`, others: shown as text); bash (claude only); peer (claude `isMeta` + `[agent-deck from:` and `queued_command` origin peer; others: plain user text with the `[agent-deck from:` prefix); reply/commentary (all); tool (summary rows: name + one-line arg, optional, off by default).
 - **`/clear` / `/new`:** each harness conversation id is a `seg`. A `boundary{clear}` row is written when the adapter sees the id change (claude: tmux `CLAUDE_SESSION_ID` / hook `session_id`; pi: newest file changes; opencode: binding changes; codex `/new`).
 - **Compaction** is a `boundary{compact}` row. The rows before it stay readable: the phone shows what was said, not what the model still remembers.
-- **Phone-sent rows** go into the log at send time with `origin=phone, nid=requestId`. When the adapter later sees the native twin, it fills in `nid` on that row instead of adding a new one (match: same text within `SAME_TURN_SECS`). This fixes the "vanishes on reload" case without any client cleverness.
+- **Phone-sent rows** go into the log at send time with `origin=phone, id=phone:<requestId>`. When the adapter later sees the native twin, it emits an `update` that re-keys that row to the native id instead of adding a new one (match: same text within `SAME_TURN_SECS`). This fixes the "vanishes on reload" case without any client cleverness.
 
 ## 3. Options
 
@@ -139,7 +186,7 @@ Effort: S ≤ ½ day, M ≈ 1 day, L > 1 day.
 
 ### B. Keep stateless parsing, with a common turn model and an adapter interface in front, plus a cache
 
-- **Shape:** this is the current architecture, completed. Widen `histMsg` to the §2 model, expose `seq/nid`, add an opencode cache (by `time.updated`, or keep the last page and re-pull only newer messages), add a `since=seq` cursor computed from the cached list, and optionally have the sweep compare `len(msgs)` and push a `turns` SSE hint.
+- **Shape:** this is the current architecture, completed. Widen `histMsg` to the §2 model, expose `seq/id`, add an opencode cache (by `time.updated`, or keep the last page and re-pull only newer messages), add a `since=seq` cursor computed from the cached list, and optionally have the sweep compare `len(msgs)` and push a `turns` SSE hint.
 - **Backfill:** the same as today (parse on demand).
 - **Live delivery:** poll, or an SSE hint from the sweep. Both work because `seq` is stable *within one process lifetime*.
 - **Crash/restart:** everything is re-derived from the source files, and that is correct for every row that has a native twin. **Phone-sent mid-turn rows still vanish** unless the harness writes them (it does once the Claude `queued_command` parse lands, so in practice this hole closes for Claude). `seq` must be *derived from the native data* (claude line ordinal, codex segment + offset, pi entry id order, opencode created-ms) so it stays stable across restarts. That is doable, except for pi branch switches.
@@ -155,18 +202,55 @@ Effort: S ≤ ½ day, M ≈ 1 day, L > 1 day.
 | B3 `since=seq` + SSE hint | S |
 | B4 `/clear` sibling heuristic (input report slice 9) | M |
 
-### C. Push the normalized stream into agent-deck (session events), shared by deck-remote and the TUI
+### C1. Build a new normalized stream inside agent-deck (as the brief framed C)
 
-- **Shape:** agent-deck's hook-handler (Claude) and its tool integrations write normalized turns into agent-deck's `state.db` (SQLite, `~/.agent-deck/profiles/<p>/state.db`, present 17:3xZ). deck-remote reads them over the agent-deck web API or CLI.
-- **For:** one source for the TUI, deck-remote, tower and `session output`. agent-deck already owns session identity, the hook stream and the `.sid` sidecars. It sees `/clear` because SessionStart fires with the new `session_id`.
-- **Against:**
-  1. Hooks exist only for Claude. agent-deck still has to tail codex rollouts and pi files and talk to the opencode service, so the parsers just move into the fork (Go to Go, which is feasible but is a fork divergence we would carry).
-  2. Today's hook-handler persists no content, so a new data path is needed in the fork, and upstreaming it is uncertain.
-  3. The operator's own `remote events follow` bus produced no frames on griffin (tower/FOLLOWUPS.md:5), which is a feasibility warning for remote use.
-  4. deck-remote then depends on a fork build for its core feature, and every schema change spans two repos and two release trains.
-  5. The hook path runs inside every Claude tool call (PreToolUse is synchronous, `AGENTDECK_PRETOOL_SYNC=1`), so adding content writes there costs latency on the operator's hot path.
-- **Backfill / restart / growth:** the same mechanics as A, in agent-deck's DB. Multi-host: agent-deck has a remote concept, which is the only option that could serve griffin without another deck-remote, but see point 3 above.
-- **Effort:** L (fork schema + hook capture + 3 non-hook ingesters + API + deck-remote client), plus a cross-repo release.
+- **Shape:** agent-deck's hook-handler and its tool integrations write normalized turns into agent-deck's own store. deck-remote reads them over the agent-deck API or CLI.
+- **Verdict: not needed.** The fork already has this as `recall` (§1.4). Building another one duplicates about 2.7k lines of row parser and tests (internal/recall/query/rows*.go). It also puts content writes on the synchronous hook path (PreToolUse/Stop run on every Claude tool call), where the existing design deliberately keeps them off: the Stop hook "appends one queue line and returns" (userconfig.go:3161-3164).
+
+### F. (found) Consume agent-deck `recall` rows/v2 as the ingest for Claude and Codex, with deck-remote's own parsers as the fallback
+
+- **Shape:**
+  - A new ingest path behind `harnessAdapter` (`recallSource`) runs `agent-deck recall timeline <id> --json --tail N` on open, `--before C --limit N` for scroll-back, and one long-lived `agent-deck recall follow <id> --after C --jsonl --status` per **open** session for live rows.
+  - It maps rows/v2 onto the §2 projection and publishes `turns` SSE events with the recall cursor.
+  - A `remote HOST` prefix serves sessions whose host is not local.
+  - The current parsers stay, and are used when recall is off, unsupported (exit 2 or an `unsupported remote command` error) or not native for the harness (opencode 2.x, pi).
+- **Data model:**
+  - ids, kinds, queued/absorbed and compaction come from the fork.
+  - `/clear` boundaries come from `session_links`: one timeline per `native_id` in `first_seen` order, joined with a `boundary` row.
+  - Edits and rewrites arrive as `update`/`remove` frames and `resync_required`.
+- **Backfill:** `--tail`/`--before` paging. It is direct-read, so it needs no index for Claude or Codex. Each older `/clear` segment is opened lazily when scroll-back reaches its start.
+- **Live delivery:** `follow` (250 ms native poll) → deck-remote → SSE. The PWA's 3 s poll becomes a fallback only.
+  - A 3 s `--tail` poll is **not** viable as the main path: 3.2 MB per call on a large transcript, because tool bodies come along and there is no filter flag.
+  - Only `follow` or `--since` deltas are viable.
+- **Crash/restart:** nothing to recover on deck-remote's side except phone-origin rows. Cursors are opaque and replayable, and `resync_required` covers rewrites. If deck-remote restarts, it re-opens with `--tail`.
+- **Storage growth:** none for history. The only new store is a small append log of phone-sent rows (`origin=phone`, keyed by requestId and reconciled against the native twin within `SAME_TURN_SECS`), measured in KB.
+- **Multi-host:** `agent-deck remote HOST recall …` is the only option in this doc that reaches griffin. It is still unverified there.
+- **`/clear` across sessions:** `session_links` has the chain (verified). Two ways for deck-remote to read it, and the choice is the operator's:
+  - add a CLI verb in the fork (`session links <id> --json`, about S); or
+  - read `state.db` read-only, which adds a SQLite dependency to a module with one direct dependency (go.mod).
+- **Gaps to close** (measured in §1.4):
+
+  | gap | where | size |
+  |---|---|---|
+  | peer origin | fork: `origin` on rows. deck-remote stopgap: prefix match on `[agent-deck from:` | S |
+  | `!` bash rows left raw | deck-remote post-filter (reuse `bashEntry`), or a fork kind | S |
+  | `other` noise from newer CC record types | fork reader | S |
+  | tool bodies inflate pages | deck-remote drops them; or a fork `--fields` flag | S |
+  | `History()` returns the full list | adapter contract change: windowed history, `(before/since cursor) → page` (a 250 MB full read is not an option) | M |
+  | process cost: one `follow` subprocess per open sheet | bounded by open viewers; reap on SSE disconnect | S |
+
+- **Pros:** the parser and turn model are already built and tested. It covers six harnesses (two of them direct), handles `/clear` without guessing, reaches remote hosts, and tower and the TUI's `G` search use the same source. This is the operator's "one stateful backend" without a second copy.
+- **Cons:** the core deck-remote feature then depends on a fork build plus a config switch. Classification fixes land in another repo. Subprocess and JSON overhead. pi and opencode 2.x stay on deck-remote's own adapters until recall reads them natively.
+
+| slice | size |
+|---|---|
+| F0 rows/v2-shaped `id/kind/queued/origin` on `/history` from today's parsers, plus Claude `queued_command` parse (= A1a) | M |
+| F1 windowed `History` contract (`before`/`since` cursor) and client paging by cursor | M |
+| F2 `recallSource` for Claude and Codex behind a flag (timeline + follow, fallback on exit 2) | M |
+| F3 phone-origin row log (persist) | S |
+| F4 `/clear` chain via `session_links` (CLI verb or read-only DB) | S+S |
+| F5 `remote HOST` routing for non-local sessions | M (needs griffin verification) |
+| fork: `origin` for peer rows, bash kind, newer CC record types, optional `--fields` | S each, in the fork |
 
 ### D. (alternative) Adopt a standard wire model instead of inventing one: ACP / harness-native servers
 
@@ -180,52 +264,70 @@ The phone persists what it saw and only fetches deltas. This fixes reload loss f
 
 ### Comparison
 
-| | A store in deck-remote | B stateless + model | C in agent-deck | D ACP transport |
+| | A store in deck-remote | B stateless + model | C1 new store in agent-deck | **F consume recall** |
 |---|---|---|---|---|
-| harness decoupling | strong (ingest interface) | medium (adapters already exist) | strong, but in the fork | strongest, wrong process model |
-| fixes dropped kinds | no (needs parser slices) | no | no | n/a |
-| phone rows survive reload | **yes** | only via the native twin | yes | yes |
-| history across /clear | **recorded** | heuristic | recorded | n/a |
-| live push | yes (cursor + SSE) | hint | yes, if API | yes |
-| restart | resume from cursor | re-derive | agent-deck's problem | – |
-| multi-host | per host; federate later | per host | possible, bus unproven | – |
-| first useful slice | M (A1) | M (B1) | L | L+ |
-| repos touched | 1 | 1 | 2 (fork) | many |
+| harness decoupling | strong | medium | strong, in the fork | strong (6 readers exist, 2 direct) |
+| fixes dropped kinds | no (parser slices) | no | no | partly (queued, slash yes; peer and bash need fixes) |
+| phone rows survive reload | yes | only via the native twin | yes | yes (small local log, F3) |
+| history across /clear | recorded from deploy onward | heuristic | recorded | **already recorded** (`session_links`) |
+| live push | yes | hint | yes | yes (`follow`) |
+| multi-host | per host | per host | possible | **`remote HOST recall`** (unverified on griffin) |
+| new code | most | least | most, duplicate | least for what it buys |
+| operator gate | none | none | fork work | enable `[recall]` |
+| repos touched | 1 | 1 | 2 | 2 (small fork fixes) |
 
 ## 4. Recommendation
 
-**Do A in steps, where the first steps are B.** A1 and B1 are the same slice, so the decision between A and B (whether to persist) can wait until A3. agent-deck (C) stays the place for identity and status, not for content. Name the turn kinds after ACP (D) at no cost.
+**F, entered through B's first slice.**
+1. Make deck-remote's wire model a projection of recall rows/v2 now, emitted by the parsers we have today (F0). The current UI keeps working, and the mid-turn input fix rides along.
+2. Then switch Claude and Codex ingest to `recall timeline/follow` behind a flag once the operator enables `[recall]`, and keep the current parsers as the fallback.
+3. Persist only phone-sent rows.
+4. Take `/clear` chains from `session_links`.
 
-Why A over B in the end: the two things B cannot do well are exactly the operator's complaints. "My input history is missing" includes phone rows lost on reload and history stopping at `/clear`. B can only fix those with heuristics. A fixes them by recording what it saw, while the source files stay the truth for everything they contain.
+A (a full store in deck-remote) is the fallback plan if the fork dependency proves unacceptable. Its slices A2-A5 then replace F2-F5 and reuse F0/F1 unchanged.
+
+Why not A first: the expensive parts of A already exist and are tested in the fork: the turn model, stable ids, cursors, the `/clear` chain and remote reads. What A would add on top is a second derived copy to keep consistent.
+
+Why not leave it at B: B cannot record `/clear` chains or reach griffin.
+
+**F0 first** because it ships this week with no operator gate and no new dependency. Every later step reuses its JSON.
 
 ## 5. Migration path (the current UI keeps working throughout)
 
 | step | ships | UI impact | size | gate |
 |---|---|---|---|---|
-| **0 (this week)** | **A1a:** expose `seq`, `nid`, `kind`, `origin` on `/api/rc/history` rows (additive JSON; old clients ignore them). Claude: `nid=uuid`, `seq=line ordinal`. Codex/pi/opencode: the existing `Seq`/`TurnID` plus native id. **Ride the input report's slice 2 (Claude `queued_command` human) on it**, because it needs the same struct changes (`jsonlLine` gains `Uuid`, `Origin`, `Attachment`) | none until the client uses it; mid-turn prompts appear as `you` rows | M | `go test` on fixtures from real (redacted) entries; `node --test web/*.test.js` |
-| 1 | client: dedup by `nid` when present, fall back to `turnKey`; scroll-back by `before=seq` (server keeps `offset` as an alias) | fixes the "two identical oks" merge and offset drift | S | JS tests |
-| 2 | opencode incremental cache (B2): stop the 4000-message re-pull per poll | none (faster) | S | opencode test fixture |
-| 3 | input report slices 3/5/4: label hook, slash rows, peer rows collapsed | new row kinds | S+S+M | operator: defaults for peer/slash |
-| 4 | A2: in-memory turn log per sid + `GET /api/rc/turns?since=` + SSE `turns{sid,seq}`; the sweep ingests open sessions every 1-2 s | client still polls; the new endpoint is used behind a flag | M | |
-| 5 | A3: the client switches to SSE+since; keeps the 3 s poll as a fallback when SSE is disconnected | lower latency, fewer requests | M | soak on the phone |
-| 6 | A4: persist the log; phone-origin rows durable; restart resumes from the cursor | phone mid-turn sends survive reload/restart | M | operator: storage format |
-| 7 | A5: record seg changes live → `/clear` / `/new` chaining, with lazy back-segments on scroll | history crosses `/clear` from the deploy onwards; earlier history needs a one-time backfill heuristic (input report slice 9) | M | operator: backfill old chains or not |
-| 8 | A6: opencode `/api/event` subscribe (verify the shape first with the service running); optional Claude hook-payload capture (needs the fork's hook-handler to forward `prompt` + `transcript_path`, or a deck-remote-own hook) | lower latency | M each | operator: fork change or not |
+| **0 (this week)** | **F0:** add `id` (Claude `uuid`, codex/opencode/pi native ids), `kind`, `queued`, `origin`, `seg` to `/api/rc/history` rows, using rows/v2 names. The JSON change is additive. Ride the input report's slice 2 on it (Claude `queued_command` human), with ids following recall's `queue:<ts>:<hash>` convention so a later switch keeps the client's dedup keys | none until the client uses them; mid-turn prompts appear | M | `go test` with redacted real fixtures; `node --test web/*.test.js` |
+| 1 | client dedups by `id` when present (fallback `turnKey`); input report slices 3/5/4 (label hook, slash rows, peer rows collapsed) | new row kinds | S+S+S+M | operator: peer/slash defaults |
+| 2 | opencode incremental cache (stop the 4000-message re-pull per poll, harness_opencode.go:454-460) | faster | S | |
+| 3 | F1: windowed `History` contract + `before`/`since` endpoint params (`offset` kept as alias) | stable scroll-back | M | |
+| 4 | F2: `recallSource` for Claude/Codex behind `--recall` flag; `follow` per open sheet → SSE `turns`; client keeps 3 s poll as fallback | lower latency; the same rows | M | **operator: enable `[recall]`** (suggest `backfill_on_enable=false`, `hook_sweep=false` to start) |
+| 5 | F3 phone-row log; F4 `/clear` chain | history crosses `/clear` (all of tower's 6 segments); phone mid-turn sends survive reload | S+S+S | operator: CLI verb vs read-only `state.db` |
+| 6 | fork fixes upstreamed to the fork branch: peer `origin`, bash kind, newer CC record types; deck-remote drops its stopgaps | cleaner rows | S each | coordinate with whoever owns `local/deck-remote-support-2026-10-20` |
+| 7 | F5 remote routing (griffin) | griffin sessions readable from blackbird | M | verify `remote griffin recall timeline` first |
+| 8 | opencode 2.x `/api/event` push (verify the shape with the service running) or a recall opencode-2.x reader | lower latency for opencode | M | |
+| — | separate cleanup (not part of the store): route on `Capabilities` instead of tool name, and move the Claude turn runner behind `claudeAdapter.Deliver` (§1.5) | none | M | |
 
-Each step deploys alone, needs no data migration (the stores are derived; a schema bump means wipe and rebuild), and leaves `/api/rc/history` working until the client has moved off it.
+Each step deploys on its own and needs no data migration. `/api/rc/history` keeps answering in its current shape until the client has moved off it.
 
-## 6. Open decisions (the operator's)
+## 6. Open decisions
 
-1. **Persist or not** (A vs B after step 5). The recommendation is to persist. Without it, phone rows and recorded `/clear` chains are not possible.
-2. **Storage format:** append-only JSONL per session (no new dependency; deck-remote has one direct dependency today, go.mod) vs SQLite (`modernc.org/sqlite`, pure Go but a large dependency, or cgo). The recommendation is JSONL plus an in-memory index. The access pattern is append + range-by-seq per session, and there are no cross-session queries.
-3. **Peer and slash rows:** shown by default (collapsed) or behind a toggle. About 1.5k peer rows in the input report's corpus (§1), so they are noisy.
-4. **Backfill of pre-deploy `/clear` chains:** heuristic sibling matching (input report slice 9) or "history starts at deploy".
-5. **Claude hook capture:** change the agent-deck fork's hook-handler to forward content, or keep file tailing only for Claude (it works; ~3 s latency is the poll, not the parse).
-6. **Option C long-term:** whether turn content should ever live in agent-deck (it would serve the TUI and tower too). Not recommended now; revisit if agent-deck upstream adds an event store.
-7. **Multi-host:** keep per-host deck-remotes, or have blackbird federate griffin's `turns` API later.
+0. **(tower, before dispatch)** The live agent-deck binary is built from the branch `local/deck-remote-support-2026-10-20` (3c4ef685, 2026-10-20). Find out who owns that branch and what "deck-remote support" it already covers before assigning F2/F4/fork slices, so they do not collide.
+1. **(operator) Enable `[recall]` in agent-deck?** It is required for F2+. Suggested: `enabled = true`, `backfill_on_enable = false`, `hook_sweep = false` to start (direct reads only, no 5.2 GB background index). Its cost is otherwise a one-time throttled backfill.
+2. **(operator) F (depend on the fork's recall) vs A (own store in deck-remote).** Recommended: F, with A as the fallback.
+3. **(operator) How deck-remote reads the `/clear` chain:** a new fork CLI verb, or reading `state.db` read-only (adds a SQLite dependency).
+4. **(operator) Peer and slash rows:** shown by default (collapsed) or behind a toggle. Peer rows are numerous (input report: about 1.5k in its corpus).
+5. **(operator) Fork fixes:** land peer `origin`/bash kind/newer record types in the fork (cleaner, and tower benefits too), or keep the stopgaps on the deck-remote side.
+6. **(operator) Multi-host:** federate griffin into blackbird's deck-remote via `remote HOST recall`, or keep per-host deck-remotes.
+7. **(operator) Storage format for the phone-row log** (JSONL recommended; it stays tiny).
 
 ## Caveats
 
-- Unverified: Claude transcript branching on rewind/edit (whether `parentUuid` forks), the opencode `/api/event` payload shape (service stopped at probe time), codex/pi mid-turn input.
-- The storage numbers come from 3 tower transcripts. The fleet-wide figure is an extrapolation.
-- The anchors in the input report were taken at f0c3cc7. The ones used here were re-checked at 2ebfe30 where they are cited.
+- Unverified:
+  - Claude transcript branching on rewind/edit.
+  - The opencode `/api/event` shape (the service was stopped).
+  - recall against opencode 2.x and pi.
+  - `recall follow` and deck-session-id resolution (the probe used `--transcript`).
+  - `remote griffin recall …`.
+  - codex/pi mid-turn input.
+- The recall numbers come from one 108 MB transcript, measured with a temp `HOME` and config. The storage numbers in option A come from 3 tower transcripts, and the fleet-wide figure is extrapolated.
+- Plain `file:line` citations in §1.4 refer to `/Users/rdesmet/src/agent-deck-rebase/stealguard` @3c4ef685, except the hook-handler lines, which come from the f8e8b27 checkout (survey). The input report's anchors are from f0c3cc7, and the ones cited here were re-checked at 2ebfe30.
