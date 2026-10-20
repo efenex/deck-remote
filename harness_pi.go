@@ -462,7 +462,7 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 			turnID = e.ID
 			pendingTool, toolOrder = map[string]string{}, nil
 			if text := piText(m.Content); text != "" {
-				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: text, Ts: ts, TurnID: turnID, Seq: seq})
+				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID})
 			}
 		case "assistant":
 			text := piText(m.Content)
@@ -480,7 +480,7 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 				if m.StopReason == "toolUse" {
 					role = "commentary"
 				}
-				snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turnID, Seq: seq})
+				snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID})
 				if role == "reply" {
 					snap.LastReply = text
 				}

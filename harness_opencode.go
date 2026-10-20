@@ -395,7 +395,7 @@ func projectOpencode(snap *harnessSnapshot, msgs []ocMessage) {
 		case "user":
 			turn = m.ID
 			if t := strings.TrimSpace(m.Text); t != "" {
-				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: t, Ts: ts, TurnID: turn, Seq: seq})
+				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: t, Ts: ts, TurnID: turn, Seq: seq, ID: m.ID})
 			}
 		case "assistant":
 			var parts []string
@@ -415,7 +415,7 @@ func projectOpencode(snap *harnessSnapshot, msgs []ocMessage) {
 			if m.Finish == "tool-calls" {
 				role = "commentary"
 			}
-			snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turn, Seq: seq})
+			snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turn, Seq: seq, ID: m.ID})
 			if role == "reply" {
 				snap.LastReply = text
 			}

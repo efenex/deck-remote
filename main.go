@@ -189,6 +189,7 @@ type server struct {
 	hub        *sseHub
 	queue      *sessionQueues
 	push       *pushManager
+	recall     *recallStore   // Claude history from agent-deck recall rows/v2 (recall.go)
 	acts       *activityCache // single source of parsed live-activity (watcher writes, endpoints read)
 	codex      *codexRolloutStore
 	pi         *piTranscriptStore
@@ -249,6 +250,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		hub:       newSSEHub(),
 		queue:     newSessionQueues(),
 		acts:      newActivityCache(),
+		recall:    newRecallStore(),
 		codex:     newCodexRolloutStore(),
 		pi:        newPiTranscriptStore(),
 		oc:        newOpencodeClient(),

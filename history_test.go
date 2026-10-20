@@ -122,7 +122,7 @@ func TestBashModeEntries(t *testing.T) {
 			if !ok {
 				t.Fatalf("bashEntry(%q) not recognised", e)
 			}
-			msgs = addBash(msgs, cmd, so, se, isIn, 1)
+			msgs = addBash(msgs, cmd, so, se, isIn, 1, "")
 		}
 		return msgs
 	}

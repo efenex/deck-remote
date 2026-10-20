@@ -175,6 +175,7 @@ path.
 | `--tower-session` | `DECK_REMOTE_TOWER_SESSION` | `tower`; the agent-deck session that receives reply-to-ask messages |
 | `--tower-root` | `DECK_REMOTE_TOWER_ROOT` | derived from `--tower-overview` (`<root>/state/overview/overview.json`); the tower checkout whose `scripts/journal.py` and `scripts/tower_tui.py` the Tower tab uses (read model + fold/close/queue/dismiss writes, all via `journal.py add`) |
 | `--tower-model-script` | `DECK_REMOTE_TOWER_MODEL_SCRIPT` | `scripts/tower_model.py` next to the binary |
+| — | `DECK_REMOTE_RECALL=off` | unset. Claude history is read from `agent-deck recall timeline` (rows/v2) when `[recall] enabled = true` in agent-deck's config, else from the transcript parser; `off` forces the parser |
 
 ## Operational note
 deck-remote is CLI-first precisely so it needs **no second long-running agent-deck

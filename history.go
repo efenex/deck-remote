@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -54,16 +56,78 @@ type histMsg struct {
 	Stderr string `json:"stderr,omitempty"`
 	TurnID string `json:"-"`
 	Seq    int64  `json:"-"`
+
+	// recall rows/v2-shaped fields (session-store design §2, slice F0); all
+	// additive, the pre-F0 client ignores them.
+	//   ID     native row id: Claude line uuid, pi entry id, opencode message id,
+	//          `queue:<ts>:<hash>` for a prompt typed while the agent worked (the
+	//          attachment carries the absorb time, recall keys on the enqueue
+	//          time, so this is convention-compatible, not byte-identical).
+	//          Empty where the harness gives no id in hand (codex).
+	//   Kind   user | assistant | bash. Both reply and commentary are
+	//          "assistant"; Role still tells them apart.
+	//   Queued typed while the agent was working (Claude queued_command).
+	//   Origin human | peer:<from-id> on user rows, empty on the rest.
+	ID     string `json:"id,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+	Queued bool   `json:"queued,omitempty"`
+	Origin string `json:"origin,omitempty"`
+}
+
+var peerPrefixRE = regexp.MustCompile(`^\s*\[agent-deck from:([^\]\s]*)\]`)
+
+// annotateRows returns a copy of msgs with Kind and Origin filled in from Role
+// and content, so every adapter gets them without touching its own parser.
+func annotateRows(msgs []histMsg) []histMsg {
+	out := make([]histMsg, len(msgs))
+	for i, m := range msgs {
+		if m.Kind == "" {
+			switch m.Role {
+			case "user", "bash":
+				m.Kind = m.Role
+			case "reply", "commentary":
+				m.Kind = "assistant"
+			}
+		}
+		if m.Origin == "" && m.Role == "user" {
+			m.Origin = "human"
+			if pm := peerPrefixRE.FindStringSubmatch(m.Content); pm != nil {
+				m.Origin = "peer:" + pm[1]
+			}
+		}
+		out[i] = m
+	}
+	return out
 }
 
 type jsonlLine struct {
 	Type      string `json:"type"`
+	UUID      string `json:"uuid"`
 	IsMeta    bool   `json:"isMeta"`
 	Timestamp string `json:"timestamp"`
 	Message   struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
+	// Attachment is set on type "attachment" lines. Only queued_command is read:
+	// what the operator typed while Claude was working (no user line is written
+	// for it). Peer and task-notification origins are not human input.
+	Attachment struct {
+		Type        string `json:"type"`
+		Prompt      string `json:"prompt"`
+		CommandMode string `json:"commandMode"`
+		Timestamp   string `json:"timestamp"`
+		Origin      struct {
+			Kind string `json:"kind"`
+		} `json:"origin"`
+	} `json:"attachment"`
+}
+
+// queuedID is the row id for a queued_command: recall's `queue:<ts>:<hash>`
+// convention, hash = first 12 hex chars of sha256(trimmed prompt).
+func queuedID(ts, prompt string) string {
+	h := sha256.Sum256([]byte(strings.TrimSpace(prompt)))
+	return fmt.Sprintf("queue:%s:%x", ts, h[:6])
 }
 
 // syntheticUserPrefixes mark user entries that are not human messages. These are
@@ -111,9 +175,9 @@ func bashEntry(raw json.RawMessage) (cmd, stdout, stderr string, isInput, ok boo
 // an output fills the immediately preceding input (or stands alone, Content "",
 // when the input was parsed in an earlier incremental pass). Empty output with
 // no input to attach to is dropped.
-func addBash(msgs []histMsg, cmd, stdout, stderr string, isInput bool, ts int64) []histMsg {
+func addBash(msgs []histMsg, cmd, stdout, stderr string, isInput bool, ts int64, id string) []histMsg {
 	if isInput {
-		return append(msgs, histMsg{Role: "bash", Content: cmd, Ts: ts})
+		return append(msgs, histMsg{Role: "bash", Content: cmd, Ts: ts, ID: id})
 	}
 	if n := len(msgs); n > 0 && msgs[n-1].Role == "bash" && msgs[n-1].Content != "" && msgs[n-1].Stdout == "" && msgs[n-1].Stderr == "" {
 		msgs[n-1].Stdout, msgs[n-1].Stderr = stdout, stderr
@@ -122,7 +186,33 @@ func addBash(msgs []histMsg, cmd, stdout, stderr string, isInput bool, ts int64)
 	if stdout == "" && stderr == "" {
 		return msgs
 	}
-	return append(msgs, histMsg{Role: "bash", Stdout: stdout, Stderr: stderr, Ts: ts})
+	return append(msgs, histMsg{Role: "bash", Stdout: stdout, Stderr: stderr, Ts: ts, ID: id})
+}
+
+// queuedHumanMsg turns an attachment.queued_command typed by the operator while
+// Claude was working into a user (or `!` bash) row. Peer messages and
+// task-notifications are other origins and stay out of the thread (they are the
+// operator's open peer/slash decision, design §6.4); the prompt goes through the
+// same synthetic-text gates as an idle-typed one, so a mid-turn slash command is
+// dropped like its idle twin.
+func queuedHumanMsg(l jsonlLine) (histMsg, bool) {
+	a := l.Attachment
+	if a.Type != "queued_command" || a.Origin.Kind != "human" || (a.CommandMode != "" && a.CommandMode != "prompt") {
+		return histMsg{}, false
+	}
+	ts := a.Timestamp
+	if ts == "" {
+		ts = l.Timestamp
+	}
+	raw, _ := json.Marshal(a.Prompt)
+	if cmd, _, _, isIn, ok := bashEntry(raw); ok && isIn {
+		return histMsg{Role: "bash", Content: cmd, Ts: tsUnix(ts), ID: queuedID(ts, a.Prompt), Queued: true, Origin: "human"}, true
+	}
+	txt := humanText(raw)
+	if txt == "" {
+		return histMsg{}, false
+	}
+	return histMsg{Role: "user", Content: txt, Ts: tsUnix(ts), ID: queuedID(ts, a.Prompt), Queued: true, Origin: "human"}, true
 }
 
 var reminderBlockRE = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
@@ -284,12 +374,20 @@ var (
 	contentStrB = []byte(`"content": "`)
 	typeUserA   = []byte(`"type":"user"`)
 	typeUserB   = []byte(`"type": "user"`)
+	typeAttachA = []byte(`"type":"attachment"`)
+	typeAttachB = []byte(`"type": "attachment"`)
+	queuedCmd   = []byte(`"queued_command"`)
 )
 
 // skipLine is a cheap pre-filter for the bulk of a transcript: a user entry whose
 // content is not a plain string is a tool_result / attachment list, which
 // humanText rejects anyway, so don't pay to JSON-decode it.
 func skipLine(line []byte) bool {
+	// Attachments (hook output, skill listings, up to hundreds of KB each) are
+	// ignored unless they are a queued_command.
+	if bytes.Contains(line, typeAttachA) || bytes.Contains(line, typeAttachB) {
+		return !bytes.Contains(line, queuedCmd)
+	}
 	if !bytes.Contains(line, typeUserA) && !bytes.Contains(line, typeUserB) {
 		return false
 	}
@@ -336,15 +434,19 @@ func parseTranscriptFrom(path string, from int64) ([]histMsg, int64, error) {
 		switch l.Type {
 		case "assistant":
 			if txt := assistantText(l.Message.Content); txt != "" {
-				msgs = append(msgs, histMsg{Role: "reply", Content: txt, Ts: tsUnix(l.Timestamp)})
+				msgs = append(msgs, histMsg{Role: "reply", Content: txt, Ts: tsUnix(l.Timestamp), ID: l.UUID})
 			}
 		case "user":
 			if cmd, so, se, isIn, ok := bashEntry(l.Message.Content); ok {
-				msgs = addBash(msgs, cmd, so, se, isIn, tsUnix(l.Timestamp))
+				msgs = addBash(msgs, cmd, so, se, isIn, tsUnix(l.Timestamp), l.UUID)
 				break
 			}
 			if txt := humanText(l.Message.Content); txt != "" {
-				msgs = append(msgs, histMsg{Role: "user", Content: txt, Ts: tsUnix(l.Timestamp)})
+				msgs = append(msgs, histMsg{Role: "user", Content: txt, Ts: tsUnix(l.Timestamp), ID: l.UUID})
+			}
+		case "attachment":
+			if m, ok := queuedHumanMsg(l); ok {
+				msgs = append(msgs, m)
 			}
 		}
 		if err == io.EOF {
@@ -483,10 +585,19 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"messages": []histMsg{}, "hasMore": false})
 		return
 	}
-	all, err := s.adapterFor(se).History(ctx, se)
-	if err != nil {
-		httpError(w, http.StatusNotImplemented, err.Error())
-		return
+	var all []histMsg
+	hasOlder, fromRecall := false, false
+	if ca, isClaude := s.adapterFor(se).(claudeAdapter); isClaude {
+		// recall rows/v2 when agent-deck serves them; otherwise the transcript
+		// parser answers.
+		all, hasOlder, fromRecall = ca.historyWindow(ctx, se, offset+limit)
+	}
+	if !fromRecall {
+		all, err = s.adapterFor(se).History(ctx, se)
+		if err != nil {
+			httpError(w, http.StatusNotImplemented, err.Error())
+			return
+		}
 	}
 	// Window: the `limit` messages ending `offset` from the newest.
 	end := len(all) - offset
@@ -498,8 +609,8 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		start = 0
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"messages": all[start:end],
-		"hasMore":  start > 0,
+		"messages": annotateRows(all[start:end]),
+		"hasMore":  start > 0 || hasOlder,
 		"total":    len(all),
 	})
 }
