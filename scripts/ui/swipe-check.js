@@ -1,5 +1,5 @@
 const { chromium } = require(process.env.PW);
-(async () => { const b = await chromium.launch(); const c = await b.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,serviceWorkers:'block'}); const p = await c.newPage();
+(async () => { const b = await chromium.launch(process.env.CHROME?{executablePath:process.env.CHROME}:{}); const c = await b.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,serviceWorkers:'block'}); const p = await c.newPage();
  const errs=[]; p.on('pageerror', e => errs.push(e.message));
  await p.goto(process.argv[2] + '/?token=fake'); await p.waitForTimeout(1200);
  const swipe = async (x0, y0, x1, y1, target) => p.evaluate(([x0,y0,x1,y1,target]) => {

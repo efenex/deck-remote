@@ -50,7 +50,7 @@
     --safe-bottom:env(safe-area-inset-bottom,0px);
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;padding:0;height:100%}
+  html,body{margin:0;padding:0;height:100%;overscroll-behavior:none}
   body{
     background:var(--bg); color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
@@ -62,7 +62,7 @@
   /* ---------- app frame (replaces the mockup's phone frame) ---------- */
   #app{position:fixed;inset:0;display:flex;flex-direction:column;background:var(--bg);
     padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px)}
-  .screen{flex:1;overflow-y:auto;position:relative;-webkit-overflow-scrolling:touch}
+  .screen{flex:1;overflow-y:auto;overflow-x:hidden;position:relative;-webkit-overflow-scrolling:touch}
   .screen::-webkit-scrollbar{display:none}
   [hidden]{display:none !important}
 
@@ -244,7 +244,7 @@
   /* idle: collapse out of the layout entirely so there's no dead band. */
   .live-activity.idle{display:none}
 
-  .convo{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--pad-convo);display:flex;flex-direction:column;gap:2px;-webkit-overflow-scrolling:touch}
+  .convo{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;padding:var(--pad-convo);display:flex;flex-direction:column;gap:2px;-webkit-overflow-scrolling:touch}
   .convo::-webkit-scrollbar{display:none}
 
   /* scroll-back affordance pinned at the top of the convo */
@@ -256,7 +256,7 @@
   /* ---------- full-width message rows (no left/right bubbles) ----------
      Every message spans the full width; the sender is shown by a leading role
      marker + accent rather than alignment, so no horizontal space is wasted. */
-  .msg{align-self:stretch;width:100%;display:grid;grid-template-columns:18px 1fr;gap:8px;
+  .msg{align-self:stretch;display:grid;grid-template-columns:18px 1fr;gap:8px;
     padding:var(--pad-msg);font-size:var(--font-msg);line-height:var(--lh-msg);word-wrap:break-word;overflow-wrap:anywhere}
   .msg .gutter{font-family:var(--mono);font-size:13px;line-height:1.55;font-weight:700;text-align:center;
     flex:0 0 auto;user-select:none;padding-top:1px}
