@@ -201,10 +201,13 @@
   /* Full-screen sheet: a proper full-height flex column. Order top→bottom is
      grabber+header (flex:0) → convo (flex:1) → live-activity (flex:0) →
      slash popup (absolute) → composer (flex:0). The composer pins to the very
-     bottom; its only bottom padding is the safe-area inset (no dead gap). */
+     bottom; its only bottom padding is the safe-area inset (no dead gap). No
+     explicit height: inset:0 fills the fixed box, so a stale/short 100dvh on iOS
+     cannot leave a blank band under the composer (applyViewport sets height only
+     while the keyboard is up). */
   .sheet{position:fixed;inset:0;z-index:75;background:var(--panel);
     padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);
-    display:flex;flex-direction:column;height:100%;height:100dvh;overflow:hidden;
+    display:flex;flex-direction:column;overflow:hidden;
     box-shadow:0 -16px 50px rgba(0,0,0,.55);
     animation:slideup .26s cubic-bezier(.2,.8,.2,1)}
   /* During a swipe-down/edge drag we follow the finger; suppress the entry

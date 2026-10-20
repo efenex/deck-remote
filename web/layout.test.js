@@ -54,3 +54,9 @@ test('hide-keyboard button exists only while the keyboard is up', () => {
 test('composer textarea is capped at ~4 lines', () => {
   assert.match(rule('.composer textarea'), /max-height:110px/);
 });
+
+test('.sheet is sized by inset:0, not a (possibly stale) 100dvh height', () => {
+  const r = rule('  .sheet');
+  assert.match(r, /inset:0/);
+  assert.doesNotMatch(r, /height:/);
+});
