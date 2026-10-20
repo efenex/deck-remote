@@ -69,7 +69,7 @@ func (s *server) runWatcher(ctx context.Context) {
 			// CLI polling burn coming back — catch it in the log, not in
 			// powermetrics DEAD_TASKS.
 			a, tm := s.execAdeck.Load(), s.execTmux.Load()
-			log.Printf("exec stats: agent-deck=%d tmux=%d (last %s)", a-lastAdeck, tm-lastTmux, execStatsEvery)
+			log.Printf("exec stats: agent-deck=%d tmux=%d followers=%d (last %s)", a-lastAdeck, tm-lastTmux, s.recall.nFollowers.Load(), execStatsEvery)
 			lastAdeck, lastTmux = a, tm
 			continue
 		case <-t.C:

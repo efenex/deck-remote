@@ -383,7 +383,9 @@ func testServer(t *testing.T, cfg config) *server {
 		cfg.profile = "default"
 	}
 	u, _ := url.Parse("http://127.0.0.1:1")
-	return newServer(cfg, u)
+	s := newServer(cfg, u)
+	s.recall.follow = false // tests opt in; a follower is a background process
+	return s
 }
 
 func writeRollout(t *testing.T, home, filenameID, metadataID string) string {

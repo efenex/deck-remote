@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,15 +122,24 @@ type recallSess struct {
 	before    string // cursor for older rows; "" = none left
 	lastFetch time.Time
 	failUntil time.Time
+
+	// Follower state (recall_follow.go).
+	lastAsk          time.Time // last historyWindow call: a follower stops when this goes stale
+	fol              *recallFollower
+	followBlockUntil time.Time // follower keeps dying: poll until then
 }
 
 type recallStore struct {
-	mu       sync.Mutex
-	off      time.Time // recall unavailable until
-	sessions map[string]*recallSess
+	mu         sync.Mutex
+	off        time.Time // recall unavailable until
+	sessions   map[string]*recallSess
+	follow     bool // stream with `recall follow` instead of polling --since
+	nFollowers atomic.Int32
 }
 
-func newRecallStore() *recallStore { return &recallStore{sessions: map[string]*recallSess{}} }
+func newRecallStore() *recallStore {
+	return &recallStore{sessions: map[string]*recallSess{}, follow: os.Getenv("DECK_REMOTE_RECALL_FOLLOW") != "off"}
+}
 
 func (rs *recallStore) session(key string) *recallSess {
 	rs.mu.Lock()
@@ -179,6 +189,7 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 	sv.mu.Lock()
 	defer sv.mu.Unlock()
 	now := time.Now()
+	sv.lastAsk = now
 	if now.Before(sv.failUntil) {
 		return nil, false, false
 	}
@@ -188,6 +199,7 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 		} else {
 			sv.failUntil = time.Now().Add(recallFailTTL)
 		}
+		sv.stopFollow()
 		sv.native, sv.rows, sv.through, sv.before = "", nil, "", ""
 		return nil, false, false
 	}
@@ -197,15 +209,21 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 		if err != nil {
 			return err
 		}
+		sv.stopFollow()
 		sv.native, sv.rows, sv.before = tl.Session.NativeID, nil, tl.BeforeCursor
 		sv.apply(tl)
 		sv.lastFetch = now
 		return nil
 	}
+	if sv.through != "" && se.ClaudeSessionID != "" && sv.native != "" && se.ClaudeSessionID != sv.native {
+		sv.through = "" // /clear: the session points at a new conversation; a follower is bound to the old file
+	}
 	if sv.through == "" {
 		if err := open(); err != nil {
 			return fail(err)
 		}
+	} else if sv.followHealthy() && now.Sub(sv.lastFetch) < recallSafetyEvery {
+		// rows arrive by stream: no exec
 	} else if now.Sub(sv.lastFetch) >= recallMinInterval {
 		tl, err := a.s.recallRead(ctx, se.ID, "--since", sv.through)
 		if err != nil {
@@ -223,6 +241,7 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 		}
 	}
 
+	a.s.ensureFollow(sv, se.ID, profileFrom(ctx, a.s.cfg.profile))
 	msgs = recallMessages(sv.rows)
 	for pages := 0; len(msgs) < need && sv.before != "" && pages < recallMaxPages; pages++ {
 		tl, err := a.s.recallRead(ctx, se.ID, "--before", sv.before, "--limit", strconv.Itoa(recallPage))
