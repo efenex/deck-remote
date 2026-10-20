@@ -2,7 +2,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry } = require('./thread.js');
+const { mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry, promoteDelivered } = require('./thread.js');
 
 const h = (role, content, ts) => ({ role, content, ts, hist: true });
 const live = (role, content, ts) => ({ role, content, ts });
@@ -154,4 +154,21 @@ test('a reply clearing queued silences a stale in-flight label', () => {
   const e = me('x', { status: 'queued', position: 1 });
   e.queued = false;
   assert.strictEqual(sendStatusLabel(e), '');
+});
+
+test('the transcript showing a bubble promotes it to delivered, even after "unconfirmed"', () => {
+  const conv = [me('ship it', { requestId: 'r1', status: 'unconfirmed', queued: false, ts: 1000 })];
+  assert.strictEqual(promoteDelivered(conv, [h('me', 'ship it', 1010)]), 1);
+  assert.strictEqual(sendStatusLabel(conv[0]), 'delivered');
+  // a late agent-deck verdict cannot take it back
+  applyAskState(conv, { requestId: 'r1', state: 'unconfirmed' });
+  assert.strictEqual(conv[0].status, 'delivered');
+});
+
+test('promotion is one-for-one and an older identical row proves nothing', () => {
+  const conv = [me('yes', { ts: 1000 }), me('yes', { ts: 1001 })];
+  assert.strictEqual(promoteDelivered(conv, [h('me', 'yes', 10)]), 0); // from long ago
+  assert.strictEqual(promoteDelivered(conv, [h('me', 'yes', 1005)]), 1); // one row, one bubble
+  assert.deepStrictEqual(conv.map((e) => e.status), ['delivered', 'sent']);
+  assert.strictEqual(promoteDelivered([me('a', { ts: 1 })], [h('reply', 'a', 5)]), 0); // only user rows count
 });

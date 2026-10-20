@@ -122,12 +122,40 @@
       if (e) e.requestId = ev.requestId;
     }
     if (!e) return null;
+    // The transcript already proved delivery (promoteDelivered): agent-deck's
+    // later, weaker verdict ("unconfirmed") must not take it back.
+    if (e.status === 'delivered') return e;
     e.status = ev.state;
     e.position = ev.position || 0;
     e.error = ev.error || '';
     e.retryable = !!ev.retryable;
     e.queued = !!IN_FLIGHT[ev.state];
     return e;
+  }
+
+  // The session's transcript is the ground truth for "delivered": agent-deck's
+  // own landed detection gives up after 2 minutes, so a message that waited out
+  // a long turn can settle "unconfirmed" while its text is plainly in the
+  // transcript. Promote each phone bubble that has a not-older matching 'me'
+  // row in the tail (one-for-one, time-bounded like mergeFreshHistory so an old
+  // identical "yes" proves nothing). Returns how many bubbles changed.
+  function promoteDelivered(conv, tail) {
+    const used = new Set();
+    let n = 0;
+    conv.forEach((e) => {
+      if (e.role !== 'me' || e.hist || !e.status || e.status === 'delivered') return;
+      const k = turnKey(e);
+      for (let i = tail.length - 1; i >= 0; i--) {
+        const f = tail[i];
+        if (used.has(i) || f.role !== 'me' || turnKey(f) !== k) continue;
+        if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
+        used.add(i);
+        e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
+        n++;
+        return;
+      }
+    });
+    return n;
   }
 
   function sendStatusLabel(e) {
@@ -148,7 +176,7 @@
   // one can already be sitting in the composer.
   function canRetry(e) { return e.status === 'failed' && e.retryable !== false; }
 
-  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, sendStatusLabel, canRetry };
+  const api = { newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

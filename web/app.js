@@ -1789,11 +1789,21 @@
     const conv = ensureConvo(id);
 
     // One-for-one multiset dedup on turnKey across every role (bash rows too).
-    const fresh = DeckThread.newTailTurns(conv, msgs.map(historyToTurn));
+    const tail = msgs.map(historyToTurn);
+    // The transcript showing a phone bubble's text is the proof of delivery.
+    const promoted = DeckThread.promoteDelivered(conv, tail);
+    const fresh = DeckThread.newTailTurns(conv, tail);
     fresh.forEach((turn) => conv.push(turn));
     const appended = fresh.length;
 
-    if (!appended) return; // common case: nothing new — cheap no-op
+    if (!appended) { // common case: nothing new — cheap no-op
+      if (promoted) {
+        const keepT = convo ? convo.scrollTop : 0;
+        renderConvo(id, { keepScroll: true });
+        if (convo) convo.scrollTop = keepT;
+      }
+      return;
+    }
     // Keep the scroll-back offset aligned with what the thread holds.
     const hsNow = state.history.get(id);
     if (hsNow) hsNow.loaded += appended;
