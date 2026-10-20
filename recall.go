@@ -38,11 +38,16 @@ const (
 
 // recallRow is the part of an agent-deck.recall.rows/v2 row this server keeps.
 type recallRow struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	TS      string `json:"ts"`
-	Title   string `json:"title"`
-	Body    string `json:"body"`
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	TS    string `json:"ts"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	// Detail and IsError: a `!` shell row (kind bash, meta.user_shell) carries the
+	// command in Detail; its output arrives as an update with Body (+ IsError when
+	// the stream was stderr only).
+	Detail  string `json:"detail"`
+	IsError *bool  `json:"is_error"`
 	Queued  *bool  `json:"queued"`
 	RawType string `json:"raw_type"`
 	// Origin and Seg are additive rows/v2 fields from forks that carry them
@@ -269,7 +274,9 @@ func (a claudeAdapter) historyWindow(ctx context.Context, se sessionInfo, need i
 		}
 		older := make([]recallRow, 0, len(tl.Turns))
 		for _, r := range tl.Turns {
-			if recallKeep(r) {
+			// A boundary can end the next-older page while also sitting in the
+			// newer one; its id (boundary:<native_id>) is stable, so keep one.
+			if recallKeep(r) && !(strings.HasPrefix(r.ID, "boundary:") && sv.index(r.ID) >= 0) {
 				older = append(older, r)
 			}
 		}
@@ -349,6 +356,12 @@ func (sv *recallSess) apply(tl recallTimeline) {
 		if u.Queued != nil {
 			row.Queued = u.Queued
 		}
+		if u.Detail != "" {
+			row.Detail = u.Detail
+		}
+		if u.IsError != nil {
+			row.IsError = u.IsError
+		}
 		if u.Meta.Delivery != "" {
 			row.Meta.Delivery = u.Meta.Delivery
 		}
@@ -408,12 +421,23 @@ func recallMessages(rows []recallRow) []histMsg {
 				msgs = append(msgs, slashMsg(cmd, ts, r.ID))
 			}
 		case "bash": // only reached for the operator's `!` line (recallKeep)
-			raw, _ := json.Marshal(r.Body)
-			if cmd, so, se, isIn, ok := bashEntry(raw); ok {
-				msgs = addBash(msgs, cmd, so, se, isIn, ts, r.ID)
-			} else if t := strings.TrimSpace(r.Body); t != "" {
-				msgs = addBash(msgs, t, "", "", true, ts, r.ID)
+			cmd := strings.TrimSpace(r.Detail)
+			if cmd == "" {
+				cmd = strings.TrimSpace(r.Title)
 			}
+			if cmd == "" {
+				continue
+			}
+			msgs = dropQueuedTwin(msgs, cmd)
+			m := histMsg{Role: "bash", Content: cmd, Ts: ts, ID: r.ID}
+			if out := strings.Trim(r.Body, "\r\n"); out != "" {
+				if r.IsError != nil && *r.IsError {
+					m.Stderr = out
+				} else {
+					m.Stdout = out
+				}
+			}
+			msgs = append(msgs, m)
 		case "user":
 			raw, _ := json.Marshal(r.Body)
 			if cmd, so, se, isIn, ok := bashEntry(raw); ok {
