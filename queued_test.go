@@ -136,6 +136,7 @@ const (
 {"id":"a-tn","kind":"system","ts":"2026-10-20T11:12:05.000Z","body":"<task-notification>x</task-notification>","raw_type":"attachment/queued_command"},
 {"id":"queue:2026-10-20T11:12:08.000Z:aaaaaaaaaaaa","kind":"user","queued":true,"ts":"2026-10-20T11:12:08.000Z","body":"[agent-deck from:60b6d3ab-1]\nsent while busy"},
 {"id":"queue:2026-10-20T11:12:09.000Z:bbbbbbbbbbbb","kind":"user","queued":true,"ts":"2026-10-20T11:12:09.000Z","body":"typed while busy, enqueue row"},
+{"id":"queue:2026-10-20T11:12:09.500Z:cccccccccccc","kind":"user","queued":true,"ts":"2026-10-20T11:12:09.500Z","body":"echo hi"},
 {"id":"u-bash","kind":"user","ts":"2026-10-20T11:12:10.000Z","body":"<bash-input>echo hi</bash-input>"},
 {"id":"u-bash-out","kind":"user","ts":"2026-10-20T11:12:11.000Z","body":"<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"},
 {"id":"th","kind":"thinking","ts":"2026-10-20T11:12:12.000Z","body":"hmm"}

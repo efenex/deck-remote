@@ -290,6 +290,9 @@ func recallMessages(rows []recallRow) []histMsg {
 		case "user":
 			raw, _ := json.Marshal(r.Body)
 			if cmd, so, se, isIn, ok := bashEntry(raw); ok {
+				if isIn {
+					msgs = dropQueuedTwin(msgs, cmd)
+				}
 				msgs = addBash(msgs, cmd, so, se, isIn, ts, r.ID)
 				continue
 			}
@@ -312,6 +315,18 @@ func recallMessages(rows []recallRow) []histMsg {
 				continue
 			}
 			msgs = append(msgs, histMsg{Role: "user", Content: t, Ts: ts, ID: queuedID(r.TS, r.Body), Queued: true, Origin: "human"})
+		}
+	}
+	return msgs
+}
+
+// dropQueuedTwin removes the raw queued copy of a `!` line typed while the agent
+// worked: recall emits the enqueue as a plain user row (no <bash-input> tags)
+// and later the tagged row, whose hash differs, so it never replaces the first.
+func dropQueuedTwin(msgs []histMsg, cmd string) []histMsg {
+	for i, n := len(msgs)-1, 0; i >= 0 && n < 12; i, n = i-1, n+1 {
+		if m := msgs[i]; m.Role == "user" && m.Queued && strings.TrimSpace(m.Content) == cmd {
+			return append(msgs[:i], msgs[i+1:]...)
 		}
 	}
 	return msgs
