@@ -1284,6 +1284,13 @@
     convo.addEventListener('scroll', () => {
       if (convo.scrollHeight - convo.scrollTop - convo.clientHeight < 80) hideNewPill();
     }, { passive: true });
+    // Dragging the thread dismisses the on-screen keyboard (touch only, so
+    // desktop typing is untouched; the keyboard no longer hides the transcript
+    // while you scroll). Only the composer is blurred, never other inputs.
+    convo.addEventListener('touchmove', () => {
+      const a = document.activeElement;
+      if (a && a.id === 'composerInput') a.blur();
+    }, { passive: true });
 
     // Approval / question dock: between the thread and the composer, so a
     // pending request is on screen when the sheet opens (the thread opens
@@ -1364,11 +1371,23 @@
       ta.disabled = true;
       ta.placeholder = s.degradedReason || 'Structured controls unavailable — open terminal';
     }
-    ta.addEventListener('input', () => {
+    // One line by default, growing to ~4 lines (max-height) while typing; back
+    // to one line when it loses focus or is sent.
+    const autosize = () => {
       ta.style.height = 'auto';
       ta.style.height = Math.min(ta.scrollHeight, 110) + 'px';
+    };
+    ta.addEventListener('input', () => {
+      autosize();
       send.disabled = !ta.value.trim();
       updateSlashPop(s.id, ta);
+    });
+    ta.addEventListener('focus', () => { if (ta.value) autosize(); });
+    ta.addEventListener('blur', () => {
+      ta.style.height = '';
+      // iOS can leave the keyboard-up sheet geometry (inline height/top, html.kb)
+      // behind; re-derive it once the viewport has settled.
+      setTimeout(() => { applyViewport(); window.scrollTo(0, 0); }, 150);
     });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send.click(); }
@@ -1381,7 +1400,7 @@
       const text = ta.value.trim();
       if (!text) return;
       ta.value = '';
-      ta.style.height = 'auto';
+      ta.style.height = '';
       send.disabled = true;
       hideSlashPop();
       // A leading-slash message is a slash command; otherwise a normal ask.
@@ -1404,6 +1423,13 @@
     });
     composer.appendChild(slashBtn);
     composer.appendChild(ta);
+    // Hide-keyboard control: visible only while the keyboard is up (html.kb).
+    const kbHide = el('button', 'kb-hide', '⌄');
+    kbHide.type = 'button';
+    kbHide.title = 'Hide keyboard';
+    kbHide.setAttribute('aria-label', 'Hide keyboard');
+    kbHide.addEventListener('click', () => ta.blur());
+    composer.appendChild(kbHide);
     composer.appendChild(send);
     composerWrap.appendChild(composer);
     sheet.appendChild(composerWrap);
@@ -1479,7 +1505,7 @@
   // A picked slash command: clear the input, hide the popup, and send it.
   function selectSlash(id, ta, cmd) {
     ta.value = '';
-    ta.style.height = 'auto';
+    ta.style.height = '';
     const send = ta.parentElement && ta.parentElement.querySelector('.send-btn');
     if (send) send.disabled = true;
     hideSlashPop();

@@ -39,3 +39,18 @@ test('wide bash output scrolls in its own pre', () => {
   assert.match(r, /white-space:pre/);
   assert.match(r, /overflow-x:auto/);
 });
+
+test('composer sits on the home-indicator inset only (max, not inset + 8px)', () => {
+  const r = rule('  .composer'); // indented: skip `html.kb .composer`
+  assert.match(r, /padding-bottom:max\(var\(--safe-bottom\),8px\)/);
+  assert.doesNotMatch(r, /calc\(8px \+ var\(--safe-bottom\)\)/);
+});
+
+test('hide-keyboard button exists only while the keyboard is up', () => {
+  assert.match(rule('.kb-hide'), /display:none/);
+  assert.match(rule('html.kb .kb-hide'), /display:grid/);
+});
+
+test('composer textarea is capped at ~4 lines', () => {
+  assert.match(rule('.composer textarea'), /max-height:110px/);
+});

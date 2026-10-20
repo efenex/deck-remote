@@ -49,10 +49,17 @@ const { bashBlockHTML, turnKey } = require('./thread.js');
 
 test('bashBlockHTML: command and stdout, escaped', () => {
   const html = bashBlockHTML({ role: 'bash', content: "echo '<b>'", stdout: '<script>alert(1)</script> & "x"', stderr: '' });
-  assert.match(html, /<div class="bash-cmd"><span class="bash-prompt">\$ <\/span>echo &#39;&lt;b&gt;&#39;<\/div>/);
+  assert.match(html, /<div class="bash-cmd">echo &#39;&lt;b&gt;&#39;<\/div>/);
   assert.match(html, /<pre class="bash-out">&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;x&quot;<\/pre>/);
   assert.ok(!html.includes('<script>') && !html.includes('<b>'));
   assert.ok(!html.includes('bash-err'));
+});
+
+test('bashBlockHTML: no `$` prompt of its own (the row gutter already shows one)', () => {
+  const html = bashBlockHTML({ role: 'bash', content: 'ls -la', stdout: 'total 0', stderr: '' });
+  assert.ok(!html.includes('bash-prompt'));
+  assert.strictEqual(html.indexOf('$'), -1);
+  assert.match(html, /<div class="bash-cmd">ls -la<\/div>/);
 });
 
 test('bashBlockHTML: empty stdout and stderr shows just the command', () => {

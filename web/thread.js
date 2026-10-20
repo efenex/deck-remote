@@ -20,8 +20,9 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  // One compact block for an operator `!` shell line: "$ cmd", stdout below,
-  // stderr in its own (red) element. Everything is escaped — transcript content
+  // One compact block for an operator `!` shell line: the command, stdout below,
+  // stderr in its own (red) element. The `$` prompt is the row's gutter, not
+  // part of this block (a second one here showed `$ $ cmd`). Everything is escaped — transcript content
   // is untrusted. Returns '' when there is nothing to show.
   function bashBlockHTML(t) {
     const cmd = String(t.content == null ? '' : t.content).trim();
@@ -29,7 +30,7 @@
     const err = String(t.stderr == null ? '' : t.stderr);
     if (!cmd && !out.trim() && !err.trim()) return '';
     let h = '';
-    if (cmd) h += '<div class="bash-cmd"><span class="bash-prompt">$ </span>' + escHtml(cmd) + '</div>';
+    if (cmd) h += '<div class="bash-cmd">' + escHtml(cmd) + '</div>';
     if (out.trim()) h += '<pre class="bash-out">' + escHtml(out) + '</pre>';
     if (err.trim()) h += '<pre class="bash-err">' + escHtml(err) + '</pre>';
     return h;
