@@ -12,6 +12,7 @@ func TestPhoneLogRecordsAskStates(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DECK_REMOTE_STATE_DIR", dir)
 	s := testServer(t, config{token: "t", homeDir: t.TempDir()})
+	s.hub.tap = newPhoneLog(s.cfg.homeDir).tap
 	s.hub.publish(map[string]any{"type": "ask-state", "state": "sent", "requestId": "r1", "sessionId": "s1", "text": "ship it", "slash": false})
 	s.hub.publish(map[string]any{"type": "ask-state", "state": "queued", "requestId": "r1", "sessionId": "s1", "sendId": "snd1", "position": 2})
 	s.hub.publish(map[string]any{"type": "ask-state", "state": "failed", "requestId": "r1", "sessionId": "s1", "error": "boom", "retryable": true})

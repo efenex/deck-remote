@@ -385,6 +385,7 @@ func testServer(t *testing.T, cfg config) *server {
 	u, _ := url.Parse("http://127.0.0.1:1")
 	s := newServer(cfg, u)
 	s.recall.follow = false // tests opt in; a follower is a background process
+	s.hub.tap = nil         // the phone-row log writes from background turns, racing TempDir cleanup; its tests install it
 	return s
 }
 
