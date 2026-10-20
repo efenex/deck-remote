@@ -151,6 +151,11 @@ func (rs *recallStore) session(key string) *recallSess {
 		return sv
 	}
 	if len(rs.sessions) >= recallMaxSessions {
+		for _, old := range rs.sessions { // do not orphan their followers
+			old.mu.Lock()
+			old.stopFollow()
+			old.mu.Unlock()
+		}
 		rs.sessions = map[string]*recallSess{}
 	}
 	sv := &recallSess{}
