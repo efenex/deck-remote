@@ -17,6 +17,11 @@ package main
 //     per question and "1. Submit answers / 2. Cancel": "1" submits;
 //   - Left/Right/Tab move between tabs, without wrapping at either end.
 //
+// A single-question single-select menu (rb-forks F12) has no tab row and no review screen: a header line
+// "☐ Header", the question, the numbered rows and the footer. Verified on a throwaway session: a digit
+// selects AND submits at once; the row after the options takes len(options)+1, then the text, then Enter.
+// (A single multiSelect question is drawn as a tabbed menu with "[ ]" rows and stays read-only.)
+//
 // Nothing is typed unless the live pane still matches the transcript question for question, and
 // the review screen must show exactly the answers about to be submitted.
 
@@ -166,6 +171,7 @@ type askTab struct {
 // askPane is what the live pane shows of a tabbed menu.
 type askPane struct {
 	Tabs     []askTab // the question tabs, without Submit
+	Single   bool     // a lone question without tab row or review screen: a digit submits it
 	Review   bool     // the Submit tab ("Review your answers")
 	Editing  bool     // the inline free-text field has the cursor
 	Question string   // the displayed question text (question pages)
@@ -234,11 +240,22 @@ func parseAskPane(pane string) (askPane, bool) {
 			break
 		}
 	}
+	ap := askPane{Cursor: -1}
+	if row >= 0 {
+		ap.Tabs, _ = parseTabRow(lines[row])
+	} else {
+		// No tab row: a single question under its "☐ Header" line.
+		for i := len(lines) - 1; i >= 0 && i >= len(lines)-claudeMenuMax; i-- {
+			if m := claudeMenuHeader.FindStringSubmatch(lines[i]); m != nil {
+				row, ap.Single = i, true
+				ap.Tabs = []askTab{{Header: strings.TrimSpace(m[1])}}
+				break
+			}
+		}
+	}
 	if row < 0 {
 		return askPane{}, false
 	}
-	ap := askPane{Cursor: -1}
-	ap.Tabs, _ = parseTabRow(lines[row])
 	body := lines[row+1:]
 	footer := -1
 	for i, l := range body {
@@ -250,7 +267,7 @@ func parseAskPane(pane string) (askPane, bool) {
 	}
 	review := false
 	for _, l := range body {
-		if strings.Contains(l, "Review your answers") {
+		if !ap.Single && strings.Contains(l, "Review your answers") {
 			review = true
 		}
 	}
@@ -377,11 +394,14 @@ func askMenuInfo(pane string, ask pendingAsk) (attentionInfo, bool) {
 		return attentionInfo{}, false
 	}
 	info := attentionInfo{Pending: true, Kind: "question", ID: "claude-askq-" + ask.ToolUseID}
-	answerable := true
+	answerable, reason := true, ""
 	var text []string
 	for i, q := range ask.Questions {
-		if q.MultiSelect || len(q.Options) < 1 || len(q.Options)+1 > 9 {
-			answerable = false // key semantics unverified: answered in the terminal
+		switch {
+		case q.MultiSelect:
+			answerable, reason = false, "This question allows several choices; answer it in the terminal."
+		case len(q.Options) < 1 || len(q.Options)+1 > 9:
+			answerable, reason = false, "This menu has too many rows for a key press; answer it in the terminal." // key semantics unverified
 		}
 		info.Questions = append(info.Questions, attentionQuestion{
 			Header: q.Header, ID: fmt.Sprintf("q%d", i), Question: q.Question, Options: q.Options,
@@ -392,7 +412,7 @@ func askMenuInfo(pane string, ask pendingAsk) (attentionInfo, bool) {
 	if answerable {
 		info.Actions = []string{"answer"}
 	} else {
-		info.ReadOnly = true
+		info.ReadOnly, info.ReadOnlyReason = true, reason
 	}
 	return info, true
 }
@@ -452,6 +472,22 @@ type askIO struct {
 	// wait/polls bound how long a key may take to show on screen.
 	wait  time.Duration
 	polls int
+	// progress, when set, is told each step of the walk (for the operator's card).
+	progress func(askProgress)
+}
+
+// askProgress is one step of an answer walk: Step is "checking", "answering" (N of Total),
+// "verifying" or "submitting".
+type askProgress struct {
+	Step  string `json:"step"`
+	N     int    `json:"n,omitempty"`
+	Total int    `json:"total,omitempty"`
+}
+
+func (io askIO) report(step string, n, total int) {
+	if io.progress != nil {
+		io.progress(askProgress{Step: step, N: n, Total: total})
+	}
 }
 
 var errAskChanged = fmt.Errorf("question menu changed or cleared")
@@ -518,6 +554,7 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 			return 0, false, fmt.Errorf("invalid answer for %q", q.Header)
 		}
 	}
+	io.report("checking", 0, n)
 	ap, err := io.read(ctx, ask)
 	if err != nil {
 		return 0, false, err
@@ -528,6 +565,9 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 	f := ap.focus(ask)
 	if f < 0 {
 		return 0, false, askChanged("cannot tell which tab is showing")
+	}
+	if ap.Single && (n != 1 || f != 0) {
+		return 0, false, askChanged("the single question on screen is not the pending one")
 	}
 	if f != 0 {
 		for i := 0; i < f; i++ {
@@ -548,6 +588,7 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 		if ap.Editing || ap.focus(ask) != i || !ap.optionsMatch(q) {
 			return done, false, askChanged(fmt.Sprintf("question %d is not the one showing", i+1))
 		}
+		io.report("answering", i+1, n)
 		pk := picks[i]
 		if pk.Option > 0 {
 			if err := io.text(ctx, fmt.Sprint(pk.Option)); err != nil {
@@ -557,11 +598,17 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 			return done, false, err
 		}
 		done = i + 1
+		if ap.Single { // no review screen: the press submitted it
+			io.report("submitting", n, n)
+			cleared, err = io.until(ctx, ask, true, func(askPane) bool { return false })
+			return done, cleared, err
+		}
 		ok, err := io.until(ctx, ask, false, func(p askPane) bool { return !p.Editing && p.focus(ask) == i+1 })
 		if err != nil || !ok {
 			return done, false, orChanged(err, "the menu did not advance")
 		}
 	}
+	io.report("verifying", n, n)
 	ap, err = io.read(ctx, ask)
 	if err != nil {
 		return done, false, err
@@ -574,6 +621,7 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 			return done, false, askChanged(fmt.Sprintf("review shows %q for question %d, not the answer sent; not submitted", ap.Answers[i], i+1))
 		}
 	}
+	io.report("submitting", n, n)
 	if err := io.text(ctx, "1"); err != nil {
 		return done, false, err
 	}

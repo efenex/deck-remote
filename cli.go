@@ -142,12 +142,16 @@ type sessionInfo struct {
 	LastActivity int64 `json:"lastActivity,omitempty"`
 
 	// Live activity, parsed best-effort from the pane (handleSessions).
-	Working        bool                `json:"working,omitempty"`     // agent is actively processing
-	Activity       string              `json:"activity,omitempty"`    // the thinking line, e.g. "Channelling… (1m 12s · ↓ 2.1k tokens)"
-	CurrentTool    string              `json:"currentTool,omitempty"` // in-progress tool, e.g. "Bash(…)" / "Task(…)" (Task = subagent)
-	Stalled        bool                `json:"stalled,omitempty"`     // working, but the spinner has been frozen across polls (stall detection)
-	State          string              `json:"state,omitempty"`       // idle | working | completed | interrupted
-	NeedsAttention bool                `json:"needsAttention,omitempty"`
+	Working        bool   `json:"working,omitempty"`     // agent is actively processing
+	Activity       string `json:"activity,omitempty"`    // the thinking line, e.g. "Channelling… (1m 12s · ↓ 2.1k tokens)"
+	CurrentTool    string `json:"currentTool,omitempty"` // in-progress tool, e.g. "Bash(…)" / "Task(…)" (Task = subagent)
+	Stalled        bool   `json:"stalled,omitempty"`     // working, but the spinner has been frozen across polls (stall detection)
+	State          string `json:"state,omitempty"`       // idle | working | completed | interrupted
+	NeedsAttention bool   `json:"needsAttention,omitempty"`
+	// AttentionKind/AttentionN: what the pending request is ("question" | "approval") and how many
+	// questions it holds, for the Deck row's badge.
+	AttentionKind  string              `json:"attentionKind,omitempty"`
+	AttentionN     int                 `json:"attentionN,omitempty"`
 	Ctx            *ctxInfo            `json:"ctx,omitempty"` // context occupancy + model from the statusline record (statusline.go)
 	Capabilities   sessionCapabilities `json:"capabilities"`
 	DegradedReason string              `json:"degradedReason,omitempty"`

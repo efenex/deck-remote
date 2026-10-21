@@ -127,7 +127,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			adapter := s.adapterFor(se)
 			snap, snapErr := adapter.Snapshot(sctx, se, pane, paneErr == nil)
 			if snapErr != nil || snap.DegradedReason != "" {
-				s.attn.set(se.ID, attentionInfo{})
+				s.noteAttention(se.ID, attentionInfo{})
 				return
 			}
 			var st activityState
@@ -145,7 +145,7 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 				st = s.acts.update(se.ID, snap.Activity)
 				snap.Activity.Stalled = st.Stalled
 			}
-			s.attn.set(se.ID, snap.Attention)
+			s.noteAttention(se.ID, snap.Attention)
 
 			// Request/reply correlation is useful even without push subscribers.
 			if snapshotHarness(se.Tool) {

@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Solo2 
+Pick again?
+  1. One
+     First option
+  2. Two
+     Second option
+  3. Three
+     Third option
+❯ 4. hello there
+────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel

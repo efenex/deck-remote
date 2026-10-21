@@ -26,6 +26,13 @@ type activityInfo struct {
 	stallKeySet bool
 }
 
+// activityWithAttention is the claude /api/rc/activity reply.
+type activityWithAttention struct {
+	activityInfo
+	AttentionID   string `json:"attentionId,omitempty"`
+	AttentionKind string `json:"attentionKind,omitempty"`
+}
+
 func codexPaneProgressKey(pane string) string {
 	lines := strings.Split(stripANSI(pane), "\n")
 	start := len(lines) - 14
@@ -168,7 +175,13 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if se.Tool == "claude" {
-		writeJSON(w, http.StatusOK, s.liveActivity(ctx, se.ID))
+		// The sheet polls this every 3 s: it also carries the pending request's id (from the
+		// sweep's cache, no exec), so a card that appears while the sheet is open is fetched.
+		a := activityWithAttention{activityInfo: s.liveActivity(ctx, se.ID)}
+		if attn, ok := s.attn.get(se.ID); ok && attn.Pending {
+			a.AttentionID, a.AttentionKind = attn.ID, attn.Kind
+		}
+		writeJSON(w, http.StatusOK, a)
 		return
 	}
 	snap, snapErr := s.adapterFor(se).Snapshot(ctx, se, "", false)

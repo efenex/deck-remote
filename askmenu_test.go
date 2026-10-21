@@ -132,8 +132,11 @@ type askSim struct {
 	// paneHook runs on each capture (1-based count): the menu changes between two reads.
 	paneHook func(s *askSim, captures int)
 	captures int
+	steps    []askProgress
 	// review overrides what the review screen shows for a question (index → text).
 	review map[int]string
+	// single draws a lone question without tab row or review screen; any selection submits it.
+	single bool
 }
 
 func newAskSim(ask pendingAsk) *askSim {
@@ -147,15 +150,24 @@ func (s *askSim) render() string {
 		return "❯ \n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
 	}
 	var b strings.Builder
-	b.WriteString("⏺ earlier output\n──────────────────────────────────────────\n←")
+	if s.single {
+		b.WriteString("⏺ earlier output\n──────────────────────────────────────────\n ☐ " + s.ask.Questions[0].Header + " \n")
+	} else {
+		b.WriteString("⏺ earlier output\n──────────────────────────────────────────\n←")
+	}
 	for i, q := range s.ask.Questions {
+		if s.single {
+			break
+		}
 		box := "☐"
 		if s.answers[i] != "" {
 			box = "☒"
 		}
 		b.WriteString("  " + box + " " + q.Header)
 	}
-	b.WriteString("  ✔ Submit  →\n\n")
+	if !s.single {
+		b.WriteString("  ✔ Submit  →\n\n")
+	}
 	n := len(s.ask.Questions)
 	if s.focus == n {
 		b.WriteString("Review your answers\n")
@@ -252,7 +264,13 @@ func (s *askSim) sendEnter() {
 	}
 }
 
-func (s *askSim) advance() { s.focus++; s.cursor = 0 }
+func (s *askSim) advance() {
+	s.focus++
+	s.cursor = 0
+	if s.single {
+		s.focus = len(s.ask.Questions) + 1 // no review screen: the selection submitted it
+	}
+}
 
 func (s *askSim) sendNamed(k string) {
 	s.before()
@@ -291,6 +309,7 @@ func (s *askSim) io() askIO {
 		named: func(_ context.Context, k string) error { s.sendNamed(k); return nil },
 		enter: func(context.Context) error { s.sendEnter(); return nil },
 		wait:  time.Millisecond, polls: 3,
+		progress: func(p askProgress) { s.steps = append(s.steps, p) },
 	}
 }
 

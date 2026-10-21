@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -177,14 +178,24 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 		return attentionResponseResult{}, fmt.Errorf("an answer for this session is already being sent")
 	}
 	defer askRunning.Delete(se.ID)
+	var panes, keys int
+	t0 := time.Now()
 	io := askIO{
-		pane:  func(ctx context.Context) (string, error) { return a.s.sessionPane(ctx, se.ID) },
-		text:  func(ctx context.Context, t string) error { return a.s.sendKeyText(ctx, se.ID, t) },
-		named: func(ctx context.Context, k string) error { return a.s.sendNamedKey(ctx, se.ID, k) },
-		enter: func(ctx context.Context) error { return a.s.sendKeyEnter(ctx, se.ID) },
-		wait:  300 * time.Millisecond, polls: 12,
+		pane:  func(ctx context.Context) (string, error) { panes++; return a.s.sessionPane(ctx, se.ID) },
+		text:  func(ctx context.Context, t string) error { keys++; return a.s.sendKeyText(ctx, se.ID, t) },
+		named: func(ctx context.Context, k string) error { keys++; return a.s.sendNamedKey(ctx, se.ID, k) },
+		enter: func(ctx context.Context) error { keys++; return a.s.sendKeyEnter(ctx, se.ID) },
+		// 100 ms polls on the operator lane: a key shows on screen within a frame or two
+		wait: 100 * time.Millisecond, polls: 40,
+		progress: func(p askProgress) {
+			a.s.hub.publish(map[string]any{
+				"type": "attention-progress", "sessionId": se.ID, "attentionId": req.AttentionID,
+				"step": p.Step, "n": p.N, "total": p.Total, "ts": time.Now().Unix(),
+			})
+		},
 	}
 	done, cleared, err := answerAsk(ctx, io, ask, picks)
+	log.Printf("answer walk %s: %d question(s), %d pane read(s), %d key send(s), %s, err=%v", se.ID, len(ask.Questions), panes, keys, time.Since(t0).Round(time.Millisecond), err)
 	if err != nil {
 		if done > 0 {
 			err = fmt.Errorf("%w (%d of %d answers were already entered; check the terminal)", err, done, len(ask.Questions))

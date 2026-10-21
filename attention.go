@@ -34,6 +34,8 @@ type attentionInfo struct {
 	// ReadOnly: shown to the operator but not answerable from here (Claude's
 	// AskUserQuestion menu is answered in the terminal).
 	ReadOnly bool `json:"readOnly,omitempty"`
+	// ReadOnlyReason says why, so the card can show it at once instead of an answer form that fails.
+	ReadOnlyReason string `json:"readOnlyReason,omitempty"`
 }
 
 type attentionAnswer struct {
@@ -70,6 +72,32 @@ func (c *attentionCache) set(id string, info attentionInfo) {
 	c.mu.Unlock()
 }
 
+// swap stores info and returns what was there.
+func (c *attentionCache) swap(id string, info attentionInfo) attentionInfo {
+	c.mu.Lock()
+	prev := c.m[id]
+	c.m[id] = info
+	c.mu.Unlock()
+	return prev
+}
+
+// noteAttention records a session's attention state from the sweep and, when the pending request
+// appeared, changed or went away, tells the open phones at once: a card must not wait for a
+// sheet reopen or a shield tap (task deckremote-card-live).
+func (s *server) noteAttention(id string, info attentionInfo) {
+	prev := s.attn.swap(id, info)
+	if prev.Pending == info.Pending && prev.ID == info.ID {
+		return
+	}
+	if s.hub == nil {
+		return
+	}
+	s.hub.publish(map[string]any{
+		"type": "attention", "sessionId": id, "pending": info.Pending, "kind": info.Kind,
+		"attentionId": info.ID, "n": len(info.Questions), "readOnly": info.ReadOnly, "ts": time.Now().Unix(),
+	})
+}
+
 func (c *attentionCache) get(id string) (attentionInfo, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -83,7 +111,7 @@ func (s *server) handleAttention(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing id")
 		return
 	}
-	ctx, cancel := cliCtx(withProfile(r.Context(), reqProfile(r)), 12*time.Second)
+	ctx, cancel := cliCtx(withOperatorLane(withProfile(r.Context(), reqProfile(r))), 12*time.Second)
 	defer cancel()
 	se, err := s.findSession(ctx, id)
 	if err != nil {
@@ -117,7 +145,7 @@ func (s *server) handleAttentionRespond(w http.ResponseWriter, r *http.Request) 
 	if req.Action == "answer" {
 		timeout = 90 * time.Second // a key batch per question, each re-verified against a paced pane capture
 	}
-	ctx, cancel := cliCtx(withProfile(r.Context(), req.Profile), timeout)
+	ctx, cancel := cliCtx(withOperatorLane(withProfile(r.Context(), req.Profile)), timeout)
 	defer cancel()
 	se, err := s.findSession(ctx, req.SessionID)
 	if err != nil {

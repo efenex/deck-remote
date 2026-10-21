@@ -195,10 +195,13 @@ func (s *server) buildSessions(ctx context.Context, all bool) ([]byte, string, e
 				sessions[i].State = snap.State
 				sessions[i].DegradedReason = snap.DegradedReason
 			}
-			if attn, ok := s.attn.get(sessions[i].ID); ok {
-				sessions[i].NeedsAttention = attn.Pending
-			} else {
-				sessions[i].NeedsAttention = snap.Attention.Pending
+			attn, ok := s.attn.get(sessions[i].ID)
+			if !ok {
+				attn = snap.Attention
+			}
+			sessions[i].NeedsAttention = attn.Pending
+			if attn.Pending {
+				sessions[i].AttentionKind, sessions[i].AttentionN = attn.Kind, len(attn.Questions)
 			}
 		}(i)
 	}

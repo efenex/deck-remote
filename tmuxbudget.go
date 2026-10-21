@@ -39,7 +39,27 @@ const (
 	tmuxLiveFresh = 15 * time.Second
 	// tmuxMaxWait caps a wait for a slot when the caller's context has no deadline.
 	tmuxMaxWait = 30 * time.Second
+	// tmuxOperatorInterval paces the operator lane (below): a phone request, not a sweep.
+	tmuxOperatorInterval = 40 * time.Millisecond
 )
+
+// The operator lane (task deckremote-card-live, 2026-10-21). An answer walk is a few dozen
+// pane captures and the operator is watching it; behind the sweep's 2/s gate each capture queued
+// behind whatever the 4 sweep workers had already reserved, so a 4-question menu took 15-17 s.
+// A context marked withOperatorLane paces on its own gate (one exec per tmuxOperatorInterval,
+// never delayed by sweep reservations; a tmux fault backoff still holds it) and does not move the sweep's slot.
+// Only requests an authenticated phone initiates (answering, loading a card) take it; the sweep
+// and every background caller stay on the shared 2/s budget.
+type tmuxLaneKey struct{}
+
+func withOperatorLane(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tmuxLaneKey{}, true)
+}
+
+func operatorLane(ctx context.Context) bool {
+	v, _ := ctx.Value(tmuxLaneKey{}).(bool)
+	return v
+}
 
 // errTmuxThrottled: the budget (pacing or backoff) refused the exec. Nothing was
 // run, and the session's state is unknown, not gone: callers must not fall back
@@ -59,9 +79,11 @@ type tmuxBudget struct {
 	until    time.Time // no exec before this (backoff)
 	live     map[string]tmuxLiveSet
 	paneAt   map[string]time.Time // last pane refresh per session, for sweep ordering
+	opNext   time.Time            // operator lane: earliest start of its next exec
 
 	throttled atomic.Int64
 	faults    atomic.Int64
+	opExec    atomic.Int64
 }
 
 func newTmuxBudget() *tmuxBudget {
@@ -91,6 +113,38 @@ func (b *tmuxBudget) acquire(ctx context.Context) error {
 	}
 	b.next = slot.Add(b.interval)
 	b.mu.Unlock()
+	if d := time.Until(slot); d > 0 {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// acquireOperator reserves the next operator-lane slot. It ignores the sweep's pacing (other
+// callers' reservations) but still waits out a tmux fault backoff, and honours ctx.
+func (b *tmuxBudget) acquireOperator(ctx context.Context) error {
+	b.mu.Lock()
+	now := time.Now()
+	slot := now
+	if b.opNext.After(slot) {
+		slot = b.opNext
+	}
+	if b.until.After(slot) { // a sick tmux is not hammered by the operator lane either
+		slot = b.until
+	}
+	if dl, ok := ctx.Deadline(); ok && slot.After(dl) {
+		b.mu.Unlock()
+		b.throttled.Add(1)
+		return errTmuxThrottled
+	}
+	b.opNext = slot.Add(tmuxOperatorInterval)
+	b.mu.Unlock()
+	b.opExec.Add(1)
 	if d := time.Until(slot); d > 0 {
 		t := time.NewTimer(d)
 		defer t.Stop()
@@ -163,7 +217,11 @@ func tmuxFault(err error) bool {
 
 // tmuxExec runs one tmux command through the budget. socket "" = tmux's default.
 func (s *server) tmuxExec(ctx context.Context, socket string, args ...string) ([]byte, error) {
-	if err := s.tmux.acquire(ctx); err != nil {
+	acquire := s.tmux.acquire
+	if operatorLane(ctx) {
+		acquire = s.tmux.acquireOperator
+	}
+	if err := acquire(ctx); err != nil {
 		return nil, err
 	}
 	bin := s.cfg.tmuxBin
