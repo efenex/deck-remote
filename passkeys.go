@@ -4,8 +4,9 @@ package main
 // §5 W2, ruling F9a).
 //
 // A mutating `! ` line from the phone needs one WebAuthn assertion with user verification (Face
-// ID) per line. This file is the credential side; the run endpoint that consumes an assertion is
-// W3 (tower_run.go), so nothing here makes a mut line runnable: runCapFor stays ro-only.
+// ID) per line. This file is the credential side; the run endpoint (tower_run.go) consumes the
+// assertion. Until tower's gate flip (W4) the runner reports mut lines not runnable, and both the
+// challenge and the run refuse them before any Face ID.
 //
 //   POST /api/rc/passkey/enrol-code        laptop only (loopback, no serve identity: localClient).
 //        Writes a 6-digit, 5-minute, single-use code to <state>/deck-remote-enrol-code (0600) and
@@ -17,7 +18,7 @@ package main
 //   POST /api/rc/tower/run/challenge       authAct + run:mut + {ask, item, sha256[, cred]} → request
 //        options; the 60 s single-use challenge is bound to (ask, item, sha, class, signature
 //        fingerprint, device-token id, credential id)
-//   verifyRunAssertion                     W3's run handler calls it: spends the challenge, checks
+//   verifyRunAssertion                     the run handler (tower_run.go) calls it: spends the challenge, checks
 //        origin, rpIdHash, UV, signature, sign count (clone semantics), that the credential belongs
 //        to the presenting device token, and that the line's signature did not change since.
 //
@@ -109,7 +110,7 @@ type runChallenge struct {
 	exp     time.Time
 }
 
-// passkeyReceipt is what a verified assertion hands the run endpoint (W3): --expect-cwd/-timeout
+// passkeyReceipt is what a verified assertion hands the run endpoint: --expect-cwd/-timeout
 // come from the challenge, --auth from cred and challenge.
 type passkeyReceipt struct {
 	Method    string `json:"method"`
@@ -623,7 +624,8 @@ func runSigFingerprint(ask string, it *runItem, sigTS any) string {
 var passkeyClasses = map[string]string{"mut": "run:mut"}
 
 // runLineOK is the line-side gate shared by the challenge and the assertion: the item exists with
-// this sha, its class needs an assertion, its signature verifies and the runner calls it phone-ok.
+// this sha, its class needs an assertion, its signature verifies, the runner calls it phone-ok and
+// would run it now.
 func runLineOK(v *runVerify, item int, sha string) (*runItem, int, string) {
 	it := v.item(item)
 	if it == nil {
@@ -640,6 +642,9 @@ func runLineOK(v *runVerify, item int, sha string) (*runItem, int, string) {
 	}
 	if it.PhoneOK == nil || !*it.PhoneOK {
 		return it, http.StatusForbidden, "laptop only"
+	}
+	if !it.Runnable { // no Face ID for a line the runner would refuse (before W4: class:mut)
+		return it, http.StatusForbidden, "runner says not runnable: " + it.Why
 	}
 	return it, 0, ""
 }
@@ -759,8 +764,10 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 // challenge whatever the outcome. On success the credential's sign count is stored and the
 // receipt names the credential and challenge for the run's journal record. Every outcome is one
 // action-log line. Returns (receipt, HTTP status, reason); reason "" means verified.
-// W3's run endpoint calls this for a mut line before it execs the runner.
-func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string, item int, sha string, assertion []byte) (passkeyReceipt, int, string) {
+// The run endpoint calls this for a mut line before it execs the runner.
+// v is a verify the caller fetched after receiving the assertion (the run handler's own); nil
+// fetches one here.
+func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string, item int, sha string, assertion []byte, v *runVerify) (passkeyReceipt, int, string) {
 	entry := map[string]any{"action": "run/assert", "allowed": false, "device": dt.Name, "login": tsLogin(r), "ask": ask, "item": item}
 	if len(sha) >= 8 {
 		entry["sha8"] = sha[:8]
@@ -823,9 +830,10 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
 		return refuse(http.StatusForbidden, "user verification (Face ID) did not happen")
 	}
-	v, err := s.runVerify(ask)
-	if err != nil {
-		return refuse(http.StatusBadGateway, err.Error())
+	if v == nil {
+		if v, err = s.runVerify(ask); err != nil {
+			return refuse(http.StatusBadGateway, err.Error())
+		}
 	}
 	it, code, why := runLineOK(v, item, sha)
 	if why != "" {

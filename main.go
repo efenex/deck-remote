@@ -342,7 +342,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/tower/run/stream", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunStream))))
 	mux.Handle("GET /api/rc/tower/run/log", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunLog))))
 	// run-bang phase 2 #5 passkeys (passkeys.go). The enrol code is laptop-only and goes to a 0600
-	// file, never into a response; the rest is the act chain. No route runs a mut line yet (W3).
+	// file, never into a response; the rest is the act chain.
 	mux.Handle("POST /api/rc/passkey/enrol-code", s.auth(http.HandlerFunc(s.handleEnrolCode)))
 	mux.Handle("POST /api/rc/passkey/register/begin", s.auth(s.authAct(http.HandlerFunc(s.handlePasskeyRegisterBegin))))
 	mux.Handle("POST /api/rc/passkey/register/finish", s.auth(s.authAct(http.HandlerFunc(s.handlePasskeyRegisterFinish))))

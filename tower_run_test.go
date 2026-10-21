@@ -26,7 +26,7 @@ var (
 func verifyFixture(run map[string]any) string {
 	items := []map[string]any{
 		{"index": 0, "sha256": shaRo, "class": "ro", "sig": "ok", "runnable": true, "why": nil, "run": run, "cwd": "/Users/op", "timeout": 120},
-		{"index": 1, "sha256": shaMut, "class": "mut", "sig": "ok", "runnable": false, "why": "class:mut", "run": nil, "cwd": "/Users/op", "timeout": 900},
+		{"index": 1, "sha256": shaMut, "class": "mut", "phone_ok": true, "sig": "ok", "runnable": false, "why": "class:mut", "run": nil, "cwd": "/Users/op", "timeout": 900},
 		{"index": 3, "sha256": shaV1, "class": "ro", "sig": "sig-v1", "runnable": false, "why": "sig-v1", "run": nil},
 		{"index": 4, "sha256": shaStale, "class": "ro", "sig": "sig-stale-params", "runnable": false, "why": "sig-stale-params", "run": nil},
 	}
@@ -141,9 +141,12 @@ func TestRunCapsMint(t *testing.T) {
 	if runCapFor("ro") != "run:ro" {
 		t.Fatal("ro needs run:ro")
 	}
-	for _, c := range []string{"mut", "secret", "destructive", "interactive", "copy", ""} {
+	if runCapFor("mut") != "run:mut" {
+		t.Fatal("phase 2: mut needs run:mut")
+	}
+	for _, c := range []string{"secret", "destructive", "interactive", "copy", ""} {
 		if runCapFor(c) != "" {
-			t.Fatalf("phase 1: class %q must have no phone cap", c)
+			t.Fatalf("class %q must have no phone cap", c)
 		}
 	}
 }
@@ -168,8 +171,9 @@ func TestRunSharedTokenNeverRuns(t *testing.T) {
 	}
 }
 
-// D3: cap matrix × class matrix. Only run:ro (held directly, or through run:mut since phase-2
-// #4) on an ro line reaches `run`; mut lines stay unrunnable until the phase-2 gate flip.
+// D3: cap matrix × class matrix. run:ro (held directly, or through run:mut since phase-2 #4) on
+// an ro line reaches `run`. A mut line needs run:mut, and until tower's gate flip (W4) the
+// runner's verify says class:mut, refused before any Face ID (passkey path: tower_run_mut_test.go).
 func TestRunCapClassMatrix(t *testing.T) {
 	cases := []struct {
 		caps []string
@@ -180,10 +184,11 @@ func TestRunCapClassMatrix(t *testing.T) {
 	}{
 		{[]string{"act"}, 0, shaRo, 403, "lacks the run:ro"},
 		{[]string{"act", "run:mut"}, 0, shaRo, 202, `"id":"ask1:0:aaaaaaaa"`},
-		{[]string{"act", "run:mut"}, 1, shaMut, 403, "needs phase 2"},
+		{[]string{"act", "run:mut"}, 1, shaMut, 403, "runner says not runnable: class:mut"},
 		{[]string{"act", "run:secret"}, 0, shaRo, 403, "lacks the run:ro"},
-		{[]string{"act", "run:ro"}, 1, shaMut, 403, "needs phase 2"},
-		{[]string{"act", "run:ro", "run:mut"}, 1, shaMut, 403, "needs phase 2"},
+		{[]string{"act", "run:ro"}, 1, shaMut, 403, "lacks run:mut"},
+		{[]string{"act", "run:ro", "run:mut"}, 1, shaMut, 403, "runner says not runnable: class:mut"},
+		{[]string{"act", "run:mut"}, 3, shaV1, 403, "sig-v1"},
 		{[]string{"act", "run:ro"}, 0, shaRo, 202, `"id":"ask1:0:aaaaaaaa"`},
 	}
 	for i, c := range cases {

@@ -238,7 +238,7 @@ func (s *server) handleTowerWhoami(w http.ResponseWriter, r *http.Request) {
 	tok := bearerHeaderOnly(r)
 	if dt, ok := s.tokens.find(tok); ok {
 		out["device"] = dt.Name
-		out["caps"] = dt.Caps
+		out["caps"] = dt.effectiveCaps() // run:mut carries run:ro; the PWA checks caps by name
 		out["act"] = dt.hasCap("act")
 	} else if subtleConstantEq(bearer(r), s.cfg.token) {
 		out["device"] = "shared"

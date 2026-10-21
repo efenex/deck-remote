@@ -36,8 +36,8 @@ func TestRunCapsImplication(t *testing.T) {
 	if got := (deviceToken{Caps: []string{"act", "run:mut"}}).effectiveCaps(); strings.Join(got, ",") != "act,run:mut,run:ro" {
 		t.Errorf("effectiveCaps = %v", got)
 	}
-	// Phase-2 runnability stays off on deck-remote's side: only ro maps to a cap.
-	for cls, want := range map[string]string{"ro": "run:ro", "mut": "", "secret": "", "destructive": "", "interactive": "", "copy": ""} {
+	// Phase 2 W3: mut maps to run:mut (plus a passkey); secret stays phase 3.
+	for cls, want := range map[string]string{"ro": "run:ro", "mut": "run:mut", "secret": "", "destructive": "", "interactive": "", "copy": ""} {
 		if got := runCapFor(cls); got != want {
 			t.Errorf("runCapFor(%q) = %q, want %q", cls, got, want)
 		}

@@ -148,23 +148,39 @@ func (a *softAuth) get(t *testing.T, options json.RawMessage) json.RawMessage {
 
 // pkRunner stubs `run_bang.py verify`; exp moves when the test re-signs.
 type pkRunner struct {
-	mu      sync.Mutex
-	exp     int64
-	sigTS   string
-	verifyN int
+	mu         sync.Mutex
+	exp        int64
+	sigTS      string
+	verifyN    int
+	preW4      bool       // the runner's phone gate is still {ro}: mut lines are class:mut, not runnable
+	runs       [][]string // argv of every `run`
+	runRC      int
+	runOut     string
+	laptopItem bool // item 1's phone_ok (false = laptop only)
 }
 
 func (p *pkRunner) exec(ctx context.Context, argv []string) (int, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if argv[3] == "run" {
+		p.runs = append(p.runs, argv)
+		if p.runOut != "" {
+			return p.runRC, p.runOut
+		}
+		return 0, `{"id":"ask1:1:bbbbbbbb","class":"mut","log":"state/runs/x.log","pid":42,"timeout":900}` + "\n"
+	}
 	if argv[3] != "verify" {
-		return 1, `{"error":"W2 never runs anything"}`
+		return 1, `{"error":"unexpected"}`
 	}
 	p.verifyN++
-	yes, no := true, false
+	yes, no := !p.laptopItem, false
+	mutRunnable, mutWhy := !p.preW4, any(nil)
+	if p.preW4 {
+		mutWhy = "class:mut"
+	}
 	items := []map[string]any{
 		{"index": 0, "sha256": shaRo, "class": "ro", "phone_ok": true, "sig": "ok", "runnable": true, "cwd": "/Users/op", "timeout": 120, "exp": p.exp, "kid": "k1"},
-		{"index": 1, "sha256": shaPhone, "class": "mut", "phone_ok": &yes, "sig": "ok", "runnable": false, "why": "class:mut", "cwd": "/Users/op/src", "timeout": 900, "exp": p.exp, "kid": "k1"},
+		{"index": 1, "sha256": shaPhone, "class": "mut", "phone_ok": &yes, "sig": "ok", "runnable": mutRunnable, "why": mutWhy, "cwd": "/Users/op/src", "timeout": 900, "exp": p.exp, "kid": "k1"},
 		{"index": 2, "sha256": shaLaptop, "class": "mut", "phone_ok": &no, "laptop_only": "file-driven", "sig": "ok", "runnable": false, "why": "laptop-only", "cwd": "/Users/op", "timeout": 900, "exp": p.exp, "kid": "k1"},
 	}
 	return 0, jsonStr(map[string]any{"ask": "ask1", "status": "open", "ask_ts": "2026-10-21T20:00:00Z", "sig_ts": p.sigTS, "items": items}) + "\n"
@@ -304,7 +320,7 @@ func (e *pkEnv) assert(tok string, item int, sha string, assertion json.RawMessa
 	}
 	r := httptest.NewRequest("POST", "/api/rc/tower/run", nil)
 	r.Header.Set("Tailscale-User-Login", pkOperator)
-	return e.s.verifyRunAssertion(r, dt, "ask1", item, sha, assertion)
+	return e.s.verifyRunAssertion(r, dt, "ask1", item, sha, assertion, nil)
 }
 
 func (e *pkEnv) lastLog(action string) map[string]any {
@@ -612,10 +628,12 @@ func TestRunChallengeGates(t *testing.T) {
 	if m["allowed"] != true || m["class"] != "mut" || len(m["challenge"].(string)) != 8 || m["cred"] == nil {
 		t.Errorf("challenge log: %v", m)
 	}
-	if runCapFor("mut") != "" || runCapFor("secret") != "" {
-		t.Fatal("phase-2 runnability leaked: runCapFor grants a non-ro class")
+	if runCapFor("secret") != "" {
+		t.Fatal("secret is phase 3")
 	}
-	expectCode(t, "run endpoint still refuses mut", e.req("POST", "/api/rc/tower/run", mut, map[string]any{"ask": "ask1", "item": 1, "sha256": shaPhone}), 403, "")
+	// Before tower's gate flip (W4) the runner says class:mut: no challenge, so no Face ID.
+	e.run.preW4 = true
+	expectCode(t, "pre-W4 mut line", e.challenge(mut, 1, shaPhone), 403, "runner says not runnable: class:mut")
 }
 
 // 10 challenges a minute per token; the 11th is 429 and logged; the window slides.
@@ -672,7 +690,7 @@ func TestPasskeyRevokeCascade(t *testing.T) {
 		t.Errorf("revoke log: %v", m)
 	}
 	r := httptest.NewRequest("POST", "/api/rc/tower/run", nil)
-	if _, _, why := e.s.verifyRunAssertion(r, dt, "ask1", 1, shaPhone, asr); !strings.Contains(why, "unknown or already used") {
+	if _, _, why := e.s.verifyRunAssertion(r, dt, "ask1", 1, shaPhone, asr, nil); !strings.Contains(why, "unknown or already used") {
 		t.Errorf("revoked token's open challenge: %q", why)
 	}
 

@@ -91,13 +91,17 @@ func (t deviceToken) effectiveCaps() []string {
 var knownCaps = map[string]bool{"act": true, "doc": true, "run:ro": true, "run:mut": true, "run:secret": true}
 
 // runCapFor is the cap a device token needs to run a line of class cls from the
-// phone, or "" when no cap runs that class in this phase. Phase 1: ro needs
-// run:ro; every other class is
-// copy-only on the phone (run:mut holds run:ro through capImplies, but mut lines stay
-// unrunnable here until the phase-2 gate flip). The runner refuses non-ro again on its side.
+// phone, or "" when no cap runs that class in this phase. ro needs run:ro; mut needs
+// run:mut (phase 2 W3, run-bang-phase2-review §5 #6) and a passkey assertion. secret stays
+// phase 3; destructive, interactive and copy never run from the phone. Until tower's gate flip
+// (W4) the runner's verify reports a mut line not runnable (class:mut), so the run endpoint
+// refuses it before any Face ID; the runner refuses it again on its side.
 func runCapFor(cls string) string {
-	if cls == "ro" {
+	switch cls {
+	case "ro":
 		return "run:ro"
+	case "mut":
+		return "run:mut" // plus one passkey assertion per line (passkeys.go); the runner's phone gate opens at W4
 	}
 	return ""
 }

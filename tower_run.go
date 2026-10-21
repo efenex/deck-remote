@@ -42,9 +42,14 @@ const (
 
 // runHints are the re-sign hints for the two refusals the operator fixes by re-signing
 // (tower scripts/runbang/sign.py HINTS; "<id>" is the ask id).
+// Phase 2 adds the runner's own three (runner.py HINTS). These are the fallback for verify, which
+// does not emit a hint per item; a run refusal carries the runner's hint and that one wins.
 var runHints = map[string]string{
 	"sig-v1":           "re-sign as v2: run_bang.py resign --ask <id>",
 	"sig-stale-params": "cwd or timeout changed after signing: re-sign (journal.py add --kind ask ... --sign, or run_bang.py resign)",
+	"laptop-only":      "laptop only (phase 2, F8a/F10a): copy the line and run it on the laptop",
+	"params-changed":   "the signed cwd/timeout changed since the sheet loaded (re-signed?): reload and confirm again",
+	"still-running":    "the previous attempt's process group is still alive: wait for it, or stop it on the laptop",
 }
 
 func runHint(reason, ask string) string {
@@ -153,9 +158,10 @@ func (s *server) runCapOK(r *http.Request) (deviceToken, string) {
 }
 
 type towerRunReq struct {
-	Ask    string `json:"ask"`
-	Item   *int   `json:"item"`
-	SHA256 string `json:"sha256"`
+	Ask       string          `json:"ask"`
+	Item      *int            `json:"item"`
+	SHA256    string          `json:"sha256"`
+	Assertion json.RawMessage `json:"assertion,omitempty"` // WebAuthn assertion for a class that needs one (passkeys.go)
 }
 
 // POST /api/rc/tower/run — see the file comment. Gated by authAct.
@@ -173,7 +179,7 @@ func (s *server) handleTowerRun(w http.ResponseWriter, r *http.Request) {
 	dt, why := s.runCapOK(r)
 	entry["device"] = dt.Name
 	var req towerRunReq
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, passkeyBodyMax)).Decode(&req); err != nil {
 		refuse(http.StatusBadRequest, "bad json", nil)
 		return
 	}
@@ -218,17 +224,41 @@ func (s *server) handleTowerRun(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusForbidden, "device token "+dt.Name+" lacks "+runCapFor(it.Class), nil)
 		return
 	}
+	_, needsPasskey := passkeyClasses[it.Class]
+	if needsPasskey && (it.PhoneOK == nil || !*it.PhoneOK) {
+		refuse(http.StatusForbidden, "laptop only", map[string]any{"refused": "laptop-only", "hint": runHint("laptop-only", req.Ask)})
+		return
+	}
 	if !it.Runnable {
 		refuse(http.StatusForbidden, "runner says not runnable: "+it.Why, map[string]any{"refused": it.Why, "hint": runHint(it.Why, req.Ask)})
 		return
+	}
+	argv := []string{"run", "--ask", req.Ask, "--item", strconv.Itoa(*req.Item), "--sha", req.SHA256,
+		"--via", "phone", "--device", dt.Name, "--login", tsLogin(r)}
+	if needsPasskey {
+		// One Face ID per line (F2 = b): the assertion is checked before the dup mark so a refused
+		// one never holds it. The expected cwd/timeout are the ones the challenge bound (what the
+		// sheet showed), never re-read from this verify.
+		if len(req.Assertion) == 0 {
+			refuse(http.StatusForbidden, "class "+it.Class+" needs a passkey assertion (Face ID)", map[string]any{"needsAssertion": true})
+			return
+		}
+		rcpt, code, why := s.verifyRunAssertion(r, dt, req.Ask, *req.Item, req.SHA256, req.Assertion, v)
+		if why != "" {
+			entry["outcome"] = "assertion-refused"
+			refuse(code, why, map[string]any{"assertion": "refused"})
+			return
+		}
+		auth, _ := json.Marshal(map[string]string{"method": rcpt.Method, "cred": rcpt.Cred, "challenge": rcpt.Challenge})
+		entry["cred"], entry["challenge"] = rcpt.Cred, rcpt.Challenge
+		argv = append(argv, "--expect-cwd", rcpt.Cwd, "--expect-timeout", strconv.Itoa(rcpt.Timeout), "--auth", string(auth))
 	}
 	dupKey := fmt.Sprintf("run\x00%d\x00%s", *req.Item, req.SHA256)
 	if s.towerDup(req.Ask, dupKey) {
 		refuse(http.StatusTooManyRequests, "duplicate tap: this line was just started", nil)
 		return
 	}
-	rc, out := s.runBang(s.runBangArgv("run", "--ask", req.Ask, "--item", strconv.Itoa(*req.Item), "--sha", req.SHA256,
-		"--via", "phone", "--device", dt.Name, "--login", tsLogin(r)))
+	rc, out := s.runBang(s.runBangArgv(argv...))
 	var res struct {
 		ID      string `json:"id"`
 		Class   string `json:"class"`
@@ -287,10 +317,13 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 		} else if h := runHint(it.Sig, ask); h != "" {
 			m["hint"] = h
 		}
-		m["phone_ok"] = runCapFor(it.Class) != ""
+		// phone_ok / laptop_only are the runner's phone sub-class, passed through as is;
+		// phone_cap says whether this phase gives the class a phone cap at all.
+		m["phone_cap"] = runCapFor(it.Class) != ""
+		_, m["passkey"] = passkeyClasses[it.Class]
 		items = append(items, m)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ask": v.Ask, "status": v.Status, "items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"ask": v.Ask, "status": v.Status, "ask_ts": v.AskTS, "sig_ts": v.SigTS, "items": items})
 }
 
 // runIDOK: a run id is "<ask>:<item>:<sha8>[:<attempt>]" (tower runs.py); the stream is only for
