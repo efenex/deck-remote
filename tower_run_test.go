@@ -168,7 +168,8 @@ func TestRunSharedTokenNeverRuns(t *testing.T) {
 	}
 }
 
-// D3: cap matrix × class matrix. Only act+run:ro on an ro line reaches `run`.
+// D3: cap matrix × class matrix. Only run:ro (held directly, or through run:mut since phase-2
+// #4) on an ro line reaches `run`; mut lines stay unrunnable until the phase-2 gate flip.
 func TestRunCapClassMatrix(t *testing.T) {
 	cases := []struct {
 		caps []string
@@ -178,7 +179,8 @@ func TestRunCapClassMatrix(t *testing.T) {
 		want string
 	}{
 		{[]string{"act"}, 0, shaRo, 403, "lacks the run:ro"},
-		{[]string{"act", "run:mut"}, 0, shaRo, 403, "lacks the run:ro"},
+		{[]string{"act", "run:mut"}, 0, shaRo, 202, `"id":"ask1:0:aaaaaaaa"`},
+		{[]string{"act", "run:mut"}, 1, shaMut, 403, "needs phase 2"},
 		{[]string{"act", "run:secret"}, 0, shaRo, 403, "lacks the run:ro"},
 		{[]string{"act", "run:ro"}, 1, shaMut, 403, "needs phase 2"},
 		{[]string{"act", "run:ro", "run:mut"}, 1, shaMut, 403, "needs phase 2"},

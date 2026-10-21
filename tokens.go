@@ -50,8 +50,37 @@ func containsFold(xs []string, c string) bool {
 	return false
 }
 
-// hasCap reports whether the token carries the capability (case-insensitive).
-func (t deviceToken) hasCap(c string) bool { return containsFold(t.Caps, c) }
+// capImplies maps a cap to the caps it carries with it (docs/design/run-bang-phase2-review.md
+// §5 #4): run:mut runs mutating lines and read-only ones. run:* needing act is a mint rule
+// (mint refuses run:* without act), not an implication: hasCap("act") never derives from run:*.
+var capImplies = map[string][]string{"run:mut": {"run:ro"}}
+
+// hasCap reports whether the token carries the capability (case-insensitive), directly or
+// through capImplies.
+func (t deviceToken) hasCap(c string) bool {
+	if containsFold(t.Caps, c) {
+		return true
+	}
+	for _, have := range t.Caps {
+		if containsFold(capImplies[strings.ToLower(have)], c) {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveCaps is Caps plus what they imply, for whoami (the PWA checks caps by name).
+func (t deviceToken) effectiveCaps() []string {
+	out := append([]string{}, t.Caps...)
+	for _, have := range t.Caps {
+		for _, c := range capImplies[strings.ToLower(have)] {
+			if !containsFold(out, c) {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
 
 // knownCaps is the closed set a mint may grant; anything else is refused so a
 // typo never silently mints a read-only token the operator believes can act.
@@ -63,8 +92,9 @@ var knownCaps = map[string]bool{"act": true, "doc": true, "run:ro": true, "run:m
 
 // runCapFor is the cap a device token needs to run a line of class cls from the
 // phone, or "" when no cap runs that class in this phase. Phase 1: ro needs
-// exactly run:ro (run:mut does not imply it yet); every other class is
-// copy-only on the phone. The runner refuses non-ro again on its side.
+// run:ro; every other class is
+// copy-only on the phone (run:mut holds run:ro through capImplies, but mut lines stay
+// unrunnable here until the phase-2 gate flip). The runner refuses non-ro again on its side.
 func runCapFor(cls string) string {
 	if cls == "ro" {
 		return "run:ro"
@@ -181,6 +211,21 @@ func (ts *tokenStore) find(raw string) (deviceToken, bool) {
 	return match, found
 }
 
+// byID returns the device token with the given id (the stable handle; tickets bind to it).
+func (ts *tokenStore) byID(id string) (deviceToken, bool) {
+	if id == "" {
+		return deviceToken{}, false
+	}
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	for _, t := range ts.tokens {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return deviceToken{}, false
+}
+
 // mint creates and persists a new device token with the given name and returns
 // the metadata plus the RAW secret (shown exactly once — never stored raw).
 func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, error) {
@@ -287,7 +332,7 @@ func (s *server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 	if dt, ok := s.tokens.find(tok); ok {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"kind": "device", "admin": false,
-			"id": dt.ID, "name": dt.Name, "created": dt.Created, "caps": dt.Caps, "act": dt.hasCap("act"),
+			"id": dt.ID, "name": dt.Name, "created": dt.Created, "caps": dt.effectiveCaps(), "act": dt.hasCap("act"),
 		})
 		return
 	}
@@ -310,6 +355,17 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 		Caps []string `json:"caps"` // e.g. ["act"] for a phone that may perform tower actions
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	for _, c := range body.Caps {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c)), "run:") {
+			continue
+		}
+		if why := localClient(r); why != "" {
+			s.towerLog(map[string]any{"action": "devices/mint", "allowed": false, "caps": body.Caps, "login": tsLogin(r), "reason": why})
+			httpError(w, http.StatusForbidden, "run:* caps are minted from the laptop only: "+why)
+			return
+		}
+		break
+	}
 	dt, raw, err := s.tokens.mint(body.Name, body.Caps...)
 	if err != nil {
 		if strings.Contains(err.Error(), "capabilit") {
@@ -330,6 +386,25 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 		"token":    raw,
 		"phoneUrl": phoneURL,
 	})
+}
+
+// localClient reports "" when r comes from a client on this machine itself, the only place a
+// run:* cap may be minted (run-bang-phase2-review §1.2, §5 #4): the shared token works from
+// anywhere on the tailnet, so authShared alone would let a shared-token holder mint run:mut.
+// A loopback peer is not enough: `tailscale serve` relays are loopback peers too. serve stamps
+// Tailscale-User-Login (absent for tagged nodes and Funnel) and the X-Forwarded-* headers on
+// every relayed request, so any of them marks a relay. A local process can forge their absence,
+// which is accepted: that process already runs as the operator on the laptop.
+func localClient(r *http.Request) string {
+	if ok, _ := viaServeProxy(r); !ok {
+		return "request did not come from loopback"
+	}
+	for _, h := range []string{"Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-Funnel-Request", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+		if r.Header.Get(h) != "" {
+			return "request came through tailscale serve (" + h + ")"
+		}
+	}
+	return ""
 }
 
 // handleDeviceRevoke removes a device token by id or name. Admin-gated.
