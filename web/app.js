@@ -454,7 +454,10 @@
       if (b0.hint) wrap.append(el('div', 'trbhint', '↳ ' + b0.hint));
     }
     const row = el('div', 'tcmd');
-    const pre = el('pre', '', text);
+    const pre = el('pre', '');
+    // Invisible / bidi characters are drawn as ⟨U+XXXX⟩ so what the phone shows is what runs.
+    if (window.DeckRunBang) DeckRunBang.visibleParts(text).forEach((p) => pre.append(p.esc ? el('span', 'rbesc', p.s) : document.createTextNode(p.s)));
+    else pre.textContent = text;
     const b = el('button', 'tcopy', 'Copy');
     b.addEventListener('click', () => towerCopy(text, b));
     row.append(pre, b);

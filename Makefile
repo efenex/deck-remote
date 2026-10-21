@@ -11,3 +11,8 @@ build:
 
 test:
 	go test ./... && node --test web/
+
+# Browser end-to-end (run-bang phase 2 #7): system Chrome via playwright-core; `cd e2e && npm install` once.
+.PHONY: e2e
+e2e:
+	cd e2e && node --test runbang.e2e.mjs
