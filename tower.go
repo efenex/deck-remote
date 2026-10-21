@@ -131,10 +131,16 @@ func bearerHeaderOnly(r *http.Request) string {
 // towerActionOK decides whether r may perform a tower action. Returns the
 // device-token name on success and a short refusal reason otherwise.
 func (s *server) towerActionOK(r *http.Request) (device string, reason string) {
+	return s.actorOK(r, bearerHeaderOnly(r))
+}
+
+// actorOK is towerActionOK for a token the caller extracted: the header for every
+// action endpoint; the ?token= query only for the terminal WebSocket (typed.go),
+// which a browser cannot give an Authorization header.
+func (s *server) actorOK(r *http.Request, tok string) (device string, reason string) {
 	if s.cfg.towerOperator == "" {
 		return "", "actions disabled: --tower-operator not set"
 	}
-	tok := bearerHeaderOnly(r)
 	dt, ok := s.tokens.find(tok)
 	if !ok {
 		if subtleConstantEq(tok, s.cfg.token) {

@@ -2402,7 +2402,9 @@
       }
     } catch (e) {
       state.pending.delete(id);
-      bubble.queued = false; bubble.status = 'failed'; bubble.error = 'Send failed: ' + e.message; bubble.retryable = true;
+      // 403 = the typed-input gate (typed.go): this token cannot type into sessions.
+      if (e.status === 403) toast('Not sent', e.message);
+      bubble.queued = false; bubble.status = 'failed'; bubble.error = 'Send failed: ' + e.message; bubble.retryable = e.status !== 403;
       renderConvo(id);
       renderDeck();
     }
@@ -2637,6 +2639,7 @@
     } catch (e) {
       const foot = $('#approveFoot');
       if (foot) { foot.textContent = 'Response failed: ' + e.message; foot.style.color = 'var(--red)'; }
+      if (e.status === 403) toast('Not sent', e.message);
       checkAttention(s, false);
     }
   }

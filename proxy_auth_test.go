@@ -24,8 +24,8 @@ func TestProxiedRoutesRequireAuth(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".agent-deck"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := newServer(config{token: "shared", homeDir: home, profile: "default"}, u)
-	_, dev, err := s.tokens.mint("phone")
+	s := newServer(config{token: "shared", homeDir: home, profile: "default", towerOperator: "op@example.com"}, u)
+	_, dev, err := s.tokens.mint("phone", "act")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,10 @@ func TestProxiedRoutesRequireAuth(t *testing.T) {
 
 	gotAuth, gotQuery = "", ""
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/ws/session/x?token="+dev+"&cols=80", nil))
+	ws := httptest.NewRequest("GET", "/ws/session/x?token="+dev+"&cols=80", nil)
+	ws.RemoteAddr = "127.0.0.1:5555"
+	ws.Header.Set("Tailscale-User-Login", "op@example.com")
+	h.ServeHTTP(rec, ws)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("device token via query: got %d, want 200", rec.Code)
 	}
@@ -77,10 +80,20 @@ func TestProxiedRoutesOrigin(t *testing.T) {
 	}))
 	defer upstream.Close()
 	u, _ := url.Parse(upstream.URL)
-	s := newServer(config{token: "shared", homeDir: t.TempDir(), profile: "default"}, u)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".agent-deck"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(config{token: "shared", homeDir: home, profile: "default", towerOperator: "op@example.com"}, u)
+	_, dev, err := s.tokens.mint("phone", "act")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := s.routes()
 
-	req := httptest.NewRequest("GET", "https://deck.example/ws/session/x?token=shared", nil)
+	req := httptest.NewRequest("GET", "https://deck.example/ws/session/x?token="+dev, nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("Tailscale-User-Login", "op@example.com")
 	req.Header.Set("Origin", "https://deck.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -88,7 +101,9 @@ func TestProxiedRoutesOrigin(t *testing.T) {
 		t.Fatalf("same origin: code %d, upstream Origin %q", rec.Code, gotOrigin)
 	}
 
-	req = httptest.NewRequest("GET", "https://deck.example/ws/session/x?token=shared", nil)
+	req = httptest.NewRequest("GET", "https://deck.example/ws/session/x?token="+dev, nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.Header.Set("Tailscale-User-Login", "op@example.com")
 	req.Header.Set("Origin", "https://evil.example")
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

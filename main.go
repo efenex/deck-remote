@@ -300,14 +300,14 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/reply", s.auth(http.HandlerFunc(s.handleReply)))
 	mux.Handle("GET /api/rc/history", s.auth(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("GET /api/rc/status", s.auth(http.HandlerFunc(s.handleStatus)))
-	mux.Handle("POST /api/rc/ask", s.auth(http.HandlerFunc(s.handleAsk)))
-	mux.Handle("POST /api/rc/slash", s.auth(http.HandlerFunc(s.handleSlash)))
+	mux.Handle("POST /api/rc/ask", s.auth(s.authTyped(http.HandlerFunc(s.handleAsk))))     // typed input (typed.go)
+	mux.Handle("POST /api/rc/slash", s.auth(s.authTyped(http.HandlerFunc(s.handleSlash)))) // typed input (typed.go)
 	mux.Handle("GET /api/rc/permission", s.auth(http.HandlerFunc(s.handlePermission)))
 	mux.Handle("GET /api/rc/activity", s.auth(http.HandlerFunc(s.handleActivity)))
-	mux.Handle("POST /api/rc/approve", s.auth(http.HandlerFunc(s.handleApprove)))
+	mux.Handle("POST /api/rc/approve", s.auth(s.authTyped(http.HandlerFunc(s.handleApprove)))) // typed input (typed.go)
 	mux.Handle("GET /api/rc/attention", s.auth(http.HandlerFunc(s.handleAttention)))
-	mux.Handle("POST /api/rc/attention/respond", s.auth(http.HandlerFunc(s.handleAttentionRespond)))
-	mux.Handle("POST /api/rc/interrupt", s.auth(http.HandlerFunc(s.handleInterrupt)))
+	mux.Handle("POST /api/rc/attention/respond", s.auth(s.authTyped(http.HandlerFunc(s.handleAttentionRespond)))) // typed input (typed.go)
+	mux.Handle("POST /api/rc/interrupt", s.auth(s.authTyped(http.HandlerFunc(s.handleInterrupt))))                // typed input (typed.go)
 	mux.Handle("GET /api/rc/events", s.auth(http.HandlerFunc(s.handleEvents)))
 
 	// deck-remote's OWN Web Push (event-driven via the watcher) — the PWA uses
@@ -349,9 +349,9 @@ func (s *server) routes() http.Handler {
 	// profile selector. The PWA gates the terminal affordance accordingly.
 	// Bearer-gated like everything above: the proxy injects the shared token,
 	// so an unauthenticated route here would hand any tailnet peer a shell.
-	mux.Handle("/api/", s.auth(sameOrigin(s.proxy)))
-	mux.Handle("/events/", s.auth(sameOrigin(s.proxy)))
-	mux.Handle("/ws/", s.auth(sameOrigin(s.proxy)))
+	mux.Handle("/api/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
+	mux.Handle("/events/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
+	mux.Handle("/ws/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
 
 	// Serve the manifest with the correct MIME (Go's FileServer doesn't know
 	// .webmanifest) so installability is clean.
