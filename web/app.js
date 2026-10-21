@@ -1319,8 +1319,10 @@
     const probe = document.querySelector('.dbg-probe') || document.body.appendChild(el('div', 'dbg-probe'));
     const ps = getComputedStyle(probe);
     const vv = window.visualViewport;
+    const lvh = document.querySelector('.dbg-lvh') || document.body.appendChild(el('div', 'dbg-lvh'));
     const lines = [
       'screen ' + screen.width + 'x' + screen.height + ' dpr ' + devicePixelRatio,
+      '100lvh ' + r(lvh.getBoundingClientRect().height) + ' (want = screen ' + screen.height + ')',
       'innerH ' + innerHeight + ' docClientH ' + document.documentElement.clientHeight +
         ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) : 'none'),
       'safe top ' + ps.paddingTop + ' bottom ' + ps.paddingBottom,

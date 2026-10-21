@@ -60,3 +60,21 @@ test('.sheet is sized by inset:0, not a (possibly stale) 100dvh height', () => {
   assert.match(r, /inset:0/);
   assert.doesNotMatch(r, /height:/);
 });
+
+test('iOS standalone: root and full-screen fixed layers are pinned to 100lvh (web view layout viewport is short by the top inset)', () => {
+  const i = css.indexOf('@supports (height:100lvh)');
+  assert.ok(i >= 0, 'lvh block missing');
+  const blk = css.slice(i, css.indexOf('\n  }\n', i) + 5);
+  assert.match(blk, /@media \(display-mode:standalone\)/);
+  assert.match(blk, /html,body\{height:100lvh\}/);
+  assert.match(blk, /#app,\.scrim,\.sheet,\.docview\{top:0;bottom:auto;height:100lvh\}/);
+  // after the base rules, so it wins on equal specificity
+  assert.ok(i > css.indexOf('.docview{position:fixed'), 'lvh block must follow .docview');
+  assert.ok(i > css.indexOf('#app{position:fixed'), 'lvh block must follow #app');
+});
+
+test('home-screen meta stays black-translucent + viewport-fit=cover (the web view is only full-height with both)', () => {
+  assert.match(css, /<meta name="viewport"[^>]*viewport-fit=cover/);
+  assert.match(css, /apple-mobile-web-app-status-bar-style" content="black-translucent"/);
+  assert.match(css, /apple-mobile-web-app-capable" content="yes"/);
+});
