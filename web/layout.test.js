@@ -147,3 +147,37 @@ test('applyViewport detects the keyboard via DeckViewport.keyboardUp, not vv < i
   assert.match(css, /<script src="\/viewport\.js\?v=\d+"><\/script>/);
   assert.match(fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8'), /'\/viewport\.js\?v=\d+'/);
 });
+
+test('composer placeholder is just "Message…" (the / button sits beside it; the long form wrapped in the 1-line input)', () => {
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  assert.match(js, /ta\.placeholder = 'Message…';/);
+  assert.doesNotMatch(js, /for commands/);
+});
+
+test('doc viewer tables (real design-all report): wrapper scrolls, table is content-wide, cells wrap by word', () => {
+  const md = fs.readFileSync(path.join(__dirname, '..', 'testdata', 'design-all-report-table.md'), 'utf8');
+  const html = require('./markdown.js').render(md, { levels: true });
+  assert.match(html, /<div class="md-table"><table><thead>/);
+  const rows = html.match(/<tr>/g).length;
+  assert.ok(rows >= 5, 'rows: ' + rows);
+  assert.equal((html.match(/<th[ >]/g) || []).length, 5); // doc | S0 verdict | bucket before → after | forks parked | spec
+  assert.match(html, /distributed-production-publisher/);
+  // wrapper: scrolls horizontally on touch
+  const wrap = rule('  .md-table');
+  assert.match(wrap, /overflow-x:auto/);
+  assert.match(wrap, /-webkit-overflow-scrolling:touch/);
+  // table as wide as its content, never squeezed below the box
+  const tbl = rule('  .md-table table');
+  assert.match(tbl, /width:max-content/);
+  assert.match(tbl, /min-width:100%/);
+  // cells: sane widths, wrap by word; NOT overflow-wrap:anywhere (the inherited .docbody value is what
+  // squeezed the first column to 3 characters) and no nowrap header that forces a cut-off column
+  const cell = rule('  .md-table th,.md-table td');
+  assert.match(cell, /min-width:8ch/);
+  assert.match(cell, /max-width:28ch/);
+  assert.match(cell, /overflow-wrap:break-word/);
+  assert.match(cell, /word-break:normal/);
+  assert.doesNotMatch(cell, /anywhere|break-all/);
+  assert.doesNotMatch(rule('  .md-table th'), /nowrap/);
+  assert.match(css, /@media \(max-width:480px\)\{\.md-table th,\.md-table td\{padding:4px 6px\}\}/);
+});

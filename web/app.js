@@ -1732,7 +1732,7 @@
     const ta = el('textarea');
     ta.id = 'composerInput';
     ta.rows = 1;
-    ta.placeholder = 'Message… (/ for commands)';
+    ta.placeholder = 'Message…';
     const structuredAsk = !s.capabilities || !!s.capabilities.ask;
     if (!structuredAsk) {
       ta.disabled = true;
