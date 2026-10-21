@@ -41,9 +41,8 @@ type deviceToken struct {
 	Caps []string `json:"caps,omitempty"`
 }
 
-// hasCap reports whether the token carries the capability (case-insensitive).
-func (t deviceToken) hasCap(c string) bool {
-	for _, x := range t.Caps {
+func containsFold(xs []string, c string) bool {
+	for _, x := range xs {
 		if strings.EqualFold(x, c) {
 			return true
 		}
@@ -51,9 +50,27 @@ func (t deviceToken) hasCap(c string) bool {
 	return false
 }
 
+// hasCap reports whether the token carries the capability (case-insensitive).
+func (t deviceToken) hasCap(c string) bool { return containsFold(t.Caps, c) }
+
 // knownCaps is the closed set a mint may grant; anything else is refused so a
 // typo never silently mints a read-only token the operator believes can act.
-var knownCaps = map[string]bool{"act": true, "doc": true}
+// run:* are the run-bang caps (docs/design/run-bang.md §3.3): which class of an
+// ask's signed `! ` lines the phone may run (tower_run.go). Phase 1 runs the ro
+// class only; run:mut and run:secret are known so they can be minted ahead of
+// their review, but runCapFor grants nothing with them yet.
+var knownCaps = map[string]bool{"act": true, "doc": true, "run:ro": true, "run:mut": true, "run:secret": true}
+
+// runCapFor is the cap a device token needs to run a line of class cls from the
+// phone, or "" when no cap runs that class in this phase. Phase 1: ro needs
+// exactly run:ro (run:mut does not imply it yet); every other class is
+// copy-only on the phone. The runner refuses non-ro again on its side.
+func runCapFor(cls string) string {
+	if cls == "ro" {
+		return "run:ro"
+	}
+	return ""
+}
 
 // tokenStore persists named device tokens to a 0600 JSON file. All methods are
 // safe for concurrent use; the auth path (verify) is the hot one.
@@ -182,6 +199,13 @@ func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, er
 		}
 		cl = append(cl, c)
 	}
+	for _, c := range cl {
+		// The run endpoints sit behind authAct, so a run:* cap without act
+		// would mint a token that looks able to run and cannot.
+		if strings.HasPrefix(c, "run:") && !containsFold(cl, "act") {
+			return deviceToken{}, "", fmt.Errorf("capability %q needs act", c)
+		}
+	}
 	raw, err := genSecret()
 	if err != nil {
 		return deviceToken{}, "", err
@@ -288,7 +312,7 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	dt, raw, err := s.tokens.mint(body.Name, body.Caps...)
 	if err != nil {
-		if strings.Contains(err.Error(), "unknown capability") {
+		if strings.Contains(err.Error(), "capabilit") {
 			httpError(w, http.StatusBadRequest, err.Error())
 			return
 		}

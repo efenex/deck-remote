@@ -327,6 +327,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/tower/model", s.auth(http.HandlerFunc(s.handleTowerModel)))
 	mux.Handle("POST /api/rc/tower/act", s.auth(s.authAct(http.HandlerFunc(s.handleTowerAct))))
 	mux.Handle("POST /api/rc/tower/reply", s.auth(s.authAct(http.HandlerFunc(s.handleTowerReply))))
+	// run-bang phase 1 (tower_run.go): authAct + the run:ro cap, the runner is the only executor
+	mux.Handle("POST /api/rc/tower/run", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRun))))
+	mux.Handle("GET /api/rc/tower/run/verify", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunVerify))))
+	mux.Handle("GET /api/rc/tower/run/stream", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunStream))))
+	mux.Handle("GET /api/rc/tower/run/log", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunLog))))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and
 	// reports whether the caller is the shared (admin) token or a device token.
