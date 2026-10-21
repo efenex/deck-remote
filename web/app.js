@@ -3182,9 +3182,11 @@
   let DEVICE_ADMIN = false;
   async function refreshDevicesUI() {
     const hint = $('#whoamiHint');
+    let actDevice = false;
     try {
       const who = await api('GET', '/api/rc/devices/whoami');
       DEVICE_ADMIN = !!(who && who.admin);
+      actDevice = !!(who && who.kind === 'device' && who.act);
       if (hint) {
         hint.textContent = who && who.kind === 'device'
           ? ('Device token: ' + (who.name || who.id))
@@ -3197,7 +3199,10 @@
     const admin = $('#devicesAdmin');
     if (admin) admin.hidden = !DEVICE_ADMIN;
     if (DEVICE_ADMIN) loadDeviceList();
-    refreshPasskeyUI();
+    // Only an act-cap device token may hold a passkey; others never hit the act-chain route (its
+    // refusals would be action-log noise on every Settings open).
+    if (actDevice) refreshPasskeyUI();
+    else if ($('#passkeySection')) $('#passkeySection').hidden = true;
   }
 
   // Settings → Passkey (run-bang phase 2 #7). The enrol code comes from a 0600 file on the laptop
