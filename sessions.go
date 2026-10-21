@@ -159,6 +159,15 @@ func (s *server) buildSessions(ctx context.Context, all bool) ([]byte, string, e
 	}
 	tList := time.Since(t0)
 
+	// Context % / model per session and the per-account quota, from the
+	// statusline records (one cached sqlite3 read; nil → the PWA shows no bars).
+	// Before the view filter, so the quota covers every group, not just the
+	// visible ones.
+	var quota []quotaInfo
+	if s.pulse != nil {
+		quota = annotateCtx(sessions, s.pulse.snapshot(ctx, profileFrom(ctx, s.cfg.profile)), time.Now())
+	}
+
 	// Concurrently fetch structured snapshots (bounded). Unsupported/custom
 	// harnesses remain listed with terminal-only capabilities.
 	var wg sync.WaitGroup
@@ -205,7 +214,7 @@ func (s *server) buildSessions(ctx context.Context, all bool) ([]byte, string, e
 	}
 	tView := time.Since(t0) - tList - tSnap
 
-	body, err := json.Marshal(map[string]any{"sessions": sessions, "view": view})
+	body, err := json.Marshal(map[string]any{"sessions": sessions, "view": view, "quota": quota})
 	if err != nil {
 		return nil, "", err
 	}

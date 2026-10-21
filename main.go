@@ -216,6 +216,7 @@ type server struct {
 	lists      *listCache                                                  // TTL-cached session list (agent-deck web HTTP first, CLI fallback)
 	views      *viewCache                                                  // TTL-cached TUI view filter per profile (viewfilter.go)
 	sends      *sendTracker                                                // queued phone messages being followed to delivery (askqueue.go)
+	pulse      *statuslineStore                                            // context/quota records, one sqlite3 read per TTL (statusline.go)
 	replies    *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
@@ -273,6 +274,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		lists:     newListCache(),
 		views:     newViewCache(),
 		replies:   newReplyCache(),
+		pulse:     newStatuslineStore(cfg.homeDir),
 	}
 	s.hub.tap = newPhoneLog(home).tap
 	return s

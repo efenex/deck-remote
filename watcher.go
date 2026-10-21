@@ -59,7 +59,7 @@ func (s *server) runWatcher(ctx context.Context) {
 	defer t.Stop()
 	stats := time.NewTicker(execStatsEvery)
 	defer stats.Stop()
-	var lastAdeck, lastTmux, lastThrottled, lastFaults int64
+	var lastAdeck, lastTmux, lastThrottled, lastFaults, lastSqlite int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -71,8 +71,12 @@ func (s *server) runWatcher(ctx context.Context) {
 			// powermetrics DEAD_TASKS.
 			a, tm := s.execAdeck.Load(), s.execTmux.Load()
 			th, fl := s.tmux.throttled.Load(), s.tmux.faults.Load()
-			log.Printf("exec stats: agent-deck=%d tmux=%d throttled=%d tmux-faults=%d followers=%d (last %s)", a-lastAdeck, tm-lastTmux, th-lastThrottled, fl-lastFaults, s.recall.nFollowers.Load(), execStatsEvery)
-			lastAdeck, lastTmux, lastThrottled, lastFaults = a, tm, th, fl
+			var sq int64
+			if s.pulse != nil {
+				sq = s.pulse.execSqlite.Load() // the ctx/quota bulk read: its own counter, not an agent-deck exec
+			}
+			log.Printf("exec stats: agent-deck=%d tmux=%d throttled=%d tmux-faults=%d followers=%d sqlite3=%d (last %s)", a-lastAdeck, tm-lastTmux, th-lastThrottled, fl-lastFaults, s.recall.nFollowers.Load(), sq-lastSqlite, execStatsEvery)
+			lastAdeck, lastTmux, lastThrottled, lastFaults, lastSqlite = a, tm, th, fl, sq
 			continue
 		case <-t.C:
 		}

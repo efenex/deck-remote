@@ -148,6 +148,7 @@ type sessionInfo struct {
 	Stalled        bool                `json:"stalled,omitempty"`     // working, but the spinner has been frozen across polls (stall detection)
 	State          string              `json:"state,omitempty"`       // idle | working | completed | interrupted
 	NeedsAttention bool                `json:"needsAttention,omitempty"`
+	Ctx            *ctxInfo            `json:"ctx,omitempty"` // context occupancy + model from the statusline record (statusline.go)
 	Capabilities   sessionCapabilities `json:"capabilities"`
 	DegradedReason string              `json:"degradedReason,omitempty"`
 }

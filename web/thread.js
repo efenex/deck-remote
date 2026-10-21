@@ -207,7 +207,7 @@
   // every refresh until the app is restarted.
   const LIVE_DEFAULTS = {
     working: false, stalled: false, needsAttention: false,
-    activity: '', currentTool: '', state: '', degradedReason: '',
+    activity: '', currentTool: '', state: '', degradedReason: '', ctx: null,
   };
   // lastReply / lastActivity are deliberately not reset: a transient snapshot
   // failure server-side omits them, and blanking would fold the group and drop

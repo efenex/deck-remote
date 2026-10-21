@@ -9,7 +9,8 @@
  * (GET /api/rc/attention), never on status.
  *
  * Contract (same-origin, bearer-token auth):
- *   GET  /api/rc/sessions    -> {sessions:[{id,title,path,group,tool,lastReply,working,activity,currentTool,...}]}
+ *   GET  /api/rc/sessions    -> {sessions:[{id,title,path,group,tool,lastReply,working,activity,currentTool,ctx:{pct,tokens,window,model,asOf},...}],
+ *                               quota:[{groups,fiveHour:{pct,resetsAt},sevenDay,asOf}]}
  *   GET  /api/rc/activity?id -> {working:bool, activity?:string, currentTool?:string} (live probe)
  *   GET  /api/rc/reply?id    -> {claude_session_id,content,role,timestamp}
  *   GET  /api/rc/attention?id -> {pending,kind,id,text?,questions?,actions?}
@@ -157,6 +158,7 @@
   // ---------------------------------------------------------------------------
   const state = {
     sessions: new Map(),      // id -> session object
+    quota: [],                // per-account 5h/7d usage from the server (pulse.js)
     convos: new Map(),        // id -> array of turn entries {role, content, ts, requestId, kind}
     pending: new Map(),       // id -> {requestId, ctx} active turn
     history: new Map(),       // id -> {loaded, hasMore, loading} scroll-back paging state
@@ -1213,7 +1215,9 @@
     // One meta line: harness · group · age.
     const meta = el('div', 'card-meta');
     const age = relAge(s.lastActivity, s.working);
-    meta.textContent = [s.tool || 'agent', groupKey(s), age === '—' ? '' : age].filter(Boolean).join(' · ');
+    meta.appendChild(el('span', 'card-meta-text', [s.tool || 'agent', groupKey(s), age === '—' ? '' : age].filter(Boolean).join(' · ')));
+    const ctxHTML = DeckPulse.ctxMini(s.ctx);
+    if (ctxHTML) meta.insertAdjacentHTML('beforeend', ctxHTML);
     card.appendChild(meta);
 
     // Live activity takes over the hero detail while the agent is working;
@@ -1327,6 +1331,27 @@
     applyViewport();
   }
 
+  // Context bar + the quota of the session's account, under the sheet title.
+  function sheetPulseHTML(s) {
+    return DeckPulse.ctxFull(s.ctx) + DeckPulse.quotaInline(DeckPulse.quotaFor(state.quota, s.group), Date.now());
+  }
+
+  // The 20 s list refresh keeps an open sheet's meters current.
+  function refreshSheetPulse() {
+    const box = $('#sheetPulse');
+    const s = box && state.openSheetId && state.sessions.get(state.openSheetId);
+    if (s) box.innerHTML = sheetPulseHTML(s);
+  }
+
+  // Deck-wide quota strip: one block per account (never mixed), hidden without data.
+  function renderQuota() {
+    const box = $('#quotaStrip');
+    if (!box) return;
+    const html = DeckPulse.quotaStrip(state.quota, Date.now());
+    box.innerHTML = html;
+    box.hidden = !html;
+  }
+
   function sheetHeadHTML(s) {
     // Open the embedded xterm.js terminal page in the same window: an installed
     // iOS PWA opens target=_blank in a separate browser context whose storage
@@ -1357,7 +1382,8 @@
         '</div>' +
         '<button class="icon-btn sheet-check" id="sheetCheckPerm" title="Check for a pending request" aria-label="Check for a pending request"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg></button>' +
         termLink +
-      '</div></div>' +
+      '</div>' +
+      '<div class="sheet-pulse" id="sheetPulse">' + sheetPulseHTML(s) + '</div></div>' +
       '</div>'
     );
   }
@@ -2873,6 +2899,7 @@
       const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
       const list = (r && r.sessions) || [];
       state.view = (r && r.view) || {};
+      state.quota = (r && r.quota) || [];
       // Merge: keep ids stable so an open sheet isn't disrupted; replace fields
       // (incl. refreshed lastReply) and drop sessions no longer present.
       const seen = new Set();
@@ -2884,6 +2911,8 @@
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       if (!state.showAll) saveDeckCache(list);
       setConn('Live', 'live');
+      renderQuota();
+      refreshSheetPulse();
     } catch (e) {
       setConn('Can\'t reach server: ' + e.message, 'bad');
       // Right after a resume the network may not be back yet: one quick retry

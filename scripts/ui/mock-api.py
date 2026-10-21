@@ -8,17 +8,21 @@ now = time.time()
 LONG = ("I traced the flake to the retry wrapper in `internal/sync/backoff.go`: it reuses the same context after cancel.\n\n"
         "```go\nfunc (r *Retrier) Do(ctx context.Context, fn func(context.Context) error) error {\n\tfor attempt := 0; attempt < r.max; attempt++ {\n\t\tif err := fn(ctx); err == nil { return nil } else if errors.Is(err, context.Canceled) { return fmt.Errorf(\"retry aborted after %d attempts: %w\", attempt, err) }\n\t}\n\treturn ErrExhausted\n}\n```\n\n"
         "## Next steps\n- Thread a fresh child ctx per attempt\n- Add a regression test `TestRetrierFreshCtxPerAttempt`\n- Re-run `go test ./internal/sync/... -race -count=50`\n\n**Want me to apply this?**")
+QUOTA = [dict(groups=["ligna / services", "deck-remote"], fiveHour=dict(pct=86, resetsAt=int(now)+3720), sevenDay=dict(pct=52, resetsAt=int(now)+3*86400+4*3600), asOf=int(now)-30),
+         dict(groups=["infra / blackbird"], fiveHour=dict(pct=8, resetsAt=int(now)+9000), sevenDay=dict(pct=31, resetsAt=int(now)+2*86400), asOf=int(now)-5400)]
 S = [
  dict(id="s1", title="ligna-fleet-dispatcher-refactor", path="~/work/ligna/services/dispatcher", group="ligna / services", tool="claude",
       lastReply="Done — 14 files changed, all tests green. PR #482 opened against main with the migration notes.", working=False, lastActivity=now-600,
-      needsAttention=True, capabilities=dict(ask=True)),
+      needsAttention=True, capabilities=dict(ask=True), ctx=dict(pct=91, tokens=910000, window=1000000, model="Opus 5.5", asOf=now-30)),
  dict(id="s2", title="codex-rollout-parser", path="~/work/deck-remote", group="deck-remote", tool="codex",
       lastReply="", working=True, activity="Reticulating… (4m 12s · ↓ 18.2k tokens · esc to interrupt)", currentTool="Bash(go test ./... -run TestCodexRollout -count=1 -v 2>&1 | tail -80)",
       lastActivity=now-5, capabilities=dict(ask=True, steer=True, interrupt=True)),
  dict(id="s3", title="agentmemory-summarize", path="~/work/agentmemory", group="agentmemory", tool="claude",
-      lastReply="", working=True, stalled=True, activity="Pondering… (10m 0s · ↓ 2.1k tokens)", currentTool="Task(Explore: find all summarize callers)", lastActivity=now-620, capabilities=dict(ask=True)),
+      lastReply="", working=True, stalled=True, activity="Pondering… (10m 0s · ↓ 2.1k tokens)", currentTool="Task(Explore: find all summarize callers)", lastActivity=now-620, capabilities=dict(ask=True),
+      ctx=dict(pct=74, tokens=148000, window=200000, model="Sonnet 4.5", asOf=now-90)),
  dict(id="s4", title="blackbird-tailscale-services", path="~/infra/blackbird", group="infra / blackbird", tool="claude",
-      lastReply="The serve config is applied; `tailscale serve status` shows the svc:deck host bound to :443.", working=False, lastActivity=now-3600*3, capabilities=dict(ask=True)),
+      lastReply="The serve config is applied; `tailscale serve status` shows the svc:deck host bound to :443.", working=False, lastActivity=now-3600*3, capabilities=dict(ask=True),
+      ctx=dict(pct=12, tokens=120000, window=1000000, model="Opus 5.5", asOf=now-600)),
  dict(id="s5", title="docs-sweep", path="~/work/ligna/docs", group="ligna / docs", tool="claude",
       lastReply="Rewrote 6 pages; see the diff summary below.", working=False, lastActivity=now-86400*3, capabilities=dict(ask=True)),
  dict(id="s6", title="gemini-scratch", path="~/scratch/gemini", group="scratch", tool="gemini",
@@ -51,7 +55,7 @@ class H(SimpleHTTPRequestHandler):
             try:
                 while True: s.wfile.write(b": ping\n\n"); s.wfile.flush(); time.sleep(5)
             except Exception: return
-        if p == "/api/rc/sessions": return s.j({"sessions": S})
+        if p == "/api/rc/sessions": return s.j({"sessions": S, "quota": QUOTA})
         if p == "/api/rc/profiles": return s.j({"profiles":[{"name":"default","isDefault":True},{"name":"work"}],"current":"default","proxyProfile":"default"})
         if p == "/api/rc/history":
             off = int((q.get("offset") or ["0"])[0]); lim = int((q.get("limit") or ["50"])[0])
