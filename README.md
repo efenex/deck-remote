@@ -70,7 +70,13 @@ and compare `match`.
   detects a permission dialog on the pane, and shows you the real request text
   before confirm. Codex offers approve-once, approve-prefix, and decline;
   `request_user_input` calls render as answerable forms. Every response is
-  revalidated against the live request before keys are sent.
+  revalidated against the live request before keys are sent. Claude's
+  AskUserQuestion menus (one question or a tabbed set) are answerable from a card
+  built from the transcript; the card appears while the session is open (SSE
+  `attention` event, activity probe), the Deck row says `question` / `N questions`,
+  and sending shows each step (`attention-progress`). Answer walks and card loads
+  use their own tmux lane (one exec per 40 ms) outside the sweep's 2/s budget; a
+  multi-select question is shown read-only with the reason.
 - **Interrupt** — hold to send Codex `Esc`; success is reported only after the
   rollout records an abort/idle transition.
 - **Live activity** — when an agent is working, see its thinking line

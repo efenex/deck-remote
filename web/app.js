@@ -18,13 +18,15 @@
  *   POST /api/rc/ask         {sessionId,text,delivery} -> 202 {requestId,sessionId,status}
  *   POST /api/rc/slash       {sessionId,text} -> same
  *   POST /api/rc/interrupt   {sessionId} -> {sessionId,stopped,state}
- *   GET  /api/rc/events      (SSE) -> ask-state | reply | slash-result | attention-result
+ *   GET  /api/rc/events      (SSE) -> ask-state | reply | slash-result | attention (pending request appeared/changed/gone) | attention-progress (answer walk step) | attention-result
  *   GET  /api/rc/push/config    -> {enabled,publicKey?}
  *   POST /api/rc/push/subscribe   = PushSubscription JSON
  *   POST /api/rc/push/presence    {focused:bool}
- *   /ws/session/<id>?token=    terminal WebSocket (consumed by /terminal.html, the embedded xterm.js page)
+ *   POST /api/rc/ws/ticket    {session} -> {ticket} (act cap + operator identity, header bearer only)
+ *   /ws/session/<id>?ticket=   terminal WebSocket (consumed by /terminal.html, the embedded xterm.js page)
  *
- * SSE/WebSocket cannot set headers, so the token is appended as ?token=.
+ * EventSource cannot set headers, so the SSE token is appended as ?token=. The terminal WebSocket
+ * never carries a bearer: terminal.html first fetches a 30 s single-use ticket with the header.
  */
 (() => {
   'use strict';
@@ -3184,8 +3186,9 @@
     const name = (prompt('Name for the new device (e.g. ruben-iphone):') || '').trim();
     if (!name) return;
     // Caps (tokens.go knownCaps): act = tower actions, doc = document viewer, run:ro = run signed
-    // read-only `! ` lines (needs act). run:mut / run:secret are reserved for later phases.
-    const capsIn = prompt('Capabilities, comma-separated (empty = read-only).\nact, doc, run:ro (needs act); run:mut, run:secret are reserved:', '');
+    // read-only `! ` lines (needs act); run:mut also holds run:ro. run:* caps can only be minted from
+    // the laptop itself (a loopback request that did not come through tailscale serve).
+    const capsIn = prompt('Capabilities, comma-separated (empty = read-only).\nact, doc; run:ro, run:mut (needs act; run:mut includes run:ro) and run:secret can only be minted from the laptop, not through tailscale serve:', '');
     if (capsIn === null) return;
     const caps = capsIn.split(',').map((c) => c.trim().toLowerCase()).filter(Boolean);
     try {
