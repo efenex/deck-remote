@@ -1,0 +1,5 @@
+[
+  {"id":"n-1","at":1792570000000,"kind":"notify","title":"dr-band report","body":"report ready: reports/dr-band/report-band2.md and briefs/deckremote-bottom-band.md"},
+  {"id":"n-2","at":1792570100000,"kind":"stall","sessionId":"41d4c63c-1792583553","title":"dr-band2 stalled","body":"see docs/notes.md before resuming"},
+  {"id":"n-3","at":1792570200000,"kind":"notify","title":"escape attempt","body":"../outside/secret.md"}
+]

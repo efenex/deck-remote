@@ -7,8 +7,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // docTestServer builds a server whose only doc root is <tmp>/root. Temp dirs on
@@ -447,4 +449,76 @@ func TestDocDirectoryNamedLikeADocumentIs404(t *testing.T) {
 	s, root, _ := docTestServer(t)
 	mustMkdir(t, filepath.Join(root, "dir.md"))
 	docWant(t, docGet(s, url.Values{"path": {filepath.Join(root, "dir.md")}}), 404)
+}
+
+// Inbox entries carry relative document paths. They resolve server-side: against
+// the project dir of the session that produced the entry (looked up by id), else
+// against tower's checkout, which is DERIVED from --tower-overview when
+// --tower-root is unset (the prod flag set; the raw towerRoot field is empty).
+func TestDocInboxEntriesResolveRelativePaths(t *testing.T) {
+	s, root, outside := docTestServer(t)
+	tower := filepath.Join(root, "tower")
+	proj := filepath.Join(root, "proj")
+	mustMkdir(t, filepath.Join(tower, "reports", "dr-band"))
+	mustMkdir(t, filepath.Join(tower, "briefs"))
+	mustMkdir(t, filepath.Join(tower, "state", "overview"))
+	mustMkdir(t, filepath.Join(proj, "docs"))
+	mustWrite(t, filepath.Join(tower, "reports", "dr-band", "report-band2.md"), "# tower report")
+	mustWrite(t, filepath.Join(tower, "briefs", "deckremote-bottom-band.md"), "# brief")
+	mustWrite(t, filepath.Join(proj, "docs", "notes.md"), "# notes")
+	mustWrite(t, filepath.Join(outside, "secret.md"), "# secret")
+	s.cfg.towerOverview = filepath.Join(tower, "state", "overview", "overview.json")
+	if s.cfg.towerRoot != "" {
+		t.Fatal("test must run with --tower-root unset")
+	}
+	s.lists.m["default"] = listCacheEntry{at: time.Now().Add(time.Hour), sessions: []sessionInfo{
+		{ID: "41d4c63c-1792583553", Title: "dr-band2", Path: proj},
+	}}
+
+	var entries []struct {
+		ID, Kind, SessionID, Body string
+	}
+	raw, err := os.ReadFile("testdata/inbox-doc-entries.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatal(err)
+	}
+	// "\x00" never appears in a path; the same shape markdown.js linkifies.
+	re := regexp.MustCompile(`[\w./-]+\.md`)
+	want := map[string]int{
+		"n-1": 200, // session-less entry -> tower checkout (derived root)
+		"n-2": 200, // session entry -> that session's project dir
+		"n-3": 403, // ../ escape: joined path is outside every root
+	}
+	for _, e := range entries {
+		for _, p := range re.FindAllString(e.Body, -1) {
+			q := url.Values{"path": {p}}
+			if e.SessionID != "" {
+				q.Set("session", e.SessionID)
+			}
+			docWant(t, docGet(s, q), want[e.ID])
+		}
+	}
+	// The session's dir wins over tower's: same relative name, different files.
+	mustMkdir(t, filepath.Join(tower, "docs"))
+	mustWrite(t, filepath.Join(tower, "docs", "notes.md"), "# tower notes")
+	w := docGet(s, url.Values{"path": {"docs/notes.md"}, "session": {"41d4c63c-1792583553"}})
+	docWant(t, w, 200)
+	if !strings.Contains(w.Body.String(), "# notes") || strings.Contains(w.Body.String(), "tower notes") {
+		t.Fatalf("session base not used: %s", w.Body.String())
+	}
+	// An unknown session falls back to tower, not to a client-chosen base; a
+	// client-supplied "base" parameter is ignored entirely.
+	docWant(t, docGet(s, url.Values{"path": {"briefs/deckremote-bottom-band.md"}, "session": {"gone"}}), 200)
+	docWant(t, docGet(s, url.Values{"path": {"briefs/deckremote-bottom-band.md"}, "base": {outside}}), 200)
+	// A session whose project dir is outside the allowed roots reads nothing.
+	s.lists.m["default"] = listCacheEntry{at: time.Now().Add(time.Hour), sessions: []sessionInfo{
+		{ID: "evil", Title: "evil", Path: outside},
+	}}
+	docWant(t, docGet(s, url.Values{"path": {"secret.md"}, "session": {"evil"}}), 403)
+	// No session and no tower root: relative paths stay refused.
+	s.cfg.towerOverview = ""
+	docWant(t, docGet(s, url.Values{"path": {"briefs/deckremote-bottom-band.md"}}), 400)
 }

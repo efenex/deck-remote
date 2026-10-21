@@ -237,7 +237,8 @@
   // /api/rc/doc. There is no up-front existence check: the server decides on
   // tap and a refusal shows a "Not readable" toast. Links inside a document
   // resolve relative to that document; elsewhere, relative paths resolve against
-  // the open session's project directory (or tower's checkout in the Tower tab).
+  // the project directory of the session in play (the open sheet, or the inbox
+  // entry's session), or tower's checkout (Tower tab / no session).
   // ---------------------------------------------------------------------------
   const docv = { stack: [], seq: 0 };
 
@@ -330,6 +331,7 @@
     let session = '';
     const cur = $('#docBody').dataset.doc;
     if (a.closest('#docView') && cur && !path.startsWith('/') && !path.startsWith('~/')) path = docJoin(docDir(cur), path);
+    else if (a.closest('.notif')) session = a.closest('.notif').dataset.session || ''; // inbox entry: the session that produced it
     else if (!a.closest('#docView') && !a.closest('#screenTower')) session = state.openSheetId || '';
     openDoc(path, a.dataset.line, session);
   });
@@ -852,6 +854,7 @@
         (inbox.openIds.has(n.id) ? ' open' : '') + (focus === n.id ? ' flash' : '');
       const card = el('div', cls);
       card.dataset.id = n.id;
+      if (n.sessionId) card.dataset.session = n.sessionId;
       const known = !n.sessionId || !state.sessions.size || state.sessions.has(n.sessionId);
       card.innerHTML =
         '<div class="card-top">' + (n.at > seen ? '<span class="unread-dot" title="Unread"></span>' : '') +
@@ -1340,13 +1343,39 @@
     lines.push(new Date().toISOString().slice(11, 19) + 'Z');
     return lines.join('\n');
   }
+  // A small chip on the right edge, collapsed by default; tapping the chip
+  // expands the readout, the x closes it AND turns the setting off. Only the
+  // chip bar takes taps (the readout itself is pointer-events:none), so it can
+  // never block the tab bar, top bar or composer.
   function layoutDebug(on) {
     let box = document.querySelector('.dbg-layout');
     clearInterval(layoutDebugTimer);
     if (!on) { if (box) box.remove(); return; }
-    if (!box) { box = el('pre', 'dbg-layout'); document.body.appendChild(box); }
-    const tick = () => { box.textContent = layoutDebugText(); };
-    tick();
+    if (!box) {
+      box = el('div', 'dbg-layout');
+      const bar = el('div', 'dbg-bar');
+      const chip = el('button', 'dbg-chip', '📐 layout');
+      chip.type = 'button';
+      chip.addEventListener('click', () => {
+        const open = box.classList.toggle('open');
+        chip.textContent = open ? '📐 hide' : '📐 layout';
+        if (open) box.querySelector('.dbg-text').textContent = layoutDebugText();
+      });
+      const x = el('button', 'dbg-x', '×');
+      x.type = 'button';
+      x.setAttribute('aria-label', 'Close layout debug');
+      x.addEventListener('click', () => {
+        prefs.debugLayout = false;
+        savePrefs(prefs);
+        const tg = document.querySelector('.toggle[data-pref="debugLayout"]');
+        if (tg) tg.classList.remove('on');
+        layoutDebug(false);
+      });
+      bar.append(chip, x);
+      box.append(bar, el('pre', 'dbg-text'));
+      document.body.appendChild(box);
+    }
+    const tick = () => { if (box.classList.contains('open')) box.querySelector('.dbg-text').textContent = layoutDebugText(); };
     layoutDebugTimer = setInterval(tick, 1000);
   }
   if (new URLSearchParams(location.search).get('debug') === 'layout') { prefs.debugLayout = true; savePrefs(prefs); }

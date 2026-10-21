@@ -66,8 +66,11 @@ test('iOS standalone: root and full-screen fixed layers are pinned to 100lvh (we
   assert.ok(i >= 0, 'lvh block missing');
   const blk = css.slice(i, css.indexOf('\n  }\n', i) + 5);
   assert.match(blk, /@media \(display-mode:standalone\)/);
-  assert.match(blk, /html,body\{height:100lvh\}/);
-  assert.match(blk, /#app,\.scrim,\.sheet,\.docview\{top:0;bottom:auto;height:100lvh\}/);
+  assert.match(blk, /html:not\(\.kb\),html:not\(\.kb\) body\{height:100lvh\}/);
+  for (const sel of ['#app', '.scrim', '.sheet', '.docview']) {
+    assert.ok(blk.includes('html:not(.kb) ' + sel), sel + ' must be pinned only while html.kb is off');
+  }
+  assert.match(blk, /top:0;bottom:auto;height:100lvh\}/);
   // after the base rules, so it wins on equal specificity
   assert.ok(i > css.indexOf('.docview{position:fixed'), 'lvh block must follow .docview');
   assert.ok(i > css.indexOf('#app{position:fixed'), 'lvh block must follow #app');
@@ -77,4 +80,46 @@ test('home-screen meta stays black-translucent + viewport-fit=cover (the web vie
   assert.match(css, /<meta name="viewport"[^>]*viewport-fit=cover/);
   assert.match(css, /apple-mobile-web-app-status-bar-style" content="black-translucent"/);
   assert.match(css, /apple-mobile-web-app-capable" content="yes"/);
+});
+
+test('keyboard up: no 100lvh rule can apply (it does not shrink with the keyboard), so the sheet rides on visualViewport', () => {
+  // 1. every selector in the lvh block is scoped to html:not(.kb)
+  const i = css.indexOf('@supports (height:100lvh)');
+  const blk = css.slice(i, css.indexOf('\n  }\n', i) + 5);
+  const sels = blk.match(/[^{}\n]+(?=\{[^{}]*100lvh)/g) || [];
+  assert.ok(sels.length >= 2);
+  for (const group of sels) for (const sel of group.split(',')) {
+    assert.match(sel.trim(), /^(?:@media[^{]*\{\s*)?html:not\(\.kb\)/, 'unscoped: ' + sel);
+  }
+  // 2. applyViewport still toggles html.kb and writes the visual viewport into the sheet
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
+  assert.match(f, /classList\.toggle\('kb', kb\)/);
+  assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
+  assert.match(f, /sheet\.style\.height = kb \? vv\.height/);
+  assert.match(f, /sheet\.style\.bottom = kb \? 'auto' : ''/);
+  // 3. with the keyboard down the inline overrides are cleared, so 100lvh governs again
+  assert.match(f, /kb \? [^:]+: ''/);
+});
+
+test('layout debug overlay: a chip that never intercepts taps outside itself, with its own close', () => {
+  const r = rule('  .dbg-layout');
+  assert.match(r, /pointer-events:none/);
+  assert.match(rule('  .dbg-bar'), /pointer-events:auto/);
+  assert.match(rule('  .dbg-text'), /display:none/);
+  assert.match(rule('  .dbg-text'), /pointer-events:none/);
+  assert.match(css, /\.dbg-layout\.open \.dbg-text\{display:block\}/);
+  // clear of the top bar (safe-top) and the composer/tab bar (bottom): right edge, mid-screen
+  assert.doesNotMatch(r, /top:calc\(var\(--safe-top\)/);
+  assert.doesNotMatch(r, /bottom:/);
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const f = js.slice(js.indexOf('function layoutDebug(on)'), js.indexOf("get('debug') === 'layout'"));
+  assert.match(f, /el\('button', 'dbg-x'/);
+  assert.match(f, /prefs\.debugLayout = false;\s*savePrefs\(prefs\)/); // the x turns the setting off
+});
+
+test('inbox cards carry their session id so doc links resolve against that session', () => {
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  assert.match(js, /card\.dataset\.session = n\.sessionId/);
+  assert.match(js, /a\.closest\('\.notif'\)\) session = a\.closest\('\.notif'\)\.dataset\.session/);
 });

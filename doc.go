@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -342,16 +343,7 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 
 	base := ""
 	if !filepath.IsAbs(expandHome(req, s.cfg.homeDir)) {
-		if sid != "" {
-			ctx, cancel := cliCtx(r.Context(), 5*time.Second)
-			si, err := s.findSession(ctx, sid)
-			cancel()
-			if err == nil {
-				base = si.Path
-			}
-		} else if s.cfg.towerRoot != "" {
-			base = s.cfg.towerRoot
-		}
+		base = s.docBase(r.Context(), sid)
 	}
 	cfg := s.docConfig()
 	real, root, de := resolveDoc(cfg, s.cfg.homeDir, req, base)
@@ -369,6 +361,26 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	writeJSON(w, http.StatusOK, res)
+}
+
+// docBase is the directory a relative document path resolves against: the
+// project directory of session sid, looked up server-side (an inbox entry or
+// the open sheet names the session; the client never supplies a directory).
+// With no session, or one the list no longer carries, it is tower's checkout
+// (--tower-root, else derived from --tower-overview), which is where the
+// operator's reports/ and briefs/ links point. "" = relative paths refused.
+// Whatever base this returns, resolveDoc still requires the joined path to
+// stay inside the allowed roots and clear the denylist.
+func (s *server) docBase(parent context.Context, sid string) string {
+	if sid != "" {
+		ctx, cancel := cliCtx(parent, 5*time.Second)
+		si, err := s.findSession(ctx, sid)
+		cancel()
+		if err == nil && si.Path != "" {
+			return si.Path
+		}
+	}
+	return s.cfg.towerRootDir()
 }
 
 // docReadOK decides whether r may read documents. The bar mirrors tower
