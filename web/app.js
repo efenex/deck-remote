@@ -1987,8 +1987,9 @@
     const docked = $('#approveMount .approve-card');
     const have = docked ? docked.dataset.attnId || '' : '';
     if (want === have) return;
-    if (want && attnTried.id === want && Date.now() - attnTried.at < 15000) return;
-    attnTried.id = want; attnTried.at = Date.now();
+    const key = want + '|' + have;
+    if (attnTried.id === key && Date.now() - attnTried.at < 15000) return;
+    attnTried.id = key; attnTried.at = Date.now();
     checkAttention(s, false);
   }
 
@@ -2457,7 +2458,9 @@
         if (r.kind === 'question') renderQuestionPanel(s, r);
         else renderApprovePanel(s, r);
       } else if (r && r.unavailable) {
-        mount.innerHTML = '';
+        // A transient pane error must not wipe a docked card (a half-filled answer); only a read that
+        // says nothing is pending removes it.
+        if (!mount.querySelector('.approve-card')) mount.innerHTML = '';
         if (userInitiated) mount.appendChild(approveNote('Couldn\'t verify this session\'s live attention state.'));
       } else {
         s.needsAttention = false;
@@ -2467,7 +2470,7 @@
       renderDeck();
     } catch (e) {
       if (state.openSheetId !== s.id) return;
-      mount.innerHTML = '';
+      if (!mount.querySelector('.approve-card')) mount.innerHTML = '';
       if (userInitiated) mount.appendChild(approveNote('Couldn\'t check attention: ' + e.message));
     } finally {
       if (btn) btn.classList.remove('busy');
