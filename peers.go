@@ -26,6 +26,8 @@ var (
 	// <cross-session-message from="…" from-name="…" …>\nbody</cross-session-message>
 	crossSessionRE = regexp.MustCompile(`(?s)^\s*<cross-session-message\s+([^>]*)>\s*(.*?)\s*(?:</cross-session-message>\s*)?$`)
 	crossAttrRE    = regexp.MustCompile(`([a-z-]+)="([^"]*)"`)
+	// Claude Code's trailing caution under a preamble'd peer message.
+	peerFooterRE = regexp.MustCompile(`(?s)\n\s*\nThis came from another Claude session\b.*$`)
 
 	cmdNameRE = regexp.MustCompile(`(?s)<command-name>\s*(.*?)\s*</command-name>`)
 	cmdArgsRE = regexp.MustCompile(`(?s)<command-args>\s*(.*?)\s*</command-args>`)
@@ -51,7 +53,7 @@ func parsePeer(body string) (from, name, text string, ok bool) {
 		return attrs["from"], attrs["from-name"], strings.TrimSpace(m[2]), true
 	}
 	if pre { // a preamble without a recognisable envelope is still a peer message
-		return "", "", strings.TrimSpace(s), true
+		return "", "", strings.TrimSpace(peerFooterRE.ReplaceAllString(s, "")), true
 	}
 	return "", "", "", false
 }

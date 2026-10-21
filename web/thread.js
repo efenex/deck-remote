@@ -175,6 +175,7 @@
         if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
         e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
+        if (f.origin) e.origin = f.origin;
         n++;
         return;
       }
@@ -188,7 +189,7 @@
     switch (e.status) {
       case 'queued': return e.position ? 'queued (' + e.position + ')' : 'queued';
       case 'delivering': return 'delivering…';
-      case 'delivered': return 'delivered';
+      case 'delivered': return e.origin === 'phone' ? 'you (phone) · delivered' : 'delivered';
       case 'unconfirmed': return 'unconfirmed — check the terminal before resending';
       case 'failed': return 'failed' + (e.error ? ': ' + e.error : '');
       case 'sent': return 'sent';

@@ -229,3 +229,19 @@ test('imagesLabel pluralises', () => {
   assert.match(imagesLabel(1), /1 image$/);
   assert.match(imagesLabel(3), /3 images$/);
 });
+
+test('a phone send the target filed as a peer message is one row, delivered', () => {
+  // tower 2026-10-21: the bubble went "unconfirmed" at 10:17:03 though the text
+  // had landed at 10:15:01 as a peer message; the server now serves that row as
+  // the operator's (origin "phone", mapped to a delivered 'me' row).
+  const text = 'one thing dr needs is a context/quota view, ie like pulse in cc';
+  const sent = 1792577696, landed = 1792577701;
+  const conv = [me(text, { requestId: 'req-1', status: 'unconfirmed', queued: false, ts: sent })];
+  const row = { ...h('me', text, landed), origin: 'phone', status: 'delivered' };
+  assert.strictEqual(promoteDelivered(conv, [row]), 1);
+  assert.strictEqual(newTailTurns(conv, [row]).length, 0); // not appended a second time
+  assert.strictEqual(sendStatusLabel(conv[0]), 'you (phone) · delivered');
+  const merged = mergeFreshHistory([row], conv);
+  assert.strictEqual(merged.length, 1);
+  assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · delivered');
+});

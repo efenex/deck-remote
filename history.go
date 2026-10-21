@@ -638,6 +638,7 @@ func (s *server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	all = s.phones.claimEchoes(se.ID, all)
 	// Window: the `limit` messages ending `offset` from the newest.
 	end := len(all) - offset
 	if end < 0 {

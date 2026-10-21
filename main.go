@@ -218,6 +218,7 @@ type server struct {
 	sends      *sendTracker                                                // queued phone messages being followed to delivery (askqueue.go)
 	pulse      *statuslineStore                                            // context/quota records, one sqlite3 read per TTL (statusline.go)
 	replies    *replyCache                                                 // per-session last-reply cache (transcript-first, mtime-gated)
+	phones     *phoneLog                                                   // phone-sent log; history claims the peer rows that echo it (phonelog.go)
 
 	// Subprocess counters (see the watcher's periodic exec-stats log). The
 	// whole point of the polling rework is keeping execAdeck near zero at
@@ -276,7 +277,8 @@ func newServer(cfg config, upstream *url.URL) *server {
 		replies:   newReplyCache(),
 		pulse:     newStatuslineStore(cfg.homeDir),
 	}
-	s.hub.tap = newPhoneLog(home).tap
+	s.phones = newPhoneLog(home)
+	s.hub.tap = s.phones.tap
 	return s
 }
 

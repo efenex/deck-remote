@@ -1309,6 +1309,47 @@
     window.visualViewport.addEventListener('scroll', applyViewport);
   }
 
+  // Temporary layout readout for the band under the composer that only shows
+  // on the phone (home-screen app): viewport sizes, resolved safe-area insets
+  // and the bottom edge of every box between the composer and the screen
+  // bottom. On with ?debug=layout or Settings ▸ Layout debug overlay.
+  let layoutDebugTimer = 0;
+  function layoutDebugText() {
+    const r = (n) => Math.round(n * 10) / 10;
+    const probe = document.querySelector('.dbg-probe') || document.body.appendChild(el('div', 'dbg-probe'));
+    const ps = getComputedStyle(probe);
+    const vv = window.visualViewport;
+    const lines = [
+      'screen ' + screen.width + 'x' + screen.height + ' dpr ' + devicePixelRatio,
+      'innerH ' + innerHeight + ' docClientH ' + document.documentElement.clientHeight +
+        ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) : 'none'),
+      'safe top ' + ps.paddingTop + ' bottom ' + ps.paddingBottom,
+      'standalone ' + matchMedia('(display-mode: standalone)').matches + ' navStandalone ' + !!navigator.standalone,
+      'html.class "' + document.documentElement.className + '"',
+      '#sheet style "' + (($('#sheet') && $('#sheet').getAttribute('style')) || '') + '"',
+    ];
+    for (const s of ['html', 'body', '#app', '#sheet', '.composer-wrap', '.composer', '#composerInput']) {
+      const e = document.querySelector(s);
+      if (!e) { lines.push(s + ' -'); continue; }
+      const b = e.getBoundingClientRect(), cs = getComputedStyle(e);
+      lines.push(s + ' top ' + r(b.top) + ' bottom ' + r(b.bottom) + ' h ' + r(b.height) + ' padB ' + cs.paddingBottom);
+    }
+    lines.push(navigator.userAgent.replace(/^.*?\(([^)]*)\).*$/, '$1'));
+    lines.push(new Date().toISOString().slice(11, 19) + 'Z');
+    return lines.join('\n');
+  }
+  function layoutDebug(on) {
+    let box = document.querySelector('.dbg-layout');
+    clearInterval(layoutDebugTimer);
+    if (!on) { if (box) box.remove(); return; }
+    if (!box) { box = el('pre', 'dbg-layout'); document.body.appendChild(box); }
+    const tick = () => { box.textContent = layoutDebugText(); };
+    tick();
+    layoutDebugTimer = setInterval(tick, 1000);
+  }
+  if (new URLSearchParams(location.search).get('debug') === 'layout') { prefs.debugLayout = true; savePrefs(prefs); }
+  layoutDebug(!!prefs.debugLayout);
+
   function openSheet(id) {
     const s = state.sessions.get(id);
     if (!s) return;
@@ -1789,6 +1830,9 @@
     }
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
+    // A phone send the target filed as a peer message (server: claimEchoes):
+    // the transcript holding it is the proof it landed.
+    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images: m.images || 0, origin: 'phone', status: 'delivered' };
     // hist: from the transcript, so a fresh history page may replace it.
     return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images: m.images || 0 };
   }
@@ -2745,6 +2789,7 @@
       tg.classList.toggle('on', prefs[key]);
       savePrefs(prefs);
       if (key === 'quietOn') { const qr = $('#quietRow'); if (qr) qr.hidden = !prefs.quietOn; }
+      if (key === 'debugLayout') layoutDebug(prefs.debugLayout);
       // Sync the server-honored prefs (cheap; harmless before any subscription).
       if (key === 'approve' || key === 'finished' || key === 'stall' || key === 'quietOn') pushPrefsToServer();
     });

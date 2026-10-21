@@ -10,18 +10,18 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v27';
+const CACHE = 'deck-remote-v28';
 const SHELL_NET_TIMEOUT = 1500; // ms before the shell is served from cache
 const SHELL = [
   '/',
   '/index.html',
-  '/theme.js?v=27',
-  '/version.js?v=27',
-  '/pulse.js?v=27',
-  '/thread.js?v=27',
-  '/markdown.js?v=27',
-  '/gestures.js?v=27',
-  '/app.js?v=27',
+  '/theme.js?v=28',
+  '/version.js?v=28',
+  '/pulse.js?v=28',
+  '/thread.js?v=28',
+  '/markdown.js?v=28',
+  '/gestures.js?v=28',
+  '/app.js?v=28',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.
