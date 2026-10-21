@@ -38,6 +38,7 @@ case "$*" in
 *"list --json"*)
   echo '[{"id":"s1","title":"s1","tool":"claude","status":"running"}]'; exit 0;;
 *"session output"*) echo ''; exit 0;;
+*"session send --help"*) cat "$FAKE_ADECK_DIR/help" 2>/dev/null; exit 0;;
 *"send-status"*)
   id=$(echo "$*" | sed 's/.*send-status \([A-Z0-9]*\).*/\1/')
   st=$(cat ` + stateFile + ` 2>/dev/null || echo queued)
@@ -81,7 +82,7 @@ func sendLines(t *testing.T, argvLog string) []string {
 	b, _ := os.ReadFile(argvLog)
 	var out []string
 	for _, l := range strings.Split(string(b), "\n") {
-		if strings.Contains(l, "session send") {
+		if strings.Contains(l, "session send") && !strings.Contains(l, "--help") {
 			out = append(out, l)
 		}
 	}
@@ -290,5 +291,40 @@ func TestSendTrackerResumesAfterRestart(t *testing.T) {
 	b, _ := os.ReadFile(s2.sends.path)
 	if strings.Contains(string(b), req) {
 		t.Errorf("finished send still persisted: %s", b)
+	}
+}
+
+// An agent-deck that takes `session send --transport` gets the phone's sends
+// typed into the pane (the operator's own input, not a peer message); an older
+// one gets today's call. The probe runs once per process.
+func TestAsk_TypedTransportWhenSupported(t *testing.T) {
+	for _, tc := range []struct {
+		name, help string
+		want       bool
+	}{
+		{"new", "  -transport string\n    \tOverride send_transport\n", true},
+		{"old", "  -require-input-prompt\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, argvLog, _ := fakeAdeckAskQueue(t)
+			if err := os.WriteFile(filepath.Join(os.Getenv("FAKE_ADECK_DIR"), "help"), []byte(tc.help), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := askTestServer(t, bin)
+			postAsk(t, s, "one")
+			postAsk(t, s, "two")
+			waitFor(t, 5*time.Second, "both asks to reach agent-deck", func() bool {
+				return len(sendLines(t, argvLog)) >= 2
+			})
+			for _, l := range sendLines(t, argvLog) {
+				if got := strings.Contains(l, "--queue --transport tmux"); got != tc.want {
+					t.Errorf("typed transport=%v, want %v: %s", got, tc.want, l)
+				}
+			}
+			b, _ := os.ReadFile(argvLog)
+			if n := strings.Count(string(b), "session send --help"); n != 1 {
+				t.Errorf("--help probed %d times, want 1", n)
+			}
+		})
 	}
 }

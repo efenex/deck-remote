@@ -226,6 +226,9 @@ type server struct {
 	execAdeck atomic.Int64
 	execTmux  atomic.Int64
 	tmux      *tmuxBudget // pacing, backoff and live-session set for every tmux exec (tmuxbudget.go)
+
+	typedOnce sync.Once // probes `session send --help` once (askqueue.go typedSendFlags)
+	typedOK   bool
 }
 
 func newServer(cfg config, upstream *url.URL) *server {

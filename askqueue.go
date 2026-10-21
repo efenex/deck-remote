@@ -49,7 +49,8 @@ type queuedSend struct {
 // A failure here means nothing was typed (agent-deck rejected the send at
 // once, e.g. target not running), so it is safe to retry.
 func (s *server) enqueueSend(ctx context.Context, id, text string) (queuedSend, error) {
-	out, execErr := s.adeckIn(ctx, []byte(text), append(sendArgs(id, "--queue"), "--json")...)
+	flags := append([]string{"--queue"}, s.typedSendFlags(ctx)...)
+	out, execErr := s.adeckIn(ctx, []byte(text), append(sendArgs(id, flags...), "--json")...)
 	var rec queuedSend
 	decErr := json.NewDecoder(bytes.NewReader(out)).Decode(&rec)
 	if execErr != nil {
@@ -65,6 +66,30 @@ func (s *server) enqueueSend(ctx context.Context, id, text string) (queuedSend, 
 		return rec, &sendError{msg: "agent-deck did not return a send id (needs `session send --queue`, v1.16.17+)"}
 	}
 	return rec, nil
+}
+
+// typedSendFlags returns the flags that make a phone send reach the target as
+// the operator's typed input. With send_transport = "auto" in agent-deck's
+// config, a send goes over Claude Code's messaging socket, which frames it as
+// "Another Claude session sent a message" — wrong for the operator's own
+// phone. `--transport tmux` types it into the pane instead. Only sends the
+// operator wrote use this (tower actions keep the socket). An agent-deck
+// without the flag gets today's call; dr-band's echo claim (phonelog.go)
+// still files the socket form as the operator's row. Probed once per process:
+// install the new agent-deck before restarting deck-remote.
+func (s *server) typedSendFlags(ctx context.Context) []string {
+	s.typedOnce.Do(func() {
+		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		// Read the help even on a non-zero exit (flag.ContinueOnError).
+		out, _ := s.adeckIn(pctx, nil, "session", "send", "--help")
+		s.typedOK = strings.Contains(string(out), "-transport")
+		log.Printf("send: agent-deck session send --transport supported=%v", s.typedOK)
+	})
+	if s.typedOK {
+		return []string{"--transport", "tmux"}
+	}
+	return nil
 }
 
 // sendStatus reads a queued send's current record.
