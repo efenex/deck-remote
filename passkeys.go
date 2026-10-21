@@ -352,7 +352,10 @@ func (s *server) webAuthn() (*webauthn.WebAuthn, string) {
 		return nil, "passkeys disabled: --public-url (DECK_REMOTE_PUBLIC_URL) not set"
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || (u.Path != "" && u.Path != "/") {
+	// http only for localhost (browsers treat it as a secure context; the end-to-end test runs
+	// there because Chrome refuses WebAuthn on a page with a TLS error). No phone reaches it.
+	localhost := u != nil && u.Scheme == "http" && u.Hostname() == "localhost"
+	if err != nil || (u.Scheme != "https" && !localhost) || u.Hostname() == "" || (u.Path != "" && u.Path != "/") {
 		return nil, "passkeys disabled: --public-url must be an https origin"
 	}
 	origin := u.Scheme + "://" + u.Host

@@ -345,7 +345,7 @@
   // Tailscale identity (the server refuses otherwise). Nothing is ever sent
   // automatically; "send to session" is deliberately not in this version.
   // ---------------------------------------------------------------------------
-  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runLocal: new Map() };
+  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runLocal: new Map() };
 
   async function initTower() {
     // The overview (counts for the badge) and whoami load concurrently; the badge
@@ -360,6 +360,7 @@
       tower.actReason = who.value.would_refuse || '';
       // run-bang phase 1: Run needs act (above) AND the run:ro cap; the server checks both again.
       tower.runRo = tower.act && (who.value.caps || []).includes('run:ro');
+      tower.runMut = tower.act && (who.value.caps || []).includes('run:mut');
     }
   }
 
@@ -446,6 +447,7 @@
       const line = el('div', 'trb');
       line.append(el('span', 'trbcls trb-' + b0.cls, b0.cls), el('span', 'trbsig trb-' + b0.tone, b0.mark));
       if (b0.offer === 'phase2') line.append(el('span', 'trbnote', 'needs phase 2'));
+      else if (b0.offer === 'laptop') line.append(el('span', 'trbnote', 'laptop only'));
       else if (b0.offer === 'never') line.append(el('span', 'trbnote', 'copy-only'));
       else if (b0.offer === 'blocked') line.append(el('span', 'trbnote', b0.why));
       wrap.append(line);
@@ -456,8 +458,8 @@
     const b = el('button', 'tcopy', 'Copy');
     b.addEventListener('click', () => towerCopy(text, b));
     row.append(pre, b);
-    if (b0 && b0.offer === 'run' && tower.runRo) {
-      const rbtn = el('button', 'tcopy trun', 'Run');
+    if (b0 && b0.offer === 'run' && (b0.passkey ? tower.runMut : tower.runRo)) {
+      const rbtn = el('button', 'tcopy trun', b0.passkey ? 'Run…' : 'Run');
       rbtn.addEventListener('click', (e) => { e.stopPropagation(); openRunSheet(askId, text, rb); });
       row.append(rbtn);
     }
@@ -479,19 +481,29 @@
     return Array.from(new Uint8Array(d)).map((x) => x.toString(16).padStart(2, '0')).join('');
   }
 
-  // The per-line confirm sheet (§3.4): the verbatim line, its class, cwd and timeout as the
-  // runner resolves them (run_bang.py verify, fresh), then Run → the stream pane → ✓/✗ rc.
+  // The per-line confirm sheet (§3.4; phase 2: review §2 "Confirm sheet"). Every fact comes from
+  // a fresh `run_bang.py verify` (DeckRunBang.sheet), never from the feed's HTML; the line itself
+  // is the feed's text bound by its sha256 to the verify item, drawn with textContent and with
+  // invisible characters shown as ⟨U+XXXX⟩. A mut line needs one Face ID (passkey assertion) per run.
   async function openRunSheet(askId, text, rb) {
+    const R = DeckRunBang;
     const back = el('div', 'rbback');
     const sh = el('div', 'rbsheet');
     back.append(sh);
     const close = () => { back.remove(); if (sh._abort) sh._abort.abort(); };
     back.addEventListener('click', (e) => { if (e.target === back) close(); });
-    sh.append(el('div', 'rbtitle', 'Run this line on blackbird?'));
-    sh.append(el('pre', 'rbline', text));
+    const title = el('div', 'rbtitle', 'Run this line on blackbird?');
+    sh.append(title);
+    const line = el('pre', 'rbline');
+    line.setAttribute('data-rb', 'line');
+    R.visibleParts(text).forEach((p) => line.append(p.esc ? el('span', 'rbesc', p.s) : document.createTextNode(p.s)));
+    sh.append(line);
+    if (R.hasInvisible(text)) sh.append(el('div', 'rbwarn', '⚠ this line holds invisible or direction-changing characters (shown as ⟨U+…⟩): do not run it from the phone'));
     const facts = el('div', 'rbfacts', 'checking with the runner…');
+    facts.setAttribute('data-rb', 'facts');
     sh.append(facts);
     const note = el('div', 'rbnote', '');
+    note.setAttribute('data-rb', 'note');
     sh.append(note);
     const out = el('pre', 'rbout');
     out.hidden = true;
@@ -499,38 +511,61 @@
     sh.append(out, status);
     const btns = el('div', 'rbbtns');
     const cancel = el('button', 'tbtn', 'Cancel');
+    const copy = el('button', 'tbtn', 'Copy');
     const run = el('button', 'tbtn tprimary', 'Run');
+    run.setAttribute('data-rb', 'run');
+    copy.setAttribute('data-rb', 'copy');
     run.disabled = true;
+    run.hidden = true;
     cancel.addEventListener('click', close);
-    btns.append(cancel, run);
+    copy.addEventListener('click', () => towerCopy(text, copy));
+    btns.append(cancel, copy, run);
     sh.append(btns);
     document.body.append(back);
     let v = null;
+    let top = null;
     let sha = '';
     try {
       sha = await sha256Hex(text.slice(2));
-      const r = await api('GET', '/api/rc/tower/run/verify?ask=' + encodeURIComponent(askId));
-      v = (r.items || []).find((x) => x.index === rb.index) || null;
+      top = await api('GET', '/api/rc/tower/run/verify?ask=' + encodeURIComponent(askId));
+      v = (top.items || []).find((x) => x.index === rb.index) || null;
     } catch (e) { facts.textContent = 'check failed: ' + (e.message || e); return; }
     if (!v) { facts.textContent = 'This line is no longer in the open ask: refresh.'; return; }
+    const m = R.sheet(v, top);
     facts.innerHTML = '';
-    const fact = (k, val) => { const d = el('div', 'rbfact'); d.append(el('span', 'rbk', k), el('span', 'rbv', val)); facts.append(d); };
-    fact('class', v.class + (v.class === 'ro' ? ' (read-only)' : ''));
-    fact('cwd', v.cwd || 'not reported by the runner');
-    fact('timeout', v.timeout ? v.timeout + ' s' : 'not reported by the runner');
-    fact('signature', v.sig === 'ok' ? '✓ signed' : (DeckRunBang.SIG_BAD[v.sig] || v.sig));
+    m.facts.forEach(([k, val]) => {
+      const d = el('div', 'rbfact');
+      d.setAttribute('data-rb', 'fact-' + k);
+      d.append(el('span', 'rbk', k), el('span', 'rbv', val));
+      facts.append(d);
+    });
+    if (m.prev && m.prev.tail.length) facts.append(el('pre', 'trbtail', m.prev.tail.join('\n')));
     (rb.learnings || []).forEach((h) => facts.append(el('div', 'rbwarn', '⚠ ' + h)));
     if (v.sha256 !== sha) { note.textContent = 'The line changed since this tab loaded: refresh before running.'; return; }
-    if (v.class !== 'ro') { note.textContent = 'Class ' + v.class + ' is copy-only on the phone (needs phase 2).'; return; }
-    if (!v.runnable) { note.textContent = 'The runner would refuse: ' + v.why + (v.hint ? '\n↳ ' + v.hint : ''); return; }
-    note.textContent = 'Runs as you, with your credentials. One tap, one run.';
+    if (R.hasInvisible(text)) { note.textContent = 'Copy only.'; return; }
+    if (m.state !== 'run') { note.textContent = m.why + (m.hint ? '\n↳ ' + m.hint : ''); return; }
+    if (m.passkey && !tower.runMut) { note.textContent = 'This phone lacks the run:mut capability: copy the line.'; return; }
+    if (!m.passkey && !tower.runRo) { note.textContent = 'This phone lacks the run:ro capability: copy the line.'; return; }
+    note.textContent = 'Runs as you on blackbird with your credentials.' + (m.passkey ? ' Face ID confirms this one line, once.' : ' One tap, one run.');
+    run.hidden = false;
     run.disabled = false;
+    if (m.passkey) run.textContent = 'Run with Face ID';
+    const label = run.textContent;
     run.addEventListener('click', async () => {
       run.disabled = true;
       run.textContent = '…';
+      const body = { ask: askId, item: rb.index, sha256: sha };
       let res;
-      try { res = await api('POST', '/api/rc/tower/run', { ask: askId, item: rb.index, sha256: sha }); }
-      catch (e) { note.textContent = 'Refused: ' + (e.message || e); run.textContent = 'Run'; return; }
+      try {
+        if (m.passkey) body.assertion = await passkeyAssert(askId, rb.index, sha);
+        res = await api('POST', '/api/rc/tower/run', body);
+      } catch (e) {
+        const resigned = e.status === 409 && /re-signed/.test(e.message || '');
+        note.textContent = resigned ? 'Re-signed since this sheet opened: close it and try again.' : 'Refused: ' + (e.message || e) + (e.data && e.data.hint ? '\n↳ ' + e.data.hint : '');
+        run.textContent = label;
+        run.disabled = resigned;
+        return;
+      }
       run.hidden = true;
       cancel.textContent = 'Close';
       note.textContent = 'started ' + res.id + ' (timeout ' + res.timeout + ' s)';
@@ -538,6 +573,16 @@
       status.textContent = '⏳ running…';
       streamRun(sh, askId, rb, res.id, out, status);
     });
+  }
+
+  // One passkey assertion for one line: the server binds the challenge to (ask, item, sha,
+  // signature, this device token, its credential); Face ID happens in credentials.get.
+  async function passkeyAssert(askId, item, sha) {
+    if (!(window.PublicKeyCredential && navigator.credentials)) throw new Error('no passkeys here (needs the https tailnet URL)');
+    const ch = await api('POST', '/api/rc/tower/run/challenge', { ask: askId, item, sha256: sha });
+    const cred = await navigator.credentials.get({ publicKey: DeckRunBang.requestOptions(ch.options) });
+    if (!cred) throw new Error('Face ID cancelled');
+    return DeckRunBang.credentialJSON(cred);
   }
 
   async function streamRun(sh, askId, rb, id, out, status) {
@@ -3149,7 +3194,63 @@
     const admin = $('#devicesAdmin');
     if (admin) admin.hidden = !DEVICE_ADMIN;
     if (DEVICE_ADMIN) loadDeviceList();
+    refreshPasskeyUI();
   }
+
+  // Settings → Passkey (run-bang phase 2 #7). The enrol code comes from a 0600 file on the laptop
+  // (never over the network); here it is typed, then Face ID creates a platform passkey bound to
+  // this device token. Every call is the act chain (header bearer, operator identity via serve).
+  async function refreshPasskeyUI() {
+    const sec = $('#passkeySection');
+    const list = $('#passkeyList');
+    if (!sec || !list) return;
+    let r;
+    try { r = await api('GET', '/api/rc/passkey/list'); }
+    catch (_) { sec.hidden = true; return; } // not an act-cap device token through serve
+    sec.hidden = false;
+    list.innerHTML = '';
+    const keys = (r && r.passkeys) || [];
+    if (r && !r.enabled) {
+      const row = el('div', 'set-row');
+      row.append(el('span', 'gi', '⚠'), el('span', 'lbl', 'Passkeys are off on the server: ' + (r.why || '')));
+      list.append(row);
+    }
+    if (!keys.length) {
+      const row = el('div', 'set-row');
+      row.append(el('span', 'gi', '—'), el('span', 'lbl', 'No passkey on this phone yet'));
+      list.append(row);
+    }
+    keys.forEach((k) => {
+      const row = el('div', 'set-row');
+      row.setAttribute('data-passkey', k.cred);
+      const when = k.created ? new Date(k.created * 1000).toLocaleDateString() : '';
+      row.append(el('span', 'gi', '🔑'), el('span', 'lbl', 'Passkey ' + k.cred + (when ? ' · added ' + when : '')));
+      list.append(row);
+    });
+  }
+
+  async function enrolPasskey() {
+    const msg = $('#passkeyMsg');
+    const btn = $('#passkeyEnrol');
+    const code = ($('#passkeyCode').value || '').replace(/\D/g, '');
+    if (code.length !== 6) { msg.textContent = 'Type the 6-digit code from the laptop.'; return; }
+    if (!(window.PublicKeyCredential && navigator.credentials)) { msg.textContent = 'No passkeys here: open the app from the https tailnet URL.'; return; }
+    btn.disabled = true;
+    msg.textContent = 'Starting…';
+    try {
+      const opts = await api('POST', '/api/rc/passkey/register/begin', { code });
+      msg.textContent = 'Confirm with Face ID…';
+      const cred = await navigator.credentials.create({ publicKey: DeckRunBang.creationOptions(opts) });
+      if (!cred) throw new Error('cancelled');
+      const done = await api('POST', '/api/rc/passkey/register/finish', { code, credential: DeckRunBang.credentialJSON(cred) });
+      msg.textContent = '✓ Passkey ' + done.cred + ' enrolled.';
+      $('#passkeyCode').value = '';
+      refreshPasskeyUI();
+    } catch (e) {
+      msg.textContent = 'Not enrolled: ' + (e.message || e);
+    } finally { btn.disabled = false; }
+  }
+  if ($('#passkeyEnrol')) $('#passkeyEnrol').addEventListener('click', enrolPasskey);
 
   async function loadDeviceList() {
     const list = $('#deviceList');

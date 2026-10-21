@@ -716,4 +716,10 @@ func TestPasskeysOffWithoutPublicURL(t *testing.T) {
 	expectCode(t, "challenge", e.challenge(mut, 1, shaPhone), 409, "--public-url")
 	e.s.cfg.publicURL = "http://deck.example.ts.net"
 	expectCode(t, "plain http", e.req("POST", "/api/rc/passkey/enrol-code", e.shrd, nil, local), 409, "https origin")
+	e.s.cfg.publicURL = "http://127.0.0.1:8765"
+	expectCode(t, "plain http to an IP", e.req("POST", "/api/rc/passkey/enrol-code", e.shrd, nil, local), 409, "https origin")
+	e.s.cfg.publicURL = "http://localhost:8765"
+	if wa, why := e.s.webAuthn(); why != "" || wa.Config.RPID != "localhost" || wa.Config.RPOrigins[0] != "http://localhost:8765" {
+		t.Fatalf("localhost (the e2e origin): %q", why)
+	}
 }

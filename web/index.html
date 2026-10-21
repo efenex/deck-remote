@@ -14,7 +14,7 @@
 <title>deck-remote</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <!-- appearance options (preview): sets data-* on <html> before first paint -->
-<script src="/theme.js?v=34"></script>
+<script src="/theme.js?v=35"></script>
 <!-- apple-touch-icon: iOS uses this for the Home-Screen icon (push prereq). -->
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='112'%20fill='%231a1b26'/%3E%3Crect%20x='96'%20y='150'%20width='320'%20height='212'%20rx='28'%20fill='%2324283b'%20stroke='%237aa2f7'%20stroke-width='10'/%3E%3Ccircle%20cx='168'%20cy='214'%20r='16'%20fill='%2373daca'/%3E%3Ccircle%20cx='168'%20cy='262'%20r='16'%20fill='%23e0af68'/%3E%3Ccircle%20cx='168'%20cy='310'%20r='16'%20fill='%23f7768e'/%3E%3Crect%20x='208'%20y='200'%20width='160'%20height='28'%20rx='14'%20fill='%237aa2f7'/%3E%3Crect%20x='208'%20y='248'%20width='128'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3Crect%20x='208'%20y='296'%20width='144'%20height='28'%20rx='14'%20fill='%23565f89'/%3E%3C/svg%3E">
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20512%20512'%3E%3Crect%20width='512'%20height='512'%20rx='112'%20fill='%231a1b26'/%3E%3Crect%20x='96'%20y='150'%20width='320'%20height='212'%20rx='28'%20fill='%2324283b'%20stroke='%237aa2f7'%20stroke-width='10'/%3E%3C/svg%3E">
@@ -738,6 +738,8 @@ html[data-theme=light] .tower .tid{color:var(--yellow)}
 .rbtitle{font-weight:600;font-size:16px;margin-bottom:8px}
 .rbline{margin:0 0 10px;padding:8px 10px;border-radius:8px;background:#16161e;color:#9ece6a;font-size:13px;white-space:pre-wrap;word-break:break-all}
 .rbfacts{font-size:13.5px;margin-bottom:8px}.rbfact{display:flex;gap:10px;padding:2px 0}.rbk{flex:0 0 76px;color:var(--muted)}.rbv{flex:1;overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:12.5px}
+.rbesc{color:#f7768e;background:rgba(247,118,142,.18);border-radius:3px;padding:0 2px}
+.pkcode{font:600 20px ui-monospace,monospace;letter-spacing:4px;width:8.5em;padding:6px 8px;border-radius:8px;border:1px solid var(--line,#3b4261);background:#16161e;color:inherit}
 .rbwarn{color:#e0af68;font-size:12.5px}.rbnote{font-size:13px;white-space:pre-wrap;margin:6px 0;color:var(--muted)}
 .rbout{max-height:40lvh;overflow:auto;margin:8px 0;padding:8px;border-radius:8px;background:#16161e;color:#c0caf5;font-size:12px;white-space:pre-wrap;word-break:break-all}
 .rbstatus{font-size:14px;font-weight:600;margin:4px 0}
@@ -881,6 +883,16 @@ html[data-turns=block] .ts{margin-left:4px}
         <div class="push-warn" id="mintResult" hidden style="margin:8px 6px;padding:10px 12px;border-radius:8px;background:rgba(122,162,247,.12);font-size:13px;line-height:1.4;word-break:break-all"></div>
       </div>
 
+      <!-- Passkey (run-bang phase 2): one per phone, enrolled with a code from the laptop; a
+           mutating `! ` line then runs with one Face ID per line. Shown for act-cap device tokens. -->
+      <div id="passkeySection" hidden>
+        <div class="set-section">Passkey</div>
+        <div class="set-list" id="passkeyList"></div>
+        <div class="set-row"><span class="gi">🔑</span><span class="lbl">Enrol this phone<div class="rhint" id="passkeyHint" style="font-size:12px;color:var(--muted);margin-top:2px">On the laptop, get a code (tower TUI <b>P</b>, or the enrol-code request): it is valid 5 minutes, once.</div>
+          <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input class="pkcode" id="passkeyCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" aria-label="Enrol code"><button class="tbtn tprimary" id="passkeyEnrol">Enrol with Face ID</button></div>
+          <div class="rhint" id="passkeyMsg" style="font-size:12.5px;margin-top:6px"></div></span></div>
+      </div>
+
       <div class="set-section">Account</div>
       <div class="set-list">
         <div class="set-row" id="forgetToken"><span class="gi">🚪</span><span class="lbl" style="color:var(--red)">Forget token on this device</span></div>
@@ -932,13 +944,13 @@ html[data-turns=block] .ts{margin-left:4px}
 
 <!-- ?v= matches CACHE in sw.js; bump both on any web change. Without it a
      phone can pair a fresh index.html with a stale cached app.js. -->
-<script src="/version.js?v=34"></script>
-<script src="/viewport.js?v=34"></script>
-<script src="/pulse.js?v=34"></script>
-<script src="/runbang.js?v=34"></script>
-<script src="/thread.js?v=34"></script>
-<script src="/markdown.js?v=34"></script>
-<script src="/gestures.js?v=34"></script>
-<script src="/app.js?v=34"></script>
+<script src="/version.js?v=35"></script>
+<script src="/viewport.js?v=35"></script>
+<script src="/pulse.js?v=35"></script>
+<script src="/runbang.js?v=35"></script>
+<script src="/thread.js?v=35"></script>
+<script src="/markdown.js?v=35"></script>
+<script src="/gestures.js?v=35"></script>
+<script src="/app.js?v=35"></script>
 </body>
 </html>

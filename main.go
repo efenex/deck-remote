@@ -381,10 +381,10 @@ func (s *server) routes() http.Handler {
 	// files heuristically (from Last-Modified), so a phone could keep running
 	// an old page for days after a deploy.
 	files := http.FileServer(http.Dir(s.cfg.webDir))
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", withCSP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
-	}))
+	})))
 
 	return logRequests(mux)
 }

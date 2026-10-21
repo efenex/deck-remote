@@ -56,3 +56,80 @@ test('parseSSE keeps a partial frame for the next chunk', () => {
   assert.deepStrictEqual(b.events, [{ event: 'done', data: { rc: 0 } }]);
   assert.strictEqual(b.rest, '');
 });
+
+// --- phase 2 (#7): mut behind Face ID, the confirm sheet's model, invisible characters, codecs ---
+
+test('mut: Run behind a passkey when the feed offers it; laptop-only lines are copy', () => {
+  const run = R.badge(rb({ class: 'mut', ok: true, phone_ok: true }), 'a');
+  assert.strictEqual(run.offer, 'run');
+  assert.strictEqual(run.passkey, true);
+  const lap = R.badge(rb({ class: 'mut', ok: true, phone_ok: false }), 'a');
+  assert.strictEqual(lap.offer, 'laptop');
+  assert.match(lap.hint, /laptop only/);
+  assert.strictEqual(R.badge(rb({ class: 'secret', ok: true }), 'a').offer, 'phase2');
+  assert.strictEqual(R.badge(rb({}), 'a').passkey, false);
+});
+
+test('visibleParts shows zero-width, bidi and control characters, keeps tabs and plain text', () => {
+  const p = R.visibleParts('git pu​ll‮ && x\t­y');
+  assert.deepStrictEqual(p.map((x) => x.s), ['git pu', '⟨U+200B⟩', 'll', '⟨U+202E⟩', ' && x\t', '⟨U+00AD⟩', 'y']);
+  assert.ok(R.hasInvisible('a⁦b'));
+  assert.ok(R.hasInvisible('a\u0007b'));
+  assert.ok(R.hasInvisible('a﻿b'));
+  assert.ok(!R.hasInvisible('git pull --ff-only\torigin main'));
+  assert.ok(!R.hasInvisible('écho ünïcode ✓ 日本'));
+});
+
+test('age reads ISO strings and unix seconds', () => {
+  const now = Date.parse('2026-10-21T23:00:00Z');
+  assert.strictEqual(R.age('2026-10-21T20:00:00Z', now), '3 h ago');
+  assert.strictEqual(R.age(now / 1000 - 600, now), '10 min ago');
+  assert.strictEqual(R.age(null, now), '');
+});
+
+const item = (o) => Object.assign({ index: 1, sha256: 'b'.repeat(64), class: 'mut', phone_ok: true, phone_cap: true, passkey: true, sig: 'ok', runnable: true, why: null, run: null, cwd: '/Users/op/src', timeout: 900, exp: 1900000000, kid: 'k1' }, o);
+const top = { ask_ts: '2026-10-21T20:00:00Z', sig_ts: '2026-10-21T22:00:00Z' };
+
+test('sheet: every review §2 field comes from verify JSON', () => {
+  const m = R.sheet(item({}), top, Date.parse('2026-10-21T23:00:00Z'));
+  const f = Object.fromEntries(m.facts);
+  assert.strictEqual(m.state, 'run');
+  assert.strictEqual(m.passkey, true);
+  assert.match(f.class, /mut .*phone list/);
+  assert.strictEqual(f.cwd, '/Users/op/src');
+  assert.strictEqual(f.timeout, '900 s');
+  assert.match(f.signature, /✓ signed 1 h ago · key k1/);
+  assert.strictEqual(f.proposed, '3 h ago');
+  assert.strictEqual(f.attempt, '1');
+});
+
+test('sheet: previous attempt, laptop-only, runner refusal, never', () => {
+  const again = R.sheet(item({ run: { state: 'done', rc: 2, attempt: 1, tail: ['a', 'b'] } }), top);
+  assert.match(Object.fromEntries(again.facts).attempt, /^2 \(previous rc=2\)/);
+  assert.deepStrictEqual(again.prev.tail, ['a', 'b']);
+  const lap = R.sheet(item({ phone_ok: false }), top);
+  assert.strictEqual(lap.state, 'laptop');
+  assert.match(lap.why, /Laptop only/);
+  const pre = R.sheet(item({ runnable: false, why: 'class:mut' }), top);
+  assert.strictEqual(pre.state, 'blocked');
+  assert.match(pre.why, /class:mut/);
+  assert.strictEqual(R.sheet(item({ class: 'destructive', passkey: false, phone_cap: false }), top).state, 'never');
+  assert.strictEqual(R.sheet(item({ class: 'ro', passkey: false }), top).passkey, false);
+});
+
+test('WebAuthn codecs: base64url round trip, options to buffers, credential to JSON', () => {
+  assert.strictEqual(R.bufToB64u(R.b64uToBuf('AQIDBA-_')), 'AQIDBA-_');
+  const c = R.creationOptions({ publicKey: { challenge: 'AQID', user: { id: 'BAU', name: 'p' }, rp: { id: 'x' }, excludeCredentials: [{ type: 'public-key', id: 'Bg' }] } });
+  assert.ok(c.challenge instanceof ArrayBuffer && c.user.id instanceof ArrayBuffer && c.excludeCredentials[0].id instanceof ArrayBuffer);
+  assert.strictEqual(c.user.name, 'p');
+  const g = R.requestOptions({ publicKey: { challenge: 'AQID', allowCredentials: [{ type: 'public-key', id: 'Bg' }], userVerification: 'required' } });
+  assert.deepStrictEqual(Array.from(new Uint8Array(g.allowCredentials[0].id)), [6]);
+  assert.strictEqual(g.userVerification, 'required');
+  const buf = (a) => new Uint8Array(a).buffer;
+  const j = R.credentialJSON({
+    id: 'Bg', rawId: buf([6]), type: 'public-key', authenticatorAttachment: 'platform',
+    response: { clientDataJSON: buf([1]), authenticatorData: buf([2]), signature: buf([3]), userHandle: null },
+    getClientExtensionResults: () => ({}),
+  });
+  assert.deepStrictEqual(j, { id: 'Bg', rawId: 'Bg', type: 'public-key', authenticatorAttachment: 'platform', response: { clientDataJSON: 'AQ', authenticatorData: 'Ag', signature: 'Aw' }, clientExtensionResults: {} });
+});

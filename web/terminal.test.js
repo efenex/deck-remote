@@ -1,7 +1,7 @@
 // Run: node --test web/
 // F12 = a (ws_ticket.go): terminal.html fetches a single-use ticket with the bearer in the
 // Authorization header before every connect and reconnect, and never puts the token in the
-// WebSocket URL. The page's inline script runs here against stubbed DOM, xterm, fetch and WebSocket.
+// WebSocket URL. The page's script (terminal.js) runs here against stubbed DOM, xterm, fetch and WebSocket.
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, 'terminal.html'), 'utf8');
-const script = html.slice(html.lastIndexOf('<script>') + '<script>'.length, html.lastIndexOf('</script>'));
+const script = fs.readFileSync(path.join(__dirname, 'terminal.js'), 'utf8'); // the page's script (CSP: no inline script)
 
 // stub is a do-anything object: every property is another stub, calls and `new` return stubs.
 function stub() {
@@ -93,6 +93,10 @@ test('a refused ticket opens no socket and does not retry', async () => {
   assert.strictEqual(fetches.length, 1);
   assert.strictEqual(sockets.length, 0);
   assert.strictEqual(timers.length, 0);
+});
+
+test('terminal.html has no inline script (CSP script-src self)', () => {
+  assert.ok(!/<script>/.test(html) && /<script src="terminal.js"><\/script>/.test(html));
 });
 
 test('terminal.html never sets token on a URL', () => {
