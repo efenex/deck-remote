@@ -22,7 +22,8 @@ func menuFixture(t *testing.T) string {
 // An AskUserQuestion menu (captured from a live session parked on one, which
 // deck-remote showed as plain idle) is a pending question, not an approval.
 func TestClaudeQuestionMenuDetected(t *testing.T) {
-	pane := strings.Repeat("earlier output\n", 40) + menuFixture(t)
+	// background-task, shortcut and status rows may sit under the footer
+	pane := strings.Repeat("earlier output\n", 40) + menuFixture(t) + "  ⏵⏵ auto mode on (shift+tab to cycle)\n  1 background task\n  ? for shortcuts\n"
 	if isClaudePermissionPrompt(pane) {
 		t.Fatal("a question menu must not read as a permission dialog")
 	}

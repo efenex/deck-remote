@@ -203,6 +203,10 @@ test('mergeSessionRow: a field the server dropped is cleared, not kept', () => {
   assert.strictEqual(m.state, 'idle');
   assert.strictEqual(m.lastReply, 'new');
   assert.strictEqual(m.lastActivity, 200);
+  // a transient snapshot failure omits the preview/age: keep the previous ones
+  const blip = mergeSessionRow(prev, { id: 'a', status: 'waiting' });
+  assert.strictEqual(blip.lastReply, 'old');
+  assert.strictEqual(blip.lastActivity, 100);
 });
 
 test('mergeSessionRow: fresh truthy fields win; unknown client fields survive; no prev', () => {

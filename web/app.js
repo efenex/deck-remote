@@ -3046,6 +3046,7 @@
     }
     document.addEventListener('visibilitychange', onResume);
     window.addEventListener('pageshow', onResume);
+    window.addEventListener('pagehide', () => { if (!hiddenAt) hiddenAt = Date.now(); }); // iOS may skip visibilitychange
     refreshPushUI();
     pushPrefsToServer(); // sync server-honored prefs once on launch
   }

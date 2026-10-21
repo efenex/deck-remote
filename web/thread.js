@@ -200,8 +200,11 @@
   // every refresh until the app is restarted.
   const LIVE_DEFAULTS = {
     working: false, stalled: false, needsAttention: false,
-    activity: '', currentTool: '', lastReply: '', state: '', degradedReason: '', lastActivity: 0,
+    activity: '', currentTool: '', state: '', degradedReason: '',
   };
+  // lastReply / lastActivity are deliberately not reset: a transient snapshot
+  // failure server-side omits them, and blanking would fold the group and drop
+  // the preview for a blip.
 
   // The previous row only keeps what the server never sends (client-side
   // annotations); everything the server owns comes from the fresh row.

@@ -21,9 +21,9 @@ var (
 )
 
 // claudeMenuTail is how many trailing non-blank lines are searched for the
-// footer: the footer is the last line of a live menu, plus the status row
-// Claude draws under it.
-const claudeMenuTail = 4
+// footer: the footer ends a live menu, with the background-task, shortcut and
+// status rows Claude draws under it (cf. claudeDialogWindow).
+const claudeMenuTail = 10
 
 // claudeMenuMax bounds the walk up from the footer to the ☐ header.
 const claudeMenuMax = 60
