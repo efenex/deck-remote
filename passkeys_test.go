@@ -633,6 +633,19 @@ func TestRunChallengeRateLimit(t *testing.T) {
 	expectCode(t, "another token has its own bucket", e.challenge(other, 1, shaPhone), 200, "options")
 	e.clock = e.clock.Add(time.Minute)
 	expectCode(t, "a minute later", e.challenge(mut, 1, shaPhone), 200, "options")
+
+	// The finish bucket (assertions and register/finish) has its own 10/min.
+	e.clock = e.clock.Add(time.Minute)
+	for i := 0; i < passkeyRateMax; i++ {
+		if _, code, _ := e.assert(mut, 1, shaPhone, json.RawMessage(`{}`)); code != http.StatusBadRequest {
+			t.Fatalf("garbage assertion %d: %d", i, code)
+		}
+	}
+	if _, code, why := e.assert(mut, 1, shaPhone, json.RawMessage(`{}`)); code != http.StatusTooManyRequests {
+		t.Errorf("11th assertion: %d %q", code, why)
+	}
+	e.expectRefusedLog("run/assert", "too many")
+	expectCode(t, "register/finish shares the finish bucket", e.finish(mut, "123456", json.RawMessage(`{}`)), 429, "too many")
 }
 
 // Revoking the device token removes its passkeys (on disk) and voids its open challenges; the
