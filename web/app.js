@@ -343,7 +343,7 @@
   // Tailscale identity (the server refuses otherwise). Nothing is ever sent
   // automatically; "send to session" is deliberately not in this version.
   // ---------------------------------------------------------------------------
-  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false };
+  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runLocal: new Map() };
 
   async function initTower() {
     // The overview (counts for the badge) and whoami load concurrently; the badge
@@ -356,6 +356,8 @@
     if (who.status === 'fulfilled' && who.value) {
       tower.act = !!(who.value.actions_enabled && who.value.act && !who.value.would_refuse);
       tower.actReason = who.value.would_refuse || '';
+      // run-bang phase 1: Run needs act (above) AND the run:ro cap; the server checks both again.
+      tower.runRo = tower.act && (who.value.caps || []).includes('run:ro');
     }
   }
 
@@ -432,13 +434,143 @@
     return c;
   }
 
-  function towerCmdRow(text) {
+  // One `! ` command. rb (tower_model.py, = tower_tui.run_choices) is present only for an ask's
+  // `items` entries: those get the class + signature badge, and a Run button when the line is a
+  // signed runnable ro line and this phone holds run:ro. Everything else stays copy-only.
+  function towerCmdRow(text, rb, askId) {
+    const wrap = el('div', 'tcmdwrap');
+    const b0 = rb && window.DeckRunBang ? DeckRunBang.badge(rb, askId) : null;
+    if (b0) {
+      const line = el('div', 'trb');
+      line.append(el('span', 'trbcls trb-' + b0.cls, b0.cls), el('span', 'trbsig trb-' + b0.tone, b0.mark));
+      if (b0.offer === 'phase2') line.append(el('span', 'trbnote', 'needs phase 2'));
+      else if (b0.offer === 'never') line.append(el('span', 'trbnote', 'copy-only'));
+      else if (b0.offer === 'blocked') line.append(el('span', 'trbnote', b0.why));
+      wrap.append(line);
+      if (b0.hint) wrap.append(el('div', 'trbhint', '↳ ' + b0.hint));
+    }
     const row = el('div', 'tcmd');
     const pre = el('pre', '', text);
     const b = el('button', 'tcopy', 'Copy');
     b.addEventListener('click', () => towerCopy(text, b));
     row.append(pre, b);
-    return row;
+    if (b0 && b0.offer === 'run' && tower.runRo) {
+      const rbtn = el('button', 'tcopy trun', 'Run');
+      rbtn.addEventListener('click', (e) => { e.stopPropagation(); openRunSheet(askId, text, rb); });
+      row.append(rbtn);
+    }
+    wrap.append(row);
+    const local = rb && tower.runLocal.get(askId + ':' + rb.index + ':' + rb.sha256);
+    const rs = window.DeckRunBang && rb ? DeckRunBang.runState(local || rb.run) : null;
+    if (rs) {
+      const st = el('div', 'trbrun trb-' + rs.tone, rs.glyph + ' ' + rs.text);
+      const tail = ((local || rb.run || {}).tail || []);
+      wrap.append(st);
+      if (rs.glyph === '✗' && tail.length) wrap.append(el('pre', 'trbtail', tail.slice(-5).join('\n')));
+    }
+    return wrap;
+  }
+
+  async function sha256Hex(s) {
+    if (!(window.crypto && crypto.subtle)) throw new Error('no WebCrypto here (needs the https tailnet URL)');
+    const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(d)).map((x) => x.toString(16).padStart(2, '0')).join('');
+  }
+
+  // The per-line confirm sheet (§3.4): the verbatim line, its class, cwd and timeout as the
+  // runner resolves them (run_bang.py verify, fresh), then Run → the stream pane → ✓/✗ rc.
+  async function openRunSheet(askId, text, rb) {
+    const back = el('div', 'rbback');
+    const sh = el('div', 'rbsheet');
+    back.append(sh);
+    const close = () => { back.remove(); if (sh._abort) sh._abort.abort(); };
+    back.addEventListener('click', (e) => { if (e.target === back) close(); });
+    sh.append(el('div', 'rbtitle', 'Run this line on blackbird?'));
+    sh.append(el('pre', 'rbline', text));
+    const facts = el('div', 'rbfacts', 'checking with the runner…');
+    sh.append(facts);
+    const note = el('div', 'rbnote', '');
+    sh.append(note);
+    const out = el('pre', 'rbout');
+    out.hidden = true;
+    const status = el('div', 'rbstatus', '');
+    sh.append(out, status);
+    const btns = el('div', 'rbbtns');
+    const cancel = el('button', 'tbtn', 'Cancel');
+    const run = el('button', 'tbtn tprimary', 'Run');
+    run.disabled = true;
+    cancel.addEventListener('click', close);
+    btns.append(cancel, run);
+    sh.append(btns);
+    document.body.append(back);
+    let v = null;
+    let sha = '';
+    try {
+      sha = await sha256Hex(text.slice(2));
+      const r = await api('GET', '/api/rc/tower/run/verify?ask=' + encodeURIComponent(askId));
+      v = (r.items || []).find((x) => x.index === rb.index) || null;
+    } catch (e) { facts.textContent = 'check failed: ' + (e.message || e); return; }
+    if (!v) { facts.textContent = 'This line is no longer in the open ask: refresh.'; return; }
+    facts.innerHTML = '';
+    const fact = (k, val) => { const d = el('div', 'rbfact'); d.append(el('span', 'rbk', k), el('span', 'rbv', val)); facts.append(d); };
+    fact('class', v.class + (v.class === 'ro' ? ' (read-only)' : ''));
+    fact('cwd', v.cwd || 'not reported by the runner');
+    fact('timeout', v.timeout ? v.timeout + ' s' : 'not reported by the runner');
+    fact('signature', v.sig === 'ok' ? '✓ signed' : (DeckRunBang.SIG_BAD[v.sig] || v.sig));
+    (rb.learnings || []).forEach((h) => facts.append(el('div', 'rbwarn', '⚠ ' + h)));
+    if (v.sha256 !== sha) { note.textContent = 'The line changed since this tab loaded: refresh before running.'; return; }
+    if (v.class !== 'ro') { note.textContent = 'Class ' + v.class + ' is copy-only on the phone (needs phase 2).'; return; }
+    if (!v.runnable) { note.textContent = 'The runner would refuse: ' + v.why + (v.hint ? '\n↳ ' + v.hint : ''); return; }
+    note.textContent = 'Runs as you, with your credentials. One tap, one run.';
+    run.disabled = false;
+    run.addEventListener('click', async () => {
+      run.disabled = true;
+      run.textContent = '…';
+      let res;
+      try { res = await api('POST', '/api/rc/tower/run', { ask: askId, item: rb.index, sha256: sha }); }
+      catch (e) { note.textContent = 'Refused: ' + (e.message || e); run.textContent = 'Run'; return; }
+      run.hidden = true;
+      cancel.textContent = 'Close';
+      note.textContent = 'started ' + res.id + ' (timeout ' + res.timeout + ' s)';
+      out.hidden = false;
+      status.textContent = '⏳ running…';
+      streamRun(sh, askId, rb, res.id, out, status);
+    });
+  }
+
+  async function streamRun(sh, askId, rb, id, out, status) {
+    const ctl = new AbortController();
+    sh._abort = ctl;
+    const key = askId + ':' + rb.index + ':' + rb.sha256;
+    const q = '?ask=' + encodeURIComponent(askId) + '&item=' + rb.index + '&id=' + encodeURIComponent(id);
+    let buf = '';
+    try {
+      const res = await fetch('/api/rc/tower/run/stream' + q, { headers: authHeaders(), signal: ctl.signal });
+      if (!res.ok) throw new Error('stream: HTTP ' + res.status);
+      const rd = res.body.getReader();
+      const dec = new TextDecoder();
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) break;
+        const p = DeckRunBang.parseSSE(buf + dec.decode(value, { stream: true }));
+        buf = p.rest;
+        for (const ev of p.events) {
+          if (ev.event === 'line') out.textContent += ev.data + '\n';
+          else if (ev.event === 'capped') out.textContent += '[' + ev.data.note + ']\n';
+          else if (ev.event === 'gone') status.textContent = ev.data.note;
+          else if (ev.event === 'done') {
+            const rs = DeckRunBang.runState(ev.data);
+            status.textContent = rs ? rs.glyph + ' ' + rs.text : 'finished';
+            status.className = 'rbstatus trb-' + (rs ? rs.tone : 'dim');
+            tower.runLocal.set(key, ev.data);
+            loadTower();
+          }
+        }
+        out.scrollTop = out.scrollHeight;
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') status.textContent = 'stream lost (' + (e.message || e) + '): the run goes on; its result lands under the line';
+    }
   }
 
   // --- Tower tab, model-driven (mirrors scripts/tower_tui.py via /api/rc/tower/model) ---
@@ -483,11 +615,11 @@
 
   const TOWER_LEAD = /^(?:\(\d{1,2}\)|\([a-z]\)|\d{1,2}[.)]|NEED \d+|Q\d{1,3})\s/;
   // split_detail blocks -> DOM: p / item / bullet lines, gaps, and one Copy row per `! ` command.
-  function towerBlocks(blocks) {
+  function towerBlocks(blocks, askId) {
     const box = el('div', 'tblocks');
     (blocks || []).forEach((b) => {
       if (b.k === 'gap') { box.append(el('div', 'tgap')); return; }
-      if (b.k === 'cmd') { box.append(towerCmdRow(b.t)); return; }
+      if (b.k === 'cmd') { box.append(towerCmdRow(b.t, b.rb, askId)); return; }
       const line = el('div', 'tpara tk-' + b.k);
       let t = b.t;
       if (b.k === 'bullet') line.append(towerStyle(el('span', 'tmark', '• '), 'accent'));
@@ -578,7 +710,7 @@
     if (it.kind === 'ask') {
       if (it.tag) head.append(towerStyle(el('b', '', it.tag), 'st_urgent'));
       head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta || '')));
-      card.append(head, towerBlocks(it.blocks));
+      card.append(head, towerBlocks(it.blocks, it.id));
       if (tower.act) {
         const rr = el('div', 'treply');
         const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
@@ -2935,7 +3067,8 @@
       const row = el('div', 'set-row');
       const when = d.created ? new Date(d.created * 1000).toLocaleDateString() : '';
       row.innerHTML = '<span class="gi">📲</span><span class="lbl">' + esc(d.name || d.id) +
-        '<div class="rhint" style="font-size:12px;color:var(--muted);margin-top:2px">added ' + esc(when) + '</div></span>';
+        '<div class="rhint" style="font-size:12px;color:var(--muted);margin-top:2px">added ' + esc(when) +
+        ((d.caps || []).length ? ' · ' + esc(d.caps.join(', ')) : ' · read-only') + '</div></span>';
       const revoke = el('span', 'lbl', 'Revoke');
       revoke.style.color = 'var(--red)';
       revoke.style.flex = '0 0 auto';
@@ -2954,12 +3087,17 @@
   if (mintBtn) mintBtn.addEventListener('click', async () => {
     const name = (prompt('Name for the new device (e.g. ruben-iphone):') || '').trim();
     if (!name) return;
+    // Caps (tokens.go knownCaps): act = tower actions, doc = document viewer, run:ro = run signed
+    // read-only `! ` lines (needs act). run:mut / run:secret are reserved for later phases.
+    const capsIn = prompt('Capabilities, comma-separated (empty = read-only).\nact, doc, run:ro (needs act); run:mut, run:secret are reserved:', '');
+    if (capsIn === null) return;
+    const caps = capsIn.split(',').map((c) => c.trim().toLowerCase()).filter(Boolean);
     try {
-      const r = await api('POST', '/api/rc/devices/mint', { name });
+      const r = await api('POST', '/api/rc/devices/mint', { name, caps });
       const out = $('#mintResult');
       if (out) {
         out.hidden = false;
-        out.innerHTML = 'Token for <b>' + esc(r.name) + '</b> (shown once):<br>' +
+        out.innerHTML = 'Token for <b>' + esc(r.name) + '</b>' + ((r.caps || []).length ? ' [' + esc(r.caps.join(', ')) + ']' : ' (read-only)') + ' (shown once):<br>' +
           '<code>' + esc(r.token) + '</code><br>' +
           'Open this on the device:<br><code>' + esc(r.phoneUrl) + '</code>';
       }

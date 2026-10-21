@@ -61,8 +61,21 @@ def main():
             k = it["kind"]
             if k == "ask":
                 bl = blocks(it["detail"])
-                for x in it["items"]:                    # the TUI prints the `items` list as commands under the detail
-                    bl.append({"k": "cmd", "t": x})
+                metas = it.get("items_meta") or []
+                # run-bang (deck-remote docs/design/run-bang.md): the TUI's own phase-1 rules per `! ` item, so the
+                # phone's badges and Run offer cannot drift from the laptop's. Only `items` entries carry "rb": a `! `
+                # inside the detail text stays copy-only (extraction boundary, §3.1). An older tower without
+                # run_choices degrades to copy-only.
+                choices = iter(tt.run_choices(it) if hasattr(tt, "run_choices") else [])
+                for k, x in enumerate(it["items"]):      # the TUI prints the `items` list as commands under the detail
+                    b = {"k": "cmd", "t": x}
+                    meta = metas[k] if k < len(metas) and isinstance(metas[k], dict) else {}
+                    if isinstance(x, str) and x.startswith("! ") and hasattr(tt, "run_choices"):
+                        c = next(choices, None)
+                        if c is not None and meta.get("bang"):
+                            b["rb"] = {"index": c["index"], "sha256": c["sha"], "class": c["cls"], "sig": c["sig"], "ok": c["ok"],
+                                       "why": c["why"], "run": meta.get("run"), "sig_exp": meta.get("sig_exp"), "learnings": meta.get("learnings") or []}
+                    bl.append(b)
                 o.update({"tag": it["tag"], "meta": it["meta"], "summary": it.get("summary"), "blocks": bl})
             elif k == "request":
                 lead, trail, text = it["lead"]
