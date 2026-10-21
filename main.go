@@ -49,6 +49,7 @@ type config struct {
 	pushSubject  string // VAPID "sub" contact URI (mailto:/https:); Apple rejects non-routable subjects
 	tlsCert      string // PEM cert (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve
 	tlsKey       string // PEM private key matching tlsCert
+	publicURL    string // fixed tailnet origin (https://host.ts.net); the passkey rpId and only allowed origin (passkeys.go)
 
 	// Optional tower overview tab (tower.go). Empty towerOverview = feature off.
 	towerOverview    string // path to tower's state/overview/overview.json
@@ -81,6 +82,7 @@ func loadConfig() config {
 	flag.StringVar(&c.pushSubject, "push-subject", def("DECK_REMOTE_PUSH_SUBJECT", defaultPushSubject), "VAPID 'sub' contact URI (mailto: or https:); Apple rejects non-routable subjects")
 	flag.StringVar(&c.tlsCert, "tls-cert", def("DECK_REMOTE_TLS_CERT", ""), "PEM cert to terminate TLS with (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve")
 	flag.StringVar(&c.tlsKey, "tls-key", def("DECK_REMOTE_TLS_KEY", ""), "PEM key matching --tls-cert")
+	flag.StringVar(&c.publicURL, "public-url", def("DECK_REMOTE_PUBLIC_URL", ""), "fixed tailnet origin, e.g. https://host.tailnet.ts.net: the passkey rpId and the only origin a passkey ceremony accepts; empty = passkeys off")
 	flag.StringVar(&c.towerOverview, "tower-overview", def("DECK_REMOTE_TOWER_OVERVIEW", ""), "path to tower's overview.json; empty = no tower tab")
 	flag.StringVar(&c.towerOperator, "tower-operator", def("DECK_REMOTE_TOWER_OPERATOR", ""), "Tailscale login allowed to perform tower actions (reply-to-ask); empty = actions refused")
 	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")
@@ -205,6 +207,7 @@ type server struct {
 	codexReqs  *codexRequestTracker
 	tokens     *tokenStore    // per-device tokens (additive to the shared bearer)
 	wsTickets  *wsTicketStore // terminal WebSocket tickets (ws_ticket.go)
+	passkeys   *passkeyHub    // WebAuthn credentials, enrol code, run challenges (passkeys.go)
 	tower      *towerStore    // optional tower overview (tower.go); nil = feature off
 	towerMu    sync.Mutex
 	webVer     webVersionCache                                             // git HEAD of the --web checkout (version.go)
@@ -276,6 +279,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(stateDir(home)),
 		wsTickets: newWSTicketStore(),
+		passkeys:  newPasskeyHub(stateDir(home)),
 		tower:     newTowerStore(cfg.towerOverview),
 		sess:      newSessionsCache(),
 		lists:     newListCache(),
@@ -283,6 +287,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		replies:   newReplyCache(),
 		pulse:     newStatuslineStore(cfg.homeDir),
 	}
+	s.passkeys.prune(s.tokens)
 	s.phones = newPhoneLog(home)
 	s.hub.tap = s.phones.tap
 	return s
@@ -336,6 +341,13 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/tower/run/verify", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunVerify))))
 	mux.Handle("GET /api/rc/tower/run/stream", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunStream))))
 	mux.Handle("GET /api/rc/tower/run/log", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunLog))))
+	// run-bang phase 2 #5 passkeys (passkeys.go). The enrol code is laptop-only and goes to a 0600
+	// file, never into a response; the rest is the act chain. No route runs a mut line yet (W3).
+	mux.Handle("POST /api/rc/passkey/enrol-code", s.auth(http.HandlerFunc(s.handleEnrolCode)))
+	mux.Handle("POST /api/rc/passkey/register/begin", s.auth(s.authAct(http.HandlerFunc(s.handlePasskeyRegisterBegin))))
+	mux.Handle("POST /api/rc/passkey/register/finish", s.auth(s.authAct(http.HandlerFunc(s.handlePasskeyRegisterFinish))))
+	mux.Handle("GET /api/rc/passkey/list", s.auth(s.authAct(http.HandlerFunc(s.handlePasskeyList))))
+	mux.Handle("POST /api/rc/tower/run/challenge", s.auth(s.authAct(http.HandlerFunc(s.handleRunChallenge))))
 
 	// Per-device tokens (additive). "whoami" works with any valid token and
 	// reports whether the caller is the shared (admin) token or a device token.

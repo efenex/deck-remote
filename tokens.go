@@ -275,9 +275,15 @@ func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, er
 // revoke removes a device token by id OR name (id wins). Returns whether a
 // token was removed.
 func (ts *tokenStore) revoke(idOrName string) (bool, error) {
+	_, ok, err := ts.revokeToken(idOrName)
+	return ok, err
+}
+
+// revokeToken is revoke that also returns the removed token (its id keys the passkey cascade).
+func (ts *tokenStore) revokeToken(idOrName string) (deviceToken, bool, error) {
 	idOrName = strings.TrimSpace(idOrName)
 	if idOrName == "" {
-		return false, nil
+		return deviceToken{}, false, nil
 	}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -297,10 +303,11 @@ func (ts *tokenStore) revoke(idOrName string) (bool, error) {
 		}
 	}
 	if idx < 0 {
-		return false, nil
+		return deviceToken{}, false, nil
 	}
+	dt := ts.tokens[idx]
 	ts.tokens = append(ts.tokens[:idx], ts.tokens[idx+1:]...)
-	return true, ts.saveLocked()
+	return dt, true, ts.saveLocked()
 }
 
 // list returns metadata (id/name/created) for all device tokens, newest first.
@@ -418,7 +425,16 @@ func (s *server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	if key == "" {
 		key = body.Name
 	}
-	removed, err := s.tokens.revoke(key)
+	dt, removed, err := s.tokens.revokeToken(key)
+	if removed {
+		// Revoking the token revokes its passkeys (run-bang.md §3.4), even if the token file
+		// write failed: the token is gone from memory either way.
+		n, perr := s.passkeys.revokeDevice(dt.ID)
+		s.towerLog(map[string]any{"action": "devices/revoke", "allowed": true, "device": dt.Name, "passkeys": n})
+		if perr != nil {
+			err = perr
+		}
+	}
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "revoke failed")
 		return

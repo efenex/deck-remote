@@ -98,11 +98,19 @@ type runItem struct {
 	Run      map[string]any `json:"run"`
 	Cwd      string         `json:"cwd,omitempty"`
 	Timeout  int            `json:"timeout,omitempty"`
+	// Phase 2 (tower runner.verify_ask): the signed exp and kid, and the phone sub-class. PhoneOK
+	// nil (an older runner) reads as laptop only.
+	PhoneOK    *bool  `json:"phone_ok,omitempty"`
+	LaptopOnly any    `json:"laptop_only,omitempty"`
+	Exp        int64  `json:"exp,omitempty"`
+	Kid        string `json:"kid,omitempty"`
 }
 
 type runVerify struct {
 	Ask    string    `json:"ask"`
 	Status string    `json:"status"`
+	AskTS  any       `json:"ask_ts,omitempty"` // proposal time (F11: re-signing cannot make it look fresh)
+	SigTS  any       `json:"sig_ts,omitempty"` // last signature time
 	Items  []runItem `json:"items"`
 }
 
