@@ -2273,7 +2273,8 @@
     const mount = $('#approveMount');
     if (!mount) return;
     const wrap = el('div', 'approve-card question-card');
-    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Codex needs input</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
+    if (info.readOnly) { renderQuestionReadOnly(s, info, wrap, mount); return; }
+    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> ' + esc(s.tool === 'codex' ? 'Codex' : 'Agent') + ' needs input</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
     syncComposerLock();
@@ -2319,6 +2320,28 @@
       submit.disabled = true;
       respondAttention(s, info, 'answer', answers);
     });
+  }
+
+  // A question menu the agent is parked on (Claude AskUserQuestion): shown so
+  // the session does not read as idle, answered in the terminal.
+  function renderQuestionReadOnly(s, info, wrap, mount) {
+    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Waiting for your choice</div><div class="approve-body"><div id="roQuestions"></div><div class="approve-foot">Answer it in the terminal; it cannot be answered from here.</div></div>';
+    mount.innerHTML = '';
+    mount.appendChild(wrap);
+    const box = $('#roQuestions', wrap);
+    (info.questions || []).forEach((q) => {
+      const field = el('fieldset', 'question-field');
+      field.appendChild(el('legend', null, q.header || 'Question'));
+      field.appendChild(el('div', 'question-text', q.question || ''));
+      (q.options || []).forEach((opt, i) => {
+        const row = el('div', 'question-option');
+        const copy = el('span');
+        copy.innerHTML = '<b>' + (i + 1) + '. ' + esc(opt.label) + '</b>' + (opt.description ? '<small>' + esc(opt.description) + '</small>' : '');
+        row.appendChild(copy); field.appendChild(row);
+      });
+      box.appendChild(field);
+    });
+    syncComposerLock();
   }
 
   function wireHoldAction(button, action) {
@@ -2378,13 +2401,31 @@
     teardownStreams();
 
     // deck-remote's own events: ask-state / reply / approve-result.
-    evRC = new EventSource(tokenURL('/api/rc/events'));
-    evRC.onopen = () => setConn('Live', 'live');
-    evRC.onerror = () => setConn('Reconnecting…', 'bad'); // EventSource auto-reconnects
-    evRC.onmessage = (m) => {
+    // The stream carries no session state and has no replay, so whatever was
+    // missed while it was down is only recovered by refetching: after any
+    // reconnect, pull the list, the inbox and the open sheet's tail again.
+    let wasDown = false;
+    const es = new EventSource(tokenURL('/api/rc/events'));
+    evRC = es;
+    es.onopen = () => {
+      setConn('Live', 'live');
+      if (wasDown) { wasDown = false; resyncAll(); }
+    };
+    es.onerror = () => {
+      wasDown = true;
+      setConn('Reconnecting…', 'bad'); // EventSource auto-reconnects, unless the browser closed it
+    };
+    es.onmessage = (m) => {
       let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
       handleRCEvent(ev);
     };
+  }
+
+  // Everything a backgrounded or disconnected app can have missed.
+  function resyncAll() {
+    loadSessions(false);
+    loadInbox(); // pushes that arrived while backgrounded (no SSE then)
+    if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
   }
 
   function handleRCEvent(ev) {
@@ -2825,6 +2866,7 @@
   // ---------------------------------------------------------------------------
   // Boot
   // ---------------------------------------------------------------------------
+  let retryTimer = null;
   async function loadSessions(initial) {
     try {
       const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
@@ -2836,13 +2878,16 @@
       list.forEach((s) => {
         seen.add(s.id);
         const prev = state.sessions.get(s.id);
-        state.sessions.set(s.id, Object.assign({}, prev || {}, s));
+        state.sessions.set(s.id, DeckThread.mergeSessionRow(prev, s));
       });
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       if (!state.showAll) saveDeckCache(list);
       setConn('Live', 'live');
     } catch (e) {
       setConn('Can\'t reach server: ' + e.message, 'bad');
+      // Right after a resume the network may not be back yet: one quick retry
+      // instead of showing last night's rows for another refresh interval.
+      if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; if (document.visibilityState === 'visible') loadSessions(false); }, 3000);
     }
     renderDeck();
     if (initial) deepLinkFromURL();
@@ -2988,12 +3033,16 @@
     // resume, refresh the deck (fresh activity/status is scraped server-side) and,
     // if a sheet is open, immediately reconcile its transcript tail — otherwise the
     // view is stuck on whatever it had when the app was last foregrounded.
+    // iOS can leave the EventSource CLOSED, or a zombie "open" socket that never
+    // delivers again, after a night in the background: reopen it on resume.
+    let hiddenAt = 0;
     function onResume() {
-      if (document.visibilityState !== 'visible') return;
-      loadSessions(false);
-      loadInbox(); // pushes that arrived while backgrounded (no SSE then)
+      if (document.visibilityState !== 'visible') { if (!hiddenAt) hiddenAt = Date.now(); return; }
+      const away = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+      if (!evRC || evRC.readyState === 2 || away > 30000) startStreams();
+      resyncAll();
       checkVersion();
-      if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
     }
     document.addEventListener('visibilitychange', onResume);
     window.addEventListener('pageshow', onResume);

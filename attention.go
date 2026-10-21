@@ -31,6 +31,9 @@ type attentionInfo struct {
 	Questions   []attentionQuestion `json:"questions,omitempty"`
 	Actions     []string            `json:"actions,omitempty"`
 	Unavailable bool                `json:"unavailable,omitempty"`
+	// ReadOnly: shown to the operator but not answerable from here (Claude's
+	// AskUserQuestion menu is answered in the terminal).
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 type attentionAnswer struct {

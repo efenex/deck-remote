@@ -172,7 +172,9 @@ func (s *server) sweep(ctx context.Context, seen map[string]*sessWatch, notify b
 			if se.Tool == "claude" && paneErr == nil {
 				s.watchPermissionPane(se, sw, isNew, pane)
 			}
-			if snapshotHarness(se.Tool) {
+			// Claude approvals push through watchPermissionPane; only its question
+			// menus come through here (else a permission dialog would push twice).
+			if snapshotHarness(se.Tool) || (se.Tool == "claude" && snap.Attention.Kind == "question") {
 				s.watchAttention(se, sw, isNew, snap.Attention)
 			}
 			s.watchStall(se, sw, isNew, st)

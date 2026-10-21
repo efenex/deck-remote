@@ -184,3 +184,31 @@ test('peer rows collapse to sender + first line; slash rows to the command', () 
   assert.strictEqual(foldSummary({ role: 'slash', content: '/model opus\nignored' }, nameOf), '/model opus');
   assert.strictEqual(firstLine(null), '');
 });
+
+// Stale-state repro (2026-10-21): the server omits falsy live fields (omitempty),
+// so a session that went working -> idle overnight arrives WITHOUT `working`.
+// A plain Object.assign(prev, fresh) kept last night's "running" until restart.
+const { mergeSessionRow } = require('./thread.js');
+test('mergeSessionRow: a field the server dropped is cleared, not kept', () => {
+  const prev = { id: 'a', title: 'A', working: true, stalled: true, activity: 'Channelling… (3m)', currentTool: 'Bash(x)', needsAttention: true, lastReply: 'old', lastActivity: 100, state: 'working' };
+  const fresh = { id: 'a', title: 'A', status: 'waiting', state: 'idle', lastReply: 'new', lastActivity: 200 };
+  const naive = Object.assign({}, prev, fresh);
+  assert.strictEqual(naive.working, true, 'the old merge keeps the stale flag (the bug)');
+  const m = mergeSessionRow(prev, fresh);
+  assert.strictEqual(m.working, false);
+  assert.strictEqual(m.stalled, false);
+  assert.strictEqual(m.needsAttention, false);
+  assert.strictEqual(m.activity, '');
+  assert.strictEqual(m.currentTool, '');
+  assert.strictEqual(m.state, 'idle');
+  assert.strictEqual(m.lastReply, 'new');
+  assert.strictEqual(m.lastActivity, 200);
+});
+
+test('mergeSessionRow: fresh truthy fields win; unknown client fields survive; no prev', () => {
+  const m = mergeSessionRow({ id: 'a', clientOnly: 7 }, { id: 'a', working: true, activity: 'x' });
+  assert.strictEqual(m.working, true);
+  assert.strictEqual(m.activity, 'x');
+  assert.strictEqual(m.clientOnly, 7);
+  assert.strictEqual(mergeSessionRow(undefined, { id: 'b' }).working, false);
+});

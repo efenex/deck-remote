@@ -1,0 +1,16 @@
+⏺ Committed the three guard changes. Holding off until you confirm which plan is correct.
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Plan
+
+│ A relayed plan differs from the option you picked earlier. Which do I follow?
+❯ 1. Relayed plan (Recommended)
+     Land the branch now, write the handoff, report back; the rest runs in a fresh context.
+  2. Branch, then rest here
+     Land the branch, then run the remaining work in this session before handing off.
+  3. Remaining work only
+     Ignore the branch for now; run the remaining work here.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel
+──────────────────────────────────────────────────────────────────────── demo ─

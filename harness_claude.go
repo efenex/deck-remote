@@ -61,6 +61,9 @@ func (a claudeAdapter) Attention(_ context.Context, _ sessionInfo, pane string, 
 		return attentionInfo{Unavailable: true}, nil
 	}
 	if !isClaudePermissionPrompt(pane) {
+		if info, ok := claudeQuestionInfo(pane); ok {
+			return info, nil
+		}
 		return attentionInfo{}, nil
 	}
 	text := dialogExcerpt(pane)
@@ -80,14 +83,14 @@ func (a claudeAdapter) Interrupt(context.Context, sessionInfo, string, bool) (bo
 
 func (a claudeAdapter) RespondAttention(ctx context.Context, se sessionInfo, req attentionResponseRequest) (attentionResponseResult, error) {
 	if req.Action != "approve-once" {
-		return attentionResponseResult{}, fmt.Errorf("Claude supports approve-once only")
+		return attentionResponseResult{}, fmt.Errorf("Claude supports approve-once only; answer a question menu in the terminal")
 	}
 	pane, err := a.s.sessionPane(ctx, se.ID)
 	if err != nil {
 		return attentionResponseResult{}, err
 	}
 	info, _ := a.Attention(ctx, se, pane, true)
-	if !info.Pending || info.ID != req.AttentionID {
+	if !info.Pending || info.Kind != "approval" || info.ID != req.AttentionID {
 		return attentionResponseResult{}, fmt.Errorf("approval dialog changed or cleared")
 	}
 	// Revalidate immediately before the keystrokes.

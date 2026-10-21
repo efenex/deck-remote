@@ -193,7 +193,23 @@
   // one can already be sitting in the composer.
   function canRetry(e) { return e.status === 'failed' && e.retryable !== false; }
 
-  const api = { firstLine, foldSummary, newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  // Live fields the server drops from a session row when they are falsy
+  // (`omitempty`): a session that stopped working is simply sent without
+  // `working`. Merging a fresh row over the previous one must reset them first,
+  // or last night's `working:true` / "Channelling…" / needsAttention survive
+  // every refresh until the app is restarted.
+  const LIVE_DEFAULTS = {
+    working: false, stalled: false, needsAttention: false,
+    activity: '', currentTool: '', lastReply: '', state: '', degradedReason: '', lastActivity: 0,
+  };
+
+  // The previous row only keeps what the server never sends (client-side
+  // annotations); everything the server owns comes from the fresh row.
+  function mergeSessionRow(prev, fresh) {
+    return Object.assign({}, prev || {}, LIVE_DEFAULTS, fresh);
+  }
+
+  const api = { mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);
