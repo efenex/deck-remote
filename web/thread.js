@@ -12,7 +12,14 @@
   function turnKey(t) {
     const k = t.role + '\n' + (t.kind || '') + '\n' + String(t.content == null ? '' : t.content).trim();
     // Bash-mode rows share a command across runs: their output tells them apart.
-    return t.role === 'bash' ? k + '\n' + (t.stdout || '') + '\n' + (t.stderr || '') : k;
+    if (t.role === 'bash') return k + '\n' + (t.stdout || '') + '\n' + (t.stderr || '');
+    // Image-only prompts have no text: the count keeps two of them distinct.
+    return t.images ? k + '\n' + t.images + 'img' : k;
+  }
+
+  // The chip under/after a user prompt that carried images.
+  function imagesLabel(n) {
+    return '\uD83D\uDCF7 ' + n + (n === 1 ? ' image' : ' images');
   }
 
   function escHtml(s) {
@@ -212,7 +219,7 @@
     return Object.assign({}, prev || {}, LIVE_DEFAULTS, fresh);
   }
 
-  const api = { mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  const api = { mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

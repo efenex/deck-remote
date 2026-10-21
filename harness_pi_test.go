@@ -148,3 +148,20 @@ func TestPiAdapterLoad(t *testing.T) {
 		t.Fatalf("newest transcript + live pane: reply=%q working=%v state=%q", snap.LastReply, snap.Activity.Working, snap.State)
 	}
 }
+
+// TestParsePiUserImages: a pi user message with image blocks keeps its text and
+// an image count; an image-only message is still a user row.
+func TestParsePiUserImages(t *testing.T) {
+	const tr = `{"type":"session","version":3,"id":"s1","timestamp":"2026-10-21T05:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-10-21T05:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"what is this"},{"type":"image","data":"AAAA","mimeType":"image/png"}],"timestamp":1792558801000}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-10-21T05:00:02.000Z","message":{"role":"user","content":[{"type":"image","data":"AAAA","mimeType":"image/png"}],"timestamp":1792558802000}}
+`
+	snap, _, err := parsePiTranscript(strings.NewReader(tr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Messages) != 2 || snap.Messages[0].Content != "what is this" || snap.Messages[0].Images != 1 ||
+		snap.Messages[1].Content != "" || snap.Messages[1].Images != 1 {
+		t.Fatalf("rows = %+v", snap.Messages)
+	}
+}

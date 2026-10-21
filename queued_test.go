@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -290,5 +291,61 @@ func TestHistoryEndpointRowFields(t *testing.T) {
 	}
 	if r := resp.Messages[1]; r["role"] != "reply" || r["kind"] != "assistant" || r["id"] != "as-0001" || r["queued"] != nil {
 		t.Errorf("reply row on the wire = %v", r)
+	}
+}
+
+// TestParseTranscriptImagePrompts: a prompt with an image has list content (an
+// image-only user line; a queued_command whose prompt is [image, text]). Both
+// become user rows with an image count and no bytes; a tool_result carrying an
+// image stays out.
+func TestParseTranscriptImagePrompts(t *testing.T) {
+	msgs, err := parseTranscriptFile("testdata/claude/image-prompts.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range msgs {
+		got = append(got, fmt.Sprintf("%s:%q:%d", m.Role, m.Content, m.Images))
+	}
+	want := `user:"look at this":0|user:"":1|reply:"I see it.":0|user:"that's what it looks like now":1`
+	if strings.Join(got, "|") != want {
+		t.Fatalf("rows:\n got %s\nwant %s", strings.Join(got, "|"), want)
+	}
+	if q := msgs[3]; !q.Queued || q.Origin != "human" || !strings.HasPrefix(q.ID, "queue:2026-10-21T05:33:40.245Z:") {
+		t.Errorf("queued image row = %+v", q)
+	}
+	if msgs[1].ID != "u-0002" {
+		t.Errorf("image-only row id = %q", msgs[1].ID)
+	}
+	b, _ := json.Marshal(msgs[1])
+	if strings.Contains(string(b), "iVBOR") {
+		t.Errorf("image bytes leaked into the row: %s", b)
+	}
+}
+
+// TestSkipLineImages: a prompt's image list is decoded, a tool_result's is not.
+func TestSkipLineImages(t *testing.T) {
+	data, _ := os.ReadFile("testdata/claude/image-prompts.jsonl")
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i, want := range map[int]bool{2: true, 3: false} {
+		if got := skipLine([]byte(lines[i])); got != want {
+			t.Errorf("skipLine(line %d) = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// TestRecallImageRow: recall marks an image prompt with meta.images and an empty
+// body; the empty enqueue row of a queued prompt (no images) stays dropped.
+func TestRecallImageRow(t *testing.T) {
+	var rows []recallRow
+	if err := json.Unmarshal([]byte(`[
+	 {"id":"b3f094e4","kind":"user","ts":"2026-10-20T18:51:43.602Z","origin":"human","meta":{"images":1},"raw_type":"user"},
+	 {"id":"queue:2026-10-21T05:33:40.245Z:e3b0c44298fc","kind":"user","ts":"2026-10-21T05:33:40.245Z","queued":true,"origin":"human","meta":{"delivery":"queued"},"raw_type":"queue-operation"},
+	 {"id":"queue:2026-10-21T05:34:06.561Z:a1da3ba15f4f","kind":"user","ts":"2026-10-21T05:34:06.561Z","body":"that's what it looks like now","origin":"human","meta":{"delivery":"absorbed"},"raw_type":"queue-operation"}]`), &rows); err != nil {
+		t.Fatal(err)
+	}
+	msgs := recallMessages(rows)
+	if len(msgs) != 2 || msgs[0].Images != 1 || msgs[0].Content != "" || msgs[0].Role != "user" || msgs[1].Content != "that's what it looks like now" {
+		t.Fatalf("rows = %+v", msgs)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -425,5 +426,26 @@ func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCodexUserMessageImages: codex's user_message carries images/local_images
+// next to the text (empty on every local rollout so far); an image-only prompt
+// is still a user row.
+func TestCodexUserMessageImages(t *testing.T) {
+	st := newCodexParseState(nil)
+	for i, p := range []string{
+		`{"type":"user_message","message":"plain","images":[],"local_images":[],"text_elements":[]}`,
+		`{"type":"user_message","message":"","images":["data:image/png;base64,AAAA"],"local_images":["/tmp/a.png"]}`,
+		`{"type":"user_message","message":"  ","images":[],"local_images":[]}`,
+	} {
+		st.apply(codexEnvelope{Type: "event_msg", Timestamp: fmt.Sprintf("2026-10-21T05:0%d:00Z", i), Payload: json.RawMessage(p)})
+	}
+	var got []string
+	for _, m := range st.snapshot.Messages {
+		got = append(got, fmt.Sprintf("%q:%d", m.Content, m.Images))
+	}
+	if want := `"plain":0|"":2`; strings.Join(got, "|") != want {
+		t.Fatalf("rows = %s, want %s", strings.Join(got, "|"), want)
 	}
 }

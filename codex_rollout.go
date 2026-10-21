@@ -223,6 +223,9 @@ func (st *codexParseState) applyEvent(env codexEnvelope) {
 		TurnID  string `json:"turn_id"`
 		Message string `json:"message"`
 		Phase   string `json:"phase"`
+		// user_message attachments (empty on every local rollout so far).
+		Images      []json.RawMessage `json:"images"`
+		LocalImages []json.RawMessage `json:"local_images"`
 	}
 	if json.Unmarshal(env.Payload, &p) != nil {
 		return
@@ -242,10 +245,11 @@ func (st *codexParseState) applyEvent(env codexEnvelope) {
 		st.toolCalls = map[string]codexToolCall{}
 		st.attention = nil
 	case "user_message":
-		if text := strings.TrimSpace(p.Message); text != "" {
+		images := len(p.Images) + len(p.LocalImages)
+		if text := strings.TrimSpace(p.Message); text != "" || images > 0 {
 			st.snapshot.Messages = append(st.snapshot.Messages, histMsg{
 				Role: "user", Content: text, Ts: tsUnix(env.Timestamp),
-				TurnID: st.turnID, Seq: st.seq,
+				TurnID: st.turnID, Seq: st.seq, Images: images,
 			})
 		}
 	case "agent_message":

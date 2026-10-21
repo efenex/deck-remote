@@ -461,8 +461,14 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 		case "user":
 			turnID = e.ID
 			pendingTool, toolOrder = map[string]string{}, nil
-			if text := piText(m.Content); text != "" {
-				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID})
+			images := 0
+			for _, b := range piBlocks(m.Content) {
+				if b.Type == "image" {
+					images++
+				}
+			}
+			if text := piText(m.Content); text != "" || images > 0 {
+				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID, Images: images})
 			}
 		case "assistant":
 			text := piText(m.Content)

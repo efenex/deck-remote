@@ -45,7 +45,7 @@ test('a live row is matched to its transcript copy by time', () => {
   assert.deepStrictEqual(mergeFreshHistory(fresh, conv).map((t) => t.ts), [1000, 4990, 5001]);
 });
 
-const { bashBlockHTML, turnKey } = require('./thread.js');
+const { bashBlockHTML, turnKey, imagesLabel } = require('./thread.js');
 
 test('bashBlockHTML: command and stdout, escaped', () => {
   const html = bashBlockHTML({ role: 'bash', content: "echo '<b>'", stdout: '<script>alert(1)</script> & "x"', stderr: '' });
@@ -215,4 +215,17 @@ test('mergeSessionRow: fresh truthy fields win; unknown client fields survive; n
   assert.strictEqual(m.activity, 'x');
   assert.strictEqual(m.clientOnly, 7);
   assert.strictEqual(mergeSessionRow(undefined, { id: 'b' }).working, false);
+});
+
+test('turnKey: image-only prompts differ by image count, text prompts are unchanged', () => {
+  const one = { role: 'me', content: '', images: 1 };
+  const two = { role: 'me', content: '', images: 2 };
+  assert.notStrictEqual(turnKey(one), turnKey(two));
+  assert.notStrictEqual(turnKey(one), turnKey({ role: 'me', content: '' }));
+  assert.strictEqual(turnKey({ role: 'me', content: 'hi', images: 0 }), turnKey({ role: 'me', content: 'hi' }));
+});
+
+test('imagesLabel pluralises', () => {
+  assert.match(imagesLabel(1), /1 image$/);
+  assert.match(imagesLabel(3), /3 images$/);
 });

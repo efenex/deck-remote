@@ -58,6 +58,7 @@ type recallRow struct {
 	Meta   struct {
 		Delivery  string `json:"delivery"`
 		UserShell bool   `json:"user_shell"`
+		Images    int    `json:"images"`
 		Boundary  string `json:"boundary"`
 	} `json:"meta"`
 }
@@ -453,13 +454,13 @@ func recallMessages(rows []recallRow) []histMsg {
 				continue
 			}
 			t := humanText(raw)
-			if t == "" {
+			if t == "" && r.Meta.Images == 0 {
 				continue
 			}
 			if queued && queuedTUIRE.MatchString(t) {
 				continue
 			}
-			msgs = append(msgs, histMsg{Role: "user", Content: t, Ts: ts, ID: r.ID, Queued: queued})
+			msgs = append(msgs, histMsg{Role: "user", Content: t, Ts: ts, ID: r.ID, Queued: queued, Images: r.Meta.Images})
 		case "system":
 			if r.Meta.Boundary != "" || r.RawType == "chain/boundary" {
 				msgs = append(msgs, histMsg{Role: "boundary", Kind: "boundary", Content: boundaryLabel(r), Ts: ts, ID: r.ID})

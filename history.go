@@ -72,6 +72,10 @@ type histMsg struct {
 	Kind   string `json:"kind,omitempty"`
 	Queued bool   `json:"queued,omitempty"`
 	Origin string `json:"origin,omitempty"`
+	// Images counts the images attached to a user prompt (pasted/dragged into
+	// the TUI). The bytes are never served; Content may be empty when the
+	// prompt was only an image.
+	Images int `json:"images,omitempty"`
 	// Sender is a peer row's display name when the envelope names one; the
 	// client otherwise resolves the id from its session list.
 	Sender string `json:"sender,omitempty"`
@@ -116,10 +120,11 @@ type jsonlLine struct {
 	// what the operator typed while Claude was working (no user line is written
 	// for it). Peer and task-notification origins are not human input.
 	Attachment struct {
-		Type        string `json:"type"`
-		Prompt      string `json:"prompt"`
-		CommandMode string `json:"commandMode"`
-		Timestamp   string `json:"timestamp"`
+		Type string `json:"type"`
+		// Prompt is a string, or a content-block list when the prompt carried an image.
+		Prompt      json.RawMessage `json:"prompt"`
+		CommandMode string          `json:"commandMode"`
+		Timestamp   string          `json:"timestamp"`
 		Origin      struct {
 			Kind string `json:"kind"`
 		} `json:"origin"`
@@ -206,10 +211,14 @@ func queuedHumanMsg(l jsonlLine) (histMsg, bool) {
 	if ts == "" {
 		ts = l.Timestamp
 	}
-	raw, _ := json.Marshal(a.Prompt)
-	id := queuedID(ts, a.Prompt)
+	raw := a.Prompt
+	prompt, images := promptParts(raw)
+	if images > 0 {
+		raw, _ = json.Marshal(prompt)
+	}
+	id := queuedID(ts, prompt)
 	if a.Origin.Kind != "human" {
-		if from, name, text, ok := parsePeer(strings.TrimSpace(a.Prompt)); ok && text != "" {
+		if from, name, text, ok := parsePeer(strings.TrimSpace(prompt)); ok && text != "" {
 			return peerMsg(from, name, text, tsUnix(ts), id, true), true
 		}
 		return histMsg{}, false
@@ -217,7 +226,7 @@ func queuedHumanMsg(l jsonlLine) (histMsg, bool) {
 	if cmd, _, _, isIn, ok := bashEntry(raw); ok && isIn {
 		return histMsg{Role: "bash", Content: cmd, Ts: tsUnix(ts), ID: id, Queued: true, Origin: "human"}, true
 	}
-	m, ok := userEntryRow(raw, tsUnix(ts), id, true)
+	m, ok := userEntryRow(a.Prompt, tsUnix(ts), id, true)
 	if ok && m.Role == "user" {
 		m.Origin = "human"
 	}
@@ -386,6 +395,9 @@ var (
 	typeAttachA = []byte(`"type":"attachment"`)
 	typeAttachB = []byte(`"type": "attachment"`)
 	queuedCmd   = []byte(`"queued_command"`)
+	imageBlockA = []byte(`"type":"image"`)
+	imageBlockB = []byte(`"type": "image"`)
+	toolResult  = []byte(`"tool_result"`)
 )
 
 // skipLine is a cheap pre-filter for the bulk of a transcript: a user entry whose
@@ -400,7 +412,13 @@ func skipLine(line []byte) bool {
 	if !bytes.Contains(line, typeUserA) && !bytes.Contains(line, typeUserB) {
 		return false
 	}
-	return !bytes.Contains(line, contentStrA) && !bytes.Contains(line, contentStrB)
+	if bytes.Contains(line, contentStrA) || bytes.Contains(line, contentStrB) {
+		return false
+	}
+	// A prompt with an image has list content. Tool results (which also carry
+	// images, often megabytes of them) are still skipped undecoded.
+	hasImage := bytes.Contains(line, imageBlockA) || bytes.Contains(line, imageBlockB)
+	return !hasImage || bytes.Contains(line, toolResult)
 }
 
 // parseTranscriptFrom parses complete lines starting at byte offset from and

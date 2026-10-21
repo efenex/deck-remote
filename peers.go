@@ -92,6 +92,20 @@ func slashMsg(cmd string, ts int64, id string) histMsg {
 // userEntryRow classifies a plain user-entry string that is not a `!` line:
 // a peer message, a slash command, a human prompt, or nothing (synthetic).
 func userEntryRow(raw json.RawMessage, ts int64, id string, queued bool) (histMsg, bool) {
+	text, images := promptParts(raw)
+	if images > 0 {
+		// A prompt with images: classify its text as usual and keep the count; an
+		// image-only prompt (or one whose text is synthetic) is still a user row.
+		inner, _ := json.Marshal(text)
+		m, ok := userEntryRow(inner, ts, id, queued)
+		if !ok {
+			m = histMsg{Role: "user", Ts: ts, ID: id, Queued: queued}
+		}
+		if m.Role == "user" {
+			m.Images = images
+		}
+		return m, true
+	}
 	var s string
 	if json.Unmarshal(raw, &s) != nil {
 		return histMsg{}, false
@@ -111,4 +125,40 @@ func userEntryRow(raw json.RawMessage, ts int64, id string, queued bool) (histMs
 		return histMsg{}, false
 	}
 	return histMsg{Role: "user", Content: t, Ts: ts, ID: id, Queued: queued}, true
+}
+
+// promptParts reads a user entry's content when it is a prompt with images: a
+// content-block list with at least one image block and no tool_result. It
+// returns the joined text blocks and the image count; (string, 0) for anything
+// else, so a plain string prompt comes back unchanged and tool results stay out.
+func promptParts(raw json.RawMessage) (string, int) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, 0
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return "", 0
+	}
+	var texts []string
+	images := 0
+	for _, b := range blocks {
+		switch b.Type {
+		case "image":
+			images++
+		case "text":
+			if t := strings.TrimSpace(b.Text); t != "" {
+				texts = append(texts, t)
+			}
+		case "tool_result":
+			return "", 0
+		}
+	}
+	if images == 0 {
+		return "", 0
+	}
+	return strings.Join(texts, "\n\n"), images
 }

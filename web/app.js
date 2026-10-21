@@ -1764,7 +1764,7 @@
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
     // hist: from the transcript, so a fresh history page may replace it.
-    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true };
+    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images: m.images || 0 };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
@@ -1979,6 +1979,7 @@
         row.appendChild(el('span', 'gutter', '›'));
         const body = el('div', 'body');
         linkifyDocs(body, e.content);
+        if (e.images) body.appendChild(el('span', 'img-chip', DeckThread.imagesLabel(e.images)));
         row.appendChild(body);
         convo.appendChild(row);
         if (e.queued || e.status === 'failed' || e.status === 'unconfirmed' || closesRun(e, conv[i + 1])) {
