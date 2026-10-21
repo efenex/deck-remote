@@ -522,3 +522,73 @@ func TestDocInboxEntriesResolveRelativePaths(t *testing.T) {
 	s.cfg.towerOverview = ""
 	docWant(t, docGet(s, url.Values{"path": {"briefs/deckremote-bottom-band.md"}}), 400)
 }
+
+// Real inbox shape (testdata/inbox-doc-real.json, copied from prod's
+// deck-remote-notifications.json): session-less notifications from another
+// project (gitops-assistant) whose body names a path relative to THAT checkout.
+// Tower's root 404s them; the project dir of a listed session resolves them. Of
+// several matches (the same docs/ file in every worktree) the newest wins.
+func TestDocInboxRealEntriesFindTheirProject(t *testing.T) {
+	s, root, _ := docTestServer(t)
+	tower := filepath.Join(root, "tower")
+	ga := filepath.Join(root, "rootlease", "gitops-assistant")
+	wt := filepath.Join(root, "rootlease", "ga-wt-old")   // not a session path
+	other := filepath.Join(root, "rootlease", "ga-other") // a session path with an OLDER copy
+	for _, d := range []string{filepath.Join(tower, "state", "overview"), filepath.Join(ga, "docs", "plans"),
+		filepath.Join(ga, "state", "design-all", "run-20261019-1304"), filepath.Join(other, "docs", "plans"), filepath.Join(wt, "docs", "plans")} {
+		mustMkdir(t, d)
+	}
+	mustWrite(t, filepath.Join(ga, "state", "design-all", "run-20261019-1304", "report.md"), "# design-all")
+	mustWrite(t, filepath.Join(ga, "docs", "plans", "iter141-process-retro.md"), "# retro (ga, newest)")
+	mustWrite(t, filepath.Join(other, "docs", "plans", "iter141-process-retro.md"), "# retro (other, old)")
+	mustWrite(t, filepath.Join(wt, "docs", "plans", "iter141-process-retro.md"), "# retro (worktree, never listed)")
+	mustWrite(t, filepath.Join(ga, "docs", "plans", "test-suite-diet-design.md"), "# diet")
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(other, "docs", "plans", "iter141-process-retro.md"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.towerOverview = filepath.Join(tower, "state", "overview", "overview.json")
+	s.lists.m["default"] = listCacheEntry{at: time.Now().Add(time.Hour), sessions: []sessionInfo{
+		{ID: "a", Title: "ga-rdb2", Path: ga},
+		{ID: "b", Title: "ga-other", Path: other},
+		{ID: "c", Title: "home", Path: s.cfg.homeDir}, // outside the roots: never a base
+		{ID: "d", Title: "tower", Path: tower},
+	}}
+	var entries []struct{ ID, Body string }
+	raw, err := os.ReadFile("testdata/inbox-doc-real.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil || len(entries) != 3 {
+		t.Fatalf("fixture: %v (%d entries)", err, len(entries))
+	}
+	re := regexp.MustCompile(`(?:state|docs)/[\w./-]+\.md`)
+	n := 0
+	for _, e := range entries {
+		for _, p := range re.FindAllString(e.Body, -1) {
+			n++
+			w := docGet(s, url.Values{"path": {p}})
+			docWant(t, w, 200)
+			if p == "docs/plans/iter141-process-retro.md" && !strings.Contains(w.Body.String(), "ga, newest") {
+				t.Fatalf("expected the newest copy, got %s", w.Body.String())
+			}
+		}
+	}
+	if n != 3 {
+		t.Fatalf("found %d paths in the fixture, want 3", n)
+	}
+	// the named session still wins over a newer copy elsewhere
+	w := docGet(s, url.Values{"path": {"docs/plans/iter141-process-retro.md"}, "session": {"b"}})
+	docWant(t, w, 200)
+	if !strings.Contains(w.Body.String(), "other, old") {
+		t.Fatalf("named session must win: %s", w.Body.String())
+	}
+	// absolute requests are not rebased; a missing file is a plain 404; ~/ expands but stays root-checked
+	docWant(t, docGet(s, url.Values{"path": {"docs/plans/nope.md"}}), 404)
+	docWant(t, docGet(s, url.Values{"path": {"~/rootlease/gitops-assistant/docs/plans/test-suite-diet-design.md"}}), 403) // ~ expands, then the root check refuses (the home dir is not a root here)
+	// the doc log records requested path, session, base and tried count (never content)
+	log := mustRead(t, filepath.Join(stateDir(s.cfg.homeDir), "deck-remote-doc-reads.log"))
+	if !strings.Contains(log, `"req":"state/design-all/run-20261019-1304/report.md"`) || !strings.Contains(log, `"base":"`+ga+`"`) || strings.Contains(log, "# design-all") {
+		t.Fatalf("log line: %s", log)
+	}
+}

@@ -326,13 +326,18 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 	if dt, ok := s.tokens.find(bearerHeaderOnly(r)); ok {
 		device = dt.Name
 	}
+	var logSession, logBase string
+	var logTried int
 	logf := func(status int, real, reason string, n int) {
 		if real == "" {
 			real = req
 		}
-		f := map[string]any{"action": "doc", "allowed": status == 200, "status": status, "path": real, "device": device, "login": tsLogin(r), "reason": reason, "bytes": n}
+		f := map[string]any{"action": "doc", "allowed": status == 200, "status": status, "path": real, "req": req, "session": logSession, "base": logBase, "tried": logTried, "device": device, "login": tsLogin(r), "reason": reason, "bytes": n}
 		if len(real) > docLogPathMax {
 			f["path"], f["truncated"] = strings.ToValidUTF8(real[:docLogPathMax], ""), true
+		}
+		if len(req) > docLogPathMax {
+			f["req"], f["truncated"] = strings.ToValidUTF8(req[:docLogPathMax], ""), true
 		}
 		s.docLog(f)
 	}
@@ -341,12 +346,13 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 		httpError(w, e.status, e.msg)
 	}
 
-	base := ""
-	if !filepath.IsAbs(expandHome(req, s.cfg.homeDir)) {
-		base = s.docBase(r.Context(), sid)
-	}
 	cfg := s.docConfig()
-	real, root, de := resolveDoc(cfg, s.cfg.homeDir, req, base)
+	bases, firm := []string{""}, 0
+	if !filepath.IsAbs(expandHome(req, s.cfg.homeDir)) {
+		bases, firm = s.docBases(r.Context(), sid, cfg)
+	}
+	real, root, base, de := resolveDocBases(cfg, s.cfg.homeDir, req, bases, firm)
+	logSession, logBase, logTried = sid, base, len(bases)
 	if de != nil {
 		fail(de, "")
 		return
@@ -363,24 +369,87 @@ func (s *server) handleDoc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// docBase is the directory a relative document path resolves against: the
-// project directory of session sid, looked up server-side (an inbox entry or
-// the open sheet names the session; the client never supplies a directory).
-// With no session, or one the list no longer carries, it is tower's checkout
-// (--tower-root, else derived from --tower-overview), which is where the
-// operator's reports/ and briefs/ links point. "" = relative paths refused.
-// Whatever base this returns, resolveDoc still requires the joined path to
-// stay inside the allowed roots and clear the denylist.
-func (s *server) docBase(parent context.Context, sid string) string {
-	if sid != "" {
-		ctx, cancel := cliCtx(parent, 5*time.Second)
-		si, err := s.findSession(ctx, sid)
-		cancel()
-		if err == nil && si.Path != "" {
-			return si.Path
+// docBases lists the directories a relative document path may resolve against,
+// in order: the project dir of session sid (looked up server-side; an inbox
+// entry or the open sheet names the session, the client never supplies a
+// directory), tower's checkout (--tower-root, else derived from
+// --tower-overview), then the project dir of every other listed session that
+// lies inside a doc root. The last tier exists because inbox notifications
+// from other projects (gitops-assistant's state/… and docs/…) carry a path
+// relative to their own checkout and no session id. Every candidate is only a
+// base: resolveDoc still requires the joined path inside the allowed roots and
+// clear of the denylist, so a base cannot widen what is readable.
+func (s *server) docBases(parent context.Context, sid string, cfg docCfg) (out []string, firm int) {
+	seen := map[string]bool{}
+	add := func(p string) {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p == "" || p == "." || !filepath.IsAbs(p) || seen[p] {
+			return
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	ctx, cancel := cliCtx(parent, 5*time.Second)
+	sessions, err := s.listSessions(ctx)
+	cancel()
+	if sid != "" && err == nil {
+		for _, si := range sessions {
+			if si.ID == sid || si.Title == sid {
+				add(si.Path)
+				break
+			}
 		}
 	}
-	return s.cfg.towerRootDir()
+	add(s.cfg.towerRootDir())
+	firm = len(out)
+	if err == nil {
+		for _, si := range sessions {
+			p := filepath.Clean(si.Path)
+			for _, r := range cfg.roots {
+				if filepath.IsAbs(p) && (within(r.lex, p) || within(r.real, p)) {
+					add(p)
+					break
+				}
+			}
+		}
+	}
+	return out, firm
+}
+
+// resolveDocBases tries each base in order. The first `firm` bases (the named
+// session, tower) win on first hit; past them, a request that resolves under
+// several (the same docs/ path in every worktree) takes the most recently
+// modified file. The first base's error is reported when none resolves. base is
+// the one used ("" for absolute requests or when nothing resolved).
+func resolveDocBases(cfg docCfg, home, req string, bases []string, firm int) (real string, root docRoot, base string, de *docError) {
+	if len(bases) == 0 {
+		bases = []string{""}
+	}
+	var first *docError
+	var best time.Time
+	for i, b := range bases {
+		r, rt, e := resolveDoc(cfg, home, req, b)
+		if e != nil {
+			if first == nil {
+				first = e
+			}
+			continue
+		}
+		if i < firm {
+			return r, rt, b, nil
+		}
+		var mt time.Time
+		if fi, err := os.Stat(r); err == nil {
+			mt = fi.ModTime()
+		}
+		if real == "" || mt.After(best) {
+			real, root, base, best = r, rt, b, mt
+		}
+	}
+	if real == "" {
+		return "", docRoot{}, "", first
+	}
+	return real, root, base, nil
 }
 
 // docReadOK decides whether r may read documents. The bar mirrors tower

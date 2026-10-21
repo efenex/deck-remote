@@ -1,0 +1,23 @@
+[
+ {
+  "id": "dm6bs7hb43ps",
+  "at": 1792160238060,
+  "kind": "notify",
+  "title": "design-plan-backlog: fork parked",
+  "body": "DQ-20261016-10 blocks docs/plans/test-suite-diet-design.md R13"
+ },
+ {
+  "id": "dm8gsbz3547s",
+  "at": 1792377473305,
+  "kind": "notify",
+  "title": "process-retro --prep iter-141: 5 forks",
+  "body": "/dq (DQ-20261019-03..07) then --ship — docs/plans/iter141-process-retro.md"
+ },
+ {
+  "id": "dm8vukx149rc",
+  "at": 1792419966149,
+  "kind": "notify",
+  "title": "design-all: 15 forks parked",
+  "body": "12 docs · 3 READY · /dq --by-unblock · report state/design-all/run-20261019-1304/report.md"
+ }
+]

@@ -96,7 +96,7 @@ test('keyboard up: no 100lvh rule can apply (it does not shrink with the keyboar
   const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
   assert.match(f, /classList\.toggle\('kb', kb\)/);
   assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
-  assert.match(f, /sheet\.style\.height = kb \? vv\.height/);
+  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height - pad\)/);
   assert.match(f, /sheet\.style\.bottom = kb \? 'auto' : ''/);
   // 3. with the keyboard down the inline overrides are cleared, so 100lvh governs again
   assert.match(f, /kb \? [^:]+: ''/);
@@ -122,4 +122,19 @@ test('inbox cards carry their session id so doc links resolve against that sessi
   const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   assert.match(js, /card\.dataset\.session = n\.sessionId/);
   assert.match(js, /a\.closest\('\.notif'\)\) session = a\.closest\('\.notif'\)\.dataset\.session/);
+});
+
+test('keyboard up in the home-screen app: sheet is sized from visualViewport minus the accessory-bar allowance', () => {
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
+  assert.match(f, /const pad = kb && isStandalone\(\) \? kbPad\(\) : 0/);
+  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height - pad\) \+ 'px'/);
+  assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
+  // allowance: default 34, clamped 0..120, persisted
+  const k = js.slice(js.indexOf('function kbPad()'), js.indexOf('function applyViewport()'));
+  assert.match(k, /: 34;/);
+  assert.match(k, /n >= 0 && n <= 120/);
+  // the overlay shows kb state and offers -/+
+  assert.match(js, /'kb ' \+ document\.documentElement\.classList\.contains\('kb'\)/);
+  assert.match(js, /minus\.addEventListener\('click', \(\) => nudge\(-4\)\)/);
 });
