@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,60 +101,84 @@ func rec(five, seven float64, r5, r7 int64) string {
 
 func fp(f float64) *float64 { return &f }
 
-func TestQuotaByGroup(t *testing.T) {
+// slRL is a record with only rate limits; a nil five leaves five_hour null (as real records do).
+func slRL(five *float64, r5 int64, seven float64, r7 int64) string {
+	f := "null"
+	if five != nil {
+		f = `{"used_percentage":` + strconv.FormatFloat(*five, 'f', -1, 64) + `,"resets_at":` + itoa(r5) + `}`
+	}
+	return `{"rate_limits":{"five_hour":` + f + `,"seven_day":{"used_percentage":` + strconv.FormatFloat(seven, 'f', -1, 64) + `,"resets_at":` + itoa(r7) + `}}}`
+}
+
+// Shaped after the prod table at 13:5xZ: one account (same weekly reset on every
+// record), five_hour null on some, an hour-old record on a rolled-over 5 h window.
+func TestAccountQuotaFreshestPerWindow(t *testing.T) {
 	now := slNow
 	ms := now.UnixMilli()
-	r5, r7 := now.Unix()+3600, now.Unix()+86400
+	r5, r5old, r7 := now.Unix()+7200, now.Unix()-1800, now.Unix()+5*86400
 	sn := slSnap(t,
-		// group "up" has two sessions: the fresher record wins.
-		slRow("c1", "i1", ms-600_000, rec(10, 20, r5, r7)),
-		slRow("c2", "i2", ms-60_000, rec(12, 20, r5, r7)),
-		// "tower" is the same account as "up" at the moment c3 was captured? No: other numbers.
-		slRow("c3", "i3", ms-120_000, rec(40, 70, r5+100, r7+100)),
-		// "ai" agrees with "up" exactly: same account, one entry.
-		slRow("c4", "i4", ms-30_000, rec(12, 20, r5, r7)),
-		// expired 5h window (reset passed) and an archived session are ignored.
-		slRow("c5", "i5", ms, rec(99, 50, now.Unix()-10, r7+7)),
-		slRow("c6", "i6", ms, rec(77, 77, r5, r7)),
+		slRow("c1", "i1", ms, slRL(fp(1), r5, 28, r7)),               // freshest: both windows
+		slRow("c2", "i2", ms-60_000, slRL(nil, 0, 27, r7)),           // fresher than c3 but 5h null, week one point stale
+		slRow("c3", "i3", ms-180_000, slRL(fp(0), r5, 28, r7)),       // older copy
+		slRow("c4", "i4", ms-54*60_000, slRL(fp(18), r5old, 27, r7)), // previous 5h window, already reset
 	)
-	sessions := []sessionInfo{
-		{ID: "i1", ClaudeSessionID: "c1", Group: "up"},
-		{ID: "i2", ClaudeSessionID: "c2", Group: "up"},
-		{ID: "i3", ClaudeSessionID: "c3", Group: "tower"},
-		{ID: "i4", ClaudeSessionID: "c4", Group: "ai"},
-		{ID: "i5", ClaudeSessionID: "c5", Group: "luna"},
-		{ID: "i6", ClaudeSessionID: "c6", Group: "gone", Archived: true},
-		{ID: "i7", ClaudeSessionID: "none", Group: "norecord"},
+	q := accountQuota(sn, now)
+	if len(q) != 1 {
+		t.Fatalf("one account line, got %+v", q)
 	}
-	e8 := slEntry{rec: sn.byClaude["c4"].rec, capturedAt: now.Add(-10 * time.Second)}
-	// Same account as "up"/"ai" (same reset pair) captured a moment later, one percent higher:
-	// merges, and the fresher figures win.
-	e8.rec.RateLimits.FiveHour = &rateWindow{UsedPercentage: fp(13), ResetsAt: r5}
-	sn.byClaude["c8"] = e8
-	sessions = append(sessions, sessionInfo{ID: "i8", ClaudeSessionID: "c8", Group: "rootlease"})
-	q := quotaByGroup(sessions, sn, now)
-	if len(q) != 3 {
-		t.Fatalf("want 3 accounts, got %d: %+v", len(q), q)
+	a := q[0]
+	if a.FiveHour == nil || a.FiveHour.Pct != 1 || a.FiveHour.ResetsAt != r5 || a.FiveHour.Expired {
+		t.Errorf("5h = %+v", a.FiveHour)
 	}
-	byFirst := map[string]quotaInfo{}
-	for _, e := range q {
-		byFirst[e.Groups[0]] = e
+	if a.SevenDay == nil || a.SevenDay.Pct != 28 || a.SevenDay.ResetsAt != r7 {
+		t.Errorf("7d = %+v", a.SevenDay)
 	}
-	ai := byFirst["ai"]
-	if strings.Join(ai.Groups, ",") != "ai,rootlease,up" || ai.FiveHour.Pct != 13 || ai.SevenDay.Pct != 20 || ai.AsOf != now.Unix()-10 {
-		t.Errorf("merged account = %+v", ai)
+	if a.AsOf != now.Unix() || a.Others != 0 {
+		t.Errorf("asOf/others = %d/%d", a.AsOf, a.Others)
 	}
-	if tw := byFirst["tower"]; tw.FiveHour.Pct != 40 || tw.SevenDay.ResetsAt != r7+100 {
-		t.Errorf("tower = %+v", tw)
+	// session just reset, nobody driving: only the hour-old record has a 5h window, and it is past its reset
+	sn = slSnap(t,
+		slRow("c2", "i2", ms-60_000, slRL(nil, 0, 28, r7)),
+		slRow("c4", "i4", ms-54*60_000, slRL(fp(18), r5old, 27, r7)),
+	)
+	a = accountQuota(sn, now)[0]
+	if a.FiveHour == nil || a.FiveHour.Pct != 0 || !a.FiveHour.Expired || a.FiveHour.ResetsAt != 0 {
+		t.Errorf("expired 5h must read 0%%, not 18: %+v", a.FiveHour)
 	}
-	lu := byFirst["luna"]
-	if lu.FiveHour != nil || lu.SevenDay == nil || lu.SevenDay.Pct != 50 {
-		t.Errorf("expired 5h window not dropped: %+v", lu)
+	if a.SevenDay.Pct != 28 || a.AsOf != now.Unix()-60 {
+		t.Errorf("7d/asOf = %+v / %d", a.SevenDay, a.AsOf)
 	}
-	if quotaByGroup(sessions, nil, now) != nil {
-		t.Error("nil snapshot must give no quota")
+	// the weekly window itself rolled over
+	sn = slSnap(t, slRow("c1", "i1", ms-3600_000, slRL(nil, 0, 91, now.Unix()-60)))
+	a = accountQuota(sn, now)[0]
+	if a.SevenDay == nil || a.SevenDay.Pct != 0 || !a.SevenDay.Expired || a.FiveHour != nil {
+		t.Errorf("expired week = %+v / %+v", a.SevenDay, a.FiveHour)
+	}
+	b, _ := json.Marshal(accountQuota(sn, now))
+	if strings.Contains(string(b), "91") || !strings.Contains(string(b), `"expired":true`) {
+		t.Errorf("wire: %s", b)
 	}
 }
+
+func TestAccountQuotaFlagsAnotherAccountWithoutMixingIt(t *testing.T) {
+	now := slNow
+	ms := now.UnixMilli()
+	r5, r7 := now.Unix()+7200, now.Unix()+5*86400
+	sn := slSnap(t,
+		slRow("c1", "i1", ms-120_000, slRL(fp(3), r5, 28, r7)),
+		slRow("c2", "i2", ms-60_000, slRL(fp(40), r5+99, 60, r7+86400)),      // fresher, different weekly reset
+		slRow("c3", "i3", ms-20*3600_000, slRL(fp(5), r5+7, 10, r7+2*86400)), // too old to count as live
+	)
+	a := accountQuota(sn, now)[0]
+	if a.SevenDay.Pct != 60 || a.Others != 1 {
+		t.Errorf("the freshest record is the account, the other weekly window is counted: %+v", a)
+	}
+	if accountQuota(nil, now) != nil || accountQuota(slSnap(t, slRow("c9", "i9", ms, slRecNoLimits)), now) != nil {
+		t.Error("no snapshot / no rate limits must give no quota")
+	}
+}
+
+const slRecNoLimits = `{"context_window":{"used_percentage":4}}`
 
 func TestAnnotateCtxOnlyClaude(t *testing.T) {
 	sn := slSnap(t, slRow("c1", "i1", slNow.UnixMilli(), slRecA))

@@ -1568,7 +1568,7 @@
 
   // Context bar + the quota of the session's account, under the sheet title.
   function sheetPulseHTML(s) {
-    return DeckPulse.ctxFull(s.ctx) + DeckPulse.quotaInline(DeckPulse.quotaFor(state.quota, s.group), Date.now());
+    return DeckPulse.ctxFull(s.ctx) + DeckPulse.quotaInline(DeckPulse.quotaFor(state.quota));
   }
 
   // The 20 s list refresh keeps an open sheet's meters current.
@@ -1578,7 +1578,7 @@
     if (s) box.innerHTML = sheetPulseHTML(s);
   }
 
-  // Deck-wide quota strip: one block per account (never mixed), hidden without data.
+  // Account quota (week + 5h), pinned under the deck title; hidden without data.
   function renderQuota() {
     const box = $('#quotaStrip');
     if (!box) return;

@@ -65,42 +65,60 @@
       (ctx.model ? '<span class="ctx-model">' + esc(ctx.model) + '</span>' : '') + '</div>';
   }
 
-  function win(label, w, nowMs) {
-    if (!w) return '<div class="q-win none"><span class="q-label">' + label + '</span><span class="q-val">—</span></div>';
-    const p = clamp(w.pct);
-    const r = fmtReset(w.resetsAt, nowMs);
-    return '<div class="q-win lv-' + level(p, 'quota') + '"><span class="q-label">' + label + '</span>' + bar(p, 'quota') +
-      '<span class="q-val"><b>' + Math.round(p) + '%</b>' + (r ? ' <span class="q-reset">↻ ' + r + '</span>' : '') + '</span></div>';
+  // When a window resets, in the viewer's time: "06:00" when within a day, "Tue 06:00"
+  // beyond. tz (IANA name) is for tests; the app passes none (device time zone).
+  function fmtResetAt(resetsAt, nowMs, tz) {
+    const t = Number(resetsAt) || 0;
+    if (!(t > 0)) return '';
+    const now = (nowMs == null ? Date.now() : nowMs) / 1000;
+    const o = { hour: '2-digit', minute: '2-digit', hour12: false };
+    if (tz) o.timeZone = tz;
+    if (t - now > 20 * 3600) o.weekday = 'short';
+    return new Intl.DateTimeFormat('en-GB', o).format(new Date(t * 1000)).replace(',', '');
   }
 
-  // One account's 5 h / 7 d usage; `groups` names the agent-deck groups it was read from.
-  function quotaAccount(q, nowMs) {
+  // One line of the account quota: "Week ▮▮▯ 28% resets Tue 06:00". A window with no
+  // record at all is a dash; one that has rolled over since its last record is 0 %.
+  function line(label, w, nowMs, tz) {
+    if (!w) return '<div class="q-line none"><span class="q-label">' + label + '</span><span class="q-val">—</span></div>';
+    const p = w.expired ? 0 : clamp(w.pct);
+    const at = w.expired ? '' : fmtResetAt(w.resetsAt, nowMs, tz);
+    return '<div class="q-line lv-' + level(p, 'quota') + '"><span class="q-label">' + label + '</span>' + bar(p, 'quota') +
+      '<span class="q-val"><b>' + Math.round(p) + '%</b></span>' +
+      '<span class="q-reset">' + (w.expired ? 'just reset' : at ? 'resets ' + at : '') + '</span></div>';
+  }
+
+  // The account's weekly + 5 h usage; "as of Nm" once the freshest record is >10 min old,
+  // "+N other" when fresh records on a different weekly window exist (another account).
+  function quotaAccount(q, nowMs, tz) {
     const age = fmtAge(q.asOf, nowMs);
     const stale = fmtAge(q.asOf, nowMs, 60) ? ' stale' : ''; // an hour or more: dim it, the age tag stays
-    return '<div class="q-acct' + stale + '"><div class="q-groups">' + esc((q.groups || []).join(' · ')) + (age ? ' <span class="q-stale">' + age + '</span>' : '') + '</div>' +
-      '<div class="q-wins">' + win('5h', q.fiveHour, nowMs) + win('7d', q.sevenDay, nowMs) + '</div></div>';
+    const tags = (age ? '<span class="q-stale">as of ' + age.replace(' old', '') + '</span>' : '') +
+      (q.others > 0 ? '<span class="q-other">+' + (Number(q.others) | 0) + ' other account' + (q.others > 1 ? 's' : '') + '</span>' : '');
+    return '<div class="q-acct' + stale + '">' + line('Week', q.sevenDay, nowMs, tz) + line('5h', q.fiveHour, nowMs, tz) +
+      (tags ? '<div class="q-tags">' + tags + '</div>' : '') + '</div>';
   }
 
-  // The deck's quota strip: one block per account, never mixed. '' without data.
-  function quotaStrip(quota, nowMs) {
+  // The deck's quota strip: the account line. '' without data.
+  function quotaStrip(quota, nowMs, tz) {
     if (!Array.isArray(quota) || !quota.length) return '';
-    return quota.map((q) => quotaAccount(q, nowMs)).join('');
+    return quotaAccount(quota[0], nowMs, tz);
   }
 
-  // The quota entry that covers a session's group, if any.
-  function quotaFor(quota, group) {
-    return (Array.isArray(quota) ? quota : []).find((q) => (q.groups || []).indexOf(group) >= 0) || null;
+  // Rate limits are per account, not per group: the one account line covers every session.
+  function quotaFor(quota) {
+    return (Array.isArray(quota) && quota[0]) || null;
   }
 
-  // "5h 12% · 7d 20%" for the sheet header.
-  function quotaInline(q, nowMs) {
+  // "Week 28% · 5h 0%" for the sheet header.
+  function quotaInline(q) {
     if (!q) return '';
-    const part = (label, w) => w ? '<span class="lv-' + level(w.pct, 'quota') + '">' + label + ' <b>' + Math.round(clamp(w.pct)) + '%</b>' + (fmtReset(w.resetsAt, nowMs) ? ' ↻' + fmtReset(w.resetsAt, nowMs) : '') + '</span>' : '';
-    const out = [part('5h', q.fiveHour), part('7d', q.sevenDay)].filter(Boolean);
+    const part = (label, w) => w ? '<span class="lv-' + level(w.expired ? 0 : w.pct, 'quota') + '">' + label + ' <b>' + Math.round(w.expired ? 0 : clamp(w.pct)) + '%</b></span>' : '';
+    const out = [part('Week', q.sevenDay), part('5h', q.fiveHour)].filter(Boolean);
     return out.length ? '<div class="q-inline">' + out.join('') + '</div>' : '';
   }
 
-  const api = { level, fmtTokens, fmtReset, fmtAge, bar, ctxMini, ctxFull, quotaStrip, quotaAccount, quotaFor, quotaInline };
+  const api = { level, fmtTokens, fmtReset, fmtResetAt, fmtAge, bar, ctxMini, ctxFull, quotaStrip, quotaAccount, quotaFor, quotaInline };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckPulse = api;
 })(typeof window !== 'undefined' ? window : globalThis);

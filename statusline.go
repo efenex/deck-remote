@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,10 +25,11 @@ import (
 // per statuslineTTL instead, independent of the number of sessions, and not an
 // agent-deck exec (execAdeck stays 0; counted separately as execSqlite).
 //
-// Rate limits are per account and the shared `agent-deck usage` cache mixes
-// them, so the quota is taken from the sessions' own records and reported per
-// group (same rule as tower's board.py); groups whose records agree on both
-// reset times are the same account and share one entry.
+// Rate limits are per ACCOUNT, and a record does not say which account it came
+// from. The deck shows ONE account line (week + 5 h), each window taken from the
+// freshest record that carries it; the rest of the records only widen the
+// "others" count when they carry a different weekly reset (a second account).
+// Account identity from agent-deck is the follow-up that would replace that.
 
 const (
 	statuslineTTL     = 5 * time.Second
@@ -88,14 +88,17 @@ type ctxInfo struct {
 type quotaWindow struct {
 	Pct      float64 `json:"pct"`
 	ResetsAt int64   `json:"resetsAt,omitempty"` // unix s
+	// Expired: the freshest record for this window predates its own reset, so
+	// the window has rolled over since; Pct is 0, not the stale figure.
+	Expired bool `json:"expired,omitempty"`
 }
 
-// quotaInfo is one account's 5 h / 7 d usage, with the groups it was read from.
+// quotaInfo is the account's 5 h / 7 d usage.
 type quotaInfo struct {
-	Groups   []string     `json:"groups"`
 	FiveHour *quotaWindow `json:"fiveHour,omitempty"`
 	SevenDay *quotaWindow `json:"sevenDay,omitempty"`
-	AsOf     int64        `json:"asOf"` // unix s of the freshest record behind it
+	AsOf     int64        `json:"asOf"`             // unix s of the freshest record that carries any rate limit
+	Others   int          `json:"others,omitempty"` // other weekly windows seen in fresh records (a different account?)
 }
 
 // statuslineSnap indexes a read of the table.
@@ -244,87 +247,65 @@ func ctxFor(e slEntry, now time.Time) *ctxInfo {
 	return &ctxInfo{Pct: pct, Tokens: cw.TotalInputTokens, Window: cw.ContextWindowSize, Model: modelLabel(e.rec.Model), AsOf: e.capturedAt.Unix()}
 }
 
-// quotaWindowOf converts a record window; nil when absent or already past its
-// reset (the figure then describes the previous window).
+// quotaWindowOf converts a record window. A window already past its reset reads
+// 0 % (Expired), not the previous window's figure.
 func quotaWindowOf(w *rateWindow, now time.Time) *quotaWindow {
 	if w == nil || w.UsedPercentage == nil {
 		return nil
 	}
 	if w.ResetsAt > 0 && w.ResetsAt <= now.Unix() {
-		return nil
+		return &quotaWindow{Pct: 0, Expired: true}
 	}
 	return &quotaWindow{Pct: *w.UsedPercentage, ResetsAt: w.ResetsAt}
 }
 
-func sameWindow(a, b *quotaWindow) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.Pct == b.Pct && a.ResetsAt == b.ResetsAt
-}
-
-// sameAccount: two groups read from one account. Both windows must carry a
-// reset time and agree on both to the second (a second-resolution pair does not
-// collide across accounts); failing that, identical figures. Records captured a
-// minute apart can differ by a percent, so equal percentages are not required.
-func sameAccount(a, b quotaInfo) bool {
-	if a.FiveHour != nil && b.FiveHour != nil && a.SevenDay != nil && b.SevenDay != nil &&
-		a.FiveHour.ResetsAt > 0 && a.SevenDay.ResetsAt > 0 {
-		return a.FiveHour.ResetsAt == b.FiveHour.ResetsAt && a.SevenDay.ResetsAt == b.SevenDay.ResetsAt
-	}
-	return sameWindow(a.FiveHour, b.FiveHour) && sameWindow(a.SevenDay, b.SevenDay)
-}
-
-// quotaByGroup takes, per group, the freshest record that carries rate limits,
-// then merges groups that are one account (sameAccount), keeping the figures of
-// the fresher record. Never mixes accounts: anything not provably the same
-// stays a separate entry.
-func quotaByGroup(sessions []sessionInfo, sn *statuslineSnap, now time.Time) []quotaInfo {
+// accountQuota builds the single account line. Each window comes from the
+// freshest record that carries it (records alternate: one has five_hour null
+// while a fresher one has it; the 5 h and 7 d figures need not share a record).
+// nil when no record carries a rate limit.
+func accountQuota(sn *statuslineSnap, now time.Time) []quotaInfo {
 	if sn == nil {
 		return nil
 	}
-	best := map[string]slEntry{}
-	for _, se := range sessions {
-		if se.Archived {
-			continue
+	var recs []slEntry
+	for _, e := range sn.byClaude {
+		recs = append(recs, e)
+	}
+	for _, e := range sn.byInstance {
+		recs = append(recs, e)
+	}
+	var five, seven *rateWindow
+	var fiveAt, sevenAt, asOf time.Time
+	for _, e := range recs {
+		rl := e.rec.RateLimits
+		if rl.FiveHour != nil && rl.FiveHour.UsedPercentage != nil && e.capturedAt.After(fiveAt) {
+			five, fiveAt = rl.FiveHour, e.capturedAt
 		}
-		e, ok := sn.entryFor(se)
-		if !ok || (e.rec.RateLimits.FiveHour == nil && e.rec.RateLimits.SevenDay == nil) {
-			continue
-		}
-		if cur, have := best[se.Group]; !have || e.capturedAt.After(cur.capturedAt) {
-			best[se.Group] = e
+		if rl.SevenDay != nil && rl.SevenDay.UsedPercentage != nil && e.capturedAt.After(sevenAt) {
+			seven, sevenAt = rl.SevenDay, e.capturedAt
 		}
 	}
-	groups := make([]string, 0, len(best))
-	for g := range best {
-		groups = append(groups, g)
+	if five == nil && seven == nil {
+		return nil
 	}
-	sort.Strings(groups)
-	var out []quotaInfo
-	for _, g := range groups {
-		e := best[g]
-		q := quotaInfo{Groups: []string{g}, FiveHour: quotaWindowOf(e.rec.RateLimits.FiveHour, now), SevenDay: quotaWindowOf(e.rec.RateLimits.SevenDay, now), AsOf: e.capturedAt.Unix()}
-		if q.FiveHour == nil && q.SevenDay == nil {
-			continue
-		}
-		merged := false
-		for i := range out {
-			if sameAccount(out[i], q) {
-				groups := append(out[i].Groups, g)
-				if q.AsOf > out[i].AsOf {
-					out[i] = q
-				}
-				out[i].Groups = groups
-				merged = true
-				break
+	asOf = fiveAt
+	if sevenAt.After(asOf) {
+		asOf = sevenAt
+	}
+	q := quotaInfo{FiveHour: quotaWindowOf(five, now), SevenDay: quotaWindowOf(seven, now), AsOf: asOf.Unix()}
+	// Fresh records on a different, live weekly window are probably another
+	// account: do not mix them in, but say they exist.
+	if seven != nil {
+		other := map[int64]bool{}
+		for _, e := range recs {
+			w := e.rec.RateLimits.SevenDay
+			if w != nil && w.UsedPercentage != nil && w.ResetsAt > now.Unix() && w.ResetsAt != seven.ResetsAt && now.Sub(e.capturedAt) <= statuslineMaxAge {
+				other[w.ResetsAt] = true
 			}
 		}
-		if !merged {
-			out = append(out, q)
-		}
+		q.Others = len(other)
 	}
-	return out
+	return []quotaInfo{q}
 }
 
 // annotateCtx attaches the context block to every Claude session with a fresh
@@ -341,5 +322,5 @@ func annotateCtx(sessions []sessionInfo, sn *statuslineSnap, now time.Time) []qu
 			sessions[i].Ctx = ctxFor(e, now)
 		}
 	}
-	return quotaByGroup(sessions, sn, now)
+	return accountQuota(sn, now)
 }

@@ -53,32 +53,60 @@ test('ctxMini / ctxFull', () => {
 
 test('model names are escaped', () => {
   assert.doesNotMatch(P.ctxFull({ pct: 1, model: '<img onerror=x>' }), /<img/);
-  assert.match(P.quotaStrip([{ groups: ['<b>'], fiveHour: { pct: 1 } }], 0), /&lt;b&gt;/);
+  assert.doesNotMatch(P.quotaStrip([{ fiveHour: { pct: 1, resetsAt: '<img>' } }], 0), /<img/);
 });
 
-test('quotaStrip renders one block per account and a missing window as a dash', () => {
-  const now = 1792578000 * 1000;
-  const html = P.quotaStrip([
-    { groups: ['ai-tooling', 'upstream'], fiveHour: { pct: 10, resetsAt: 1792578000 + 3720 }, sevenDay: { pct: 85, resetsAt: 1792578000 + 2 * 86400 }, asOf: 1792578000 - 60 },
-    { groups: ['luna'], sevenDay: { pct: 55 }, asOf: 1792578000 - 3600 },
-  ], now);
-  assert.strictEqual((html.match(/class="q-acct/g) || []).length, 2);
-  assert.strictEqual((html.match(/class="q-acct stale"/g) || []).length, 1); // only the hour-old one is dimmed
-  assert.match(html, /ai-tooling · upstream/);
-  assert.match(html, /↻ 1h02m/);
-  assert.match(html, /q-win lv-hot/); // 7d 85 %
-  assert.match(html, /q-win none/); // luna has no 5h window
-  assert.match(html, /60m old/);
-  assert.strictEqual(P.quotaStrip([], now), '');
-  assert.strictEqual(P.quotaStrip(undefined, now), '');
+const NOW = 1792578000; // 2026-10-21T10:20:00Z (a Wednesday)
+
+test('fmtResetAt: time within a day, weekday + time beyond; UTC here, device zone in the app', () => {
+  assert.strictEqual(P.fmtResetAt(NOW + 3 * 3600, NOW * 1000, 'UTC'), '13:20');
+  assert.strictEqual(P.fmtResetAt(1793077200, NOW * 1000, 'UTC'), 'Tue 05:00');
+  assert.strictEqual(P.fmtResetAt(0, NOW * 1000, 'UTC'), '');
+  assert.strictEqual(P.fmtResetAt(NOW + 3 * 3600, NOW * 1000, 'Europe/Brussels'), '15:20');
 });
 
-test('quotaFor / quotaInline', () => {
-  const q = [{ groups: ['a', 'b'], fiveHour: { pct: 12, resetsAt: 0 }, sevenDay: { pct: 20 } }, { groups: ['c'] }];
-  assert.strictEqual(P.quotaFor(q, 'b'), q[0]);
-  assert.strictEqual(P.quotaFor(q, 'zzz'), null);
-  assert.strictEqual(P.quotaFor(undefined, 'a'), null);
-  assert.match(P.quotaInline(q[0], 0), /5h <b>12%<\/b>.*7d <b>20%<\/b>/);
-  assert.strictEqual(P.quotaInline(q[1], 0), '');
-  assert.strictEqual(P.quotaInline(null, 0), '');
+test('quotaStrip: one account line, Week first, "Week 28% resets Tue 05:00" and "5h 0%"', () => {
+  const html = P.quotaStrip([{ sevenDay: { pct: 28, resetsAt: 1793077200 }, fiveHour: { pct: 0, resetsAt: NOW + 3 * 3600 }, asOf: NOW - 30 }], NOW * 1000, 'UTC');
+  assert.strictEqual((html.match(/class="q-acct/g) || []).length, 1);
+  assert.ok(html.indexOf('Week') < html.indexOf('5h'));
+  assert.match(html, /<b>28%<\/b>/);
+  assert.match(html, /resets Tue 05:00/);
+  assert.match(html, /<b>0%<\/b>/);
+  assert.match(html, /resets 13:20/);
+  assert.doesNotMatch(html, /as of/); // fresh record: no age tag
+  assert.doesNotMatch(html, /stale/);
+});
+
+test('quotaStrip: green/yellow/red bars, as-of tag after 10 min, dim after an hour, other-account note', () => {
+  const at = (pct, asOf, extra) => P.quotaStrip([Object.assign({ sevenDay: { pct, resetsAt: NOW + 86400 * 5 }, asOf }, extra || {})], NOW * 1000, 'UTC');
+  assert.match(at(28, NOW), /q-line lv-ok/);
+  assert.match(at(60, NOW), /q-line lv-warn/);
+  assert.match(at(85, NOW), /q-line lv-hot/);
+  assert.match(at(28, NOW - 14 * 60), /as of 14m/);
+  assert.doesNotMatch(at(28, NOW - 14 * 60), /q-acct stale/);
+  assert.match(at(28, NOW - 3 * 3600), /q-acct stale/);
+  assert.match(at(28, NOW - 3 * 3600), /as of 3h/);
+  assert.match(at(28, NOW, { others: 1 }), /\+1 other account</);
+  assert.match(at(28, NOW, { others: 2 }), /\+2 other accounts</);
+});
+
+test('quotaStrip: an expired window reads 0% (never the stale number); a missing one is a dash', () => {
+  const html = P.quotaStrip([{ sevenDay: { pct: 28, resetsAt: NOW + 86400 }, fiveHour: { pct: 0, expired: true }, asOf: NOW }], NOW * 1000, 'UTC');
+  assert.match(html, /5h<\/span>.*<b>0%<\/b>.*just reset/);
+  const none = P.quotaStrip([{ sevenDay: { pct: 28, resetsAt: NOW + 86400 }, asOf: NOW }], NOW * 1000, 'UTC');
+  assert.match(none, /q-line none/);
+  assert.match(none, /—/);
+  assert.strictEqual(P.quotaStrip([], NOW), '');
+  assert.strictEqual(P.quotaStrip(undefined, NOW), '');
+});
+
+test('quotaFor ignores the group (limits are per account); quotaInline "Week 28% · 5h 0%"', () => {
+  const q = [{ sevenDay: { pct: 28 }, fiveHour: { pct: 0 } }];
+  assert.strictEqual(P.quotaFor(q, 'any-group'), q[0]);
+  assert.strictEqual(P.quotaFor([]), null);
+  assert.strictEqual(P.quotaFor(undefined), null);
+  assert.match(P.quotaInline(q[0]), /Week <b>28%<\/b>.*5h <b>0%<\/b>/);
+  assert.match(P.quotaInline({ sevenDay: { pct: 28 }, fiveHour: { pct: 55, expired: true } }), /5h <b>0%<\/b>/);
+  assert.strictEqual(P.quotaInline({}), '');
+  assert.strictEqual(P.quotaInline(null), '');
 });
