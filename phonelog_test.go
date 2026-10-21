@@ -151,3 +151,20 @@ func TestPhoneEchoRules(t *testing.T) {
 		t.Error("disabled log claimed a row")
 	}
 }
+
+// TestPhoneEchoRecallRow: the same message as agent-deck recall serves it
+// (rows/v2, 2026-10-21 10:15:01Z, origin peer:unknown, body with Claude Code's
+// preamble and footer) and an envelope'd peer message lose the footer.
+func TestPhoneEchoRecallRow(t *testing.T) {
+	footer := "\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf."
+	r := recallRow{Kind: "system", Origin: "peer:unknown", RawType: "user",
+		Body: "Another Claude session sent a message:\none thing dr needs is a context/quota view, ie like pulse in cc" + footer}
+	from, _, text, ok := recallPeer(r)
+	if !ok || from != "unknown" || text != "one thing dr needs is a context/quota view, ie like pulse in cc" {
+		t.Errorf("recallPeer = %q %q %v", from, text, ok)
+	}
+	from, _, text, ok = parsePeer("Another Claude session sent a message:\n[agent-deck from:f8593170-1792258124]\n[tower → dr-band] go" + footer)
+	if !ok || from != "f8593170-1792258124" || text != "[tower → dr-band] go" {
+		t.Errorf("envelope'd = %q %q %v", from, text, ok)
+	}
+}

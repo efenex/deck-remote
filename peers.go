@@ -42,6 +42,9 @@ func parsePeer(body string) (from, name, text string, ok bool) {
 	if m := peerPreambleRE.FindString(s); m != "" {
 		s, pre = s[len(m):], true
 	}
+	if pre { // Claude Code's caution footer goes with its preamble
+		s = peerFooterRE.ReplaceAllString(s, "")
+	}
 	if m := peerEnvelopeRE.FindStringSubmatch(s); m != nil {
 		return m[1], "", strings.TrimSpace(s[len(m[0]):]), true
 	}
@@ -53,7 +56,7 @@ func parsePeer(body string) (from, name, text string, ok bool) {
 		return attrs["from"], attrs["from-name"], strings.TrimSpace(m[2]), true
 	}
 	if pre { // a preamble without a recognisable envelope is still a peer message
-		return "", "", strings.TrimSpace(peerFooterRE.ReplaceAllString(s, "")), true
+		return "", "", strings.TrimSpace(s), true
 	}
 	return "", "", "", false
 }
