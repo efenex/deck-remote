@@ -1,0 +1,17 @@
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Leaf rule  ☐ ESO comment  ☐ Other gates  ✔ Submit  →
+
+│ The per-leaf output scan flags the ERB File.read / YAML.load_file / HTTP_SECRET placeholders you confirmed. Exempt leaf hits whose WHOLE value is one of
+│ those placeholder shapes (same strict rule as the literal check: single file-read call on a plain path with only strip/chomp/to_json/flatten/first, or an
+│ ALL_CAPS_WITH_UNDERSCORE token the same render substitutes)?
+
+❯ 1. Yes, same rule (Rec.)
+     Gitlab's secret side qualifies; a mixed value (literal + File.read, rescue fallback, comment) still refuses.
+  2. No, keep refusing
+     Ship the harden as is; gitlab stays refused on the secret side.
+  3. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ga-rdb2 ─

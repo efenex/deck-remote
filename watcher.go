@@ -214,6 +214,9 @@ func (s *server) watchAttention(se sessionInfo, sw *sessWatch, isNew bool, info 
 		body, kind = "Question waiting — tap to answer", "question"
 		if len(info.Questions) > 0 {
 			body = info.Questions[0].Question
+			if n := len(info.Questions); n > 1 {
+				body = fmt.Sprintf("%s (+%d more)", body, n-1)
+			}
 		}
 	}
 	s.push.send(pushPayload{Title: se.Title, Body: body, SessionID: se.ID, Kind: kind})

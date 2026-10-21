@@ -113,7 +113,11 @@ func (s *server) handleAttentionRespond(w http.ResponseWriter, r *http.Request) 
 		httpError(w, http.StatusBadRequest, "sessionId and attentionId required")
 		return
 	}
-	ctx, cancel := cliCtx(withProfile(r.Context(), req.Profile), 25*time.Second)
+	timeout := 25 * time.Second
+	if req.Action == "answer" {
+		timeout = 90 * time.Second // a key batch per question, each re-verified against a paced pane capture
+	}
+	ctx, cancel := cliCtx(withProfile(r.Context(), req.Profile), timeout)
 	defer cancel()
 	se, err := s.findSession(ctx, req.SessionID)
 	if err != nil {

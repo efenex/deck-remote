@@ -73,9 +73,9 @@ func TestClaudeQuestionMenuNegatives(t *testing.T) {
 // The approval path must never act on a question menu: no keys are sent.
 func TestClaudeRespondRejectsQuestionMenu(t *testing.T) {
 	s := &server{}
-	_, err := claudeAdapter{s}.RespondAttention(context.Background(), sessionInfo{}, attentionResponseRequest{Action: "answer"})
+	_, err := claudeAdapter{s}.RespondAttention(context.Background(), sessionInfo{}, attentionResponseRequest{Action: "decline"})
 	if err == nil || !strings.Contains(err.Error(), "terminal") {
-		t.Errorf("answer on Claude should be refused with a terminal hint, got %v", err)
+		t.Errorf("decline on Claude should be refused with a terminal hint, got %v", err)
 	}
 }
 
@@ -135,5 +135,29 @@ esac`)
 	s.handleAttention(rec, httptest.NewRequest("GET", "/api/rc/attention?id=m1", nil))
 	if !strings.Contains(rec.Body.String(), `"kind":"question"`) || !strings.Contains(rec.Body.String(), "Relayed plan (Recommended)") {
 		t.Errorf("/attention = %s", rec.Body.String())
+	}
+}
+
+// A single-question menu stays read-only: "answer" against it is refused before any key (the
+// bogus agent-deck binary would fail loudly with a different error if a key were attempted).
+func TestSingleQuestionMenuNotAnswerable(t *testing.T) {
+	menu := filepath.Join(t.TempDir(), "menu.txt")
+	if err := os.WriteFile(menu, []byte(menuFixture(t)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin, _ := fakeTmux(t, `case "$*" in
+  *list-panes*) echo menu-sess;;
+  *capture-pane*) cat `+menu+`;;
+  *) exit 1;;
+esac`)
+	s := testServer(t, config{token: "tok", tmuxBin: bin, bin: "/nonexistent"})
+	se := sessionInfo{ID: "m1", Title: "menu", Tool: "claude", TmuxSession: "menu-sess"}
+	s.lists.mu.Lock()
+	s.lists.m["default"] = listCacheEntry{sessions: []sessionInfo{se}, at: time.Now()}
+	s.lists.mu.Unlock()
+	info, _ := claudeAdapter{s}.Attention(context.Background(), se, menuFixture(t), true)
+	_, err := claudeAdapter{s}.RespondAttention(context.Background(), se, attentionResponseRequest{AttentionID: info.ID, Action: "answer"})
+	if err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Errorf("answer on a read-only menu = %v", err)
 	}
 }

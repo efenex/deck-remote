@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 )
 
 type claudeAdapter struct{ s *server }
@@ -56,11 +58,19 @@ func (a claudeAdapter) History(ctx context.Context, se sessionInfo) ([]histMsg, 
 	return parseTranscript(path)
 }
 
-func (a claudeAdapter) Attention(_ context.Context, _ sessionInfo, pane string, paneOK bool) (attentionInfo, error) {
+func (a claudeAdapter) Attention(_ context.Context, se sessionInfo, pane string, paneOK bool) (attentionInfo, error) {
 	if !paneOK {
 		return attentionInfo{Unavailable: true}, nil
 	}
 	if !isClaudePermissionPrompt(pane) {
+		// A tabbed multi-question menu: the card is the transcript's pending tool_use.
+		if _, tabbed := parseAskPane(pane); tabbed {
+			if ask, ok := a.pendingAsk(se); ok {
+				if info, ok := askMenuInfo(pane, ask); ok {
+					return info, nil
+				}
+			}
+		}
 		if info, ok := claudeQuestionInfo(pane); ok {
 			return info, nil
 		}
@@ -82,8 +92,11 @@ func (a claudeAdapter) Interrupt(context.Context, sessionInfo, string, bool) (bo
 }
 
 func (a claudeAdapter) RespondAttention(ctx context.Context, se sessionInfo, req attentionResponseRequest) (attentionResponseResult, error) {
+	if req.Action == "answer" {
+		return a.answerQuestion(ctx, se, req)
+	}
 	if req.Action != "approve-once" {
-		return attentionResponseResult{}, fmt.Errorf("Claude supports approve-once only; answer a question menu in the terminal")
+		return attentionResponseResult{}, fmt.Errorf("Claude supports approve-once and answering a multi-question menu; answer other menus in the terminal")
 	}
 	pane, err := a.s.sessionPane(ctx, se.ID)
 	if err != nil {
@@ -108,5 +121,75 @@ func (a claudeAdapter) RespondAttention(ctx context.Context, se sessionInfo, req
 		return attentionResponseResult{}, err
 	}
 	cleared := a.s.pollDialogCleared(ctx, se.ID)
+	return attentionResponseResult{SessionID: se.ID, AttentionID: req.AttentionID, Responded: true, Cleared: cleared}, nil
+}
+
+// pendingAsk finds the session's unanswered AskUserQuestion in its transcript. The candidate
+// Claude ids are the ones claudeReply trusts (live env, last confirmed, the list's).
+func (a claudeAdapter) pendingAsk(se sessionInfo) (pendingAsk, bool) {
+	if a.s == nil {
+		return pendingAsk{}, false
+	}
+	e := a.s.replies.entry(se.ID)
+	e.mu.Lock()
+	ids := []string{e.envID, e.claudeID, se.ClaudeSessionID}
+	e.mu.Unlock()
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if p := findTranscript(id, se.Path); p != "" {
+			if ask, ok := pendingAskFromTranscript(p); ok {
+				return ask, true
+			}
+		}
+	}
+	return pendingAsk{}, false
+}
+
+// askRunning keeps two phones from walking the same menu at once.
+var askRunning sync.Map
+
+// answerQuestion answers a tabbed multi-question menu through the gated send-keys path
+// (typed.go: act token + operator identity guard the endpoint). The card, the transcript and
+// the live pane are re-checked here and again before every key batch (answerAsk).
+func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req attentionResponseRequest) (attentionResponseResult, error) {
+	pane, err := a.s.sessionPane(ctx, se.ID)
+	if err != nil {
+		return attentionResponseResult{}, err
+	}
+	info, _ := a.Attention(ctx, se, pane, true)
+	if !info.Pending || info.Kind != "question" || info.ID != req.AttentionID {
+		return attentionResponseResult{}, fmt.Errorf("question menu changed or cleared")
+	}
+	if info.ReadOnly || len(info.Actions) == 0 {
+		return attentionResponseResult{}, fmt.Errorf("this menu cannot be answered from here; use the terminal")
+	}
+	ask, ok := a.pendingAsk(se)
+	if !ok || "claude-askq-"+ask.ToolUseID != req.AttentionID {
+		return attentionResponseResult{}, fmt.Errorf("question menu changed or cleared")
+	}
+	picks, err := askPicks(ask, req.Answers)
+	if err != nil {
+		return attentionResponseResult{}, err
+	}
+	if _, busy := askRunning.LoadOrStore(se.ID, true); busy {
+		return attentionResponseResult{}, fmt.Errorf("an answer for this session is already being sent")
+	}
+	defer askRunning.Delete(se.ID)
+	io := askIO{
+		pane:  func(ctx context.Context) (string, error) { return a.s.sessionPane(ctx, se.ID) },
+		text:  func(ctx context.Context, t string) error { return a.s.sendKeyText(ctx, se.ID, t) },
+		named: func(ctx context.Context, k string) error { return a.s.sendNamedKey(ctx, se.ID, k) },
+		enter: func(ctx context.Context) error { return a.s.sendKeyEnter(ctx, se.ID) },
+		wait:  300 * time.Millisecond, polls: 12,
+	}
+	done, cleared, err := answerAsk(ctx, io, ask, picks)
+	if err != nil {
+		if done > 0 {
+			err = fmt.Errorf("%w (%d of %d answers were already entered; check the terminal)", err, done, len(ask.Questions))
+		}
+		return attentionResponseResult{}, err
+	}
 	return attentionResponseResult{SessionID: se.ID, AttentionID: req.AttentionID, Responded: true, Cleared: cleared}, nil
 }

@@ -1,0 +1,12 @@
+←  ☒ Leaf rule  ☒ ESO comment  ☒ Other gates  ✔ Submit  →
+Review your answers
+ ● How should the leaf rule be applied?
+   → Strict leaf only (Rec.)
+ │ ● Should the ESO comment above `externalSecret.spec` be kept, given it is **required** by the reviewers?
+   → my own words, with: punctuation
+ ● Which other gates should be enforced?
+   → Tests only
+Ready to submit your answers?
+❯ 1. Submit answers
+  2. Cancel
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── dr-askcard-probe2 ─

@@ -49,7 +49,7 @@ func parseClaudeQuestion(pane string) (attentionQuestion, string, bool) {
 	}
 	head := -1
 	for i := foot; i >= 0 && i > foot-claudeMenuMax; i-- {
-		if claudeMenuHeader.MatchString(lines[i]) {
+		if claudeMenuHeader.MatchString(lines[i]) || askTabRow.MatchString(lines[i]) {
 			head = i
 			break
 		}
@@ -61,7 +61,12 @@ func parseClaudeQuestion(pane string) (attentionQuestion, string, bool) {
 	if !claudeMenuSelected.MatchString(strings.Join(block, "\n")) {
 		return attentionQuestion{}, "", false
 	}
-	q := attentionQuestion{Header: claudeMenuHeader.FindStringSubmatch(lines[head])[1], ID: "claude-menu"}
+	// A tabbed multi-question menu starts with the "← ☐ A ☐ B ✔ Submit →" row instead of a
+	// "☐ header" line; the pane shows one page of it, so the header is only "Question".
+	q := attentionQuestion{Header: "Question", ID: "claude-menu"}
+	if m := claudeMenuHeader.FindStringSubmatch(lines[head]); m != nil {
+		q.Header = m[1]
+	}
 	var text []string
 	for _, l := range block[1:] {
 		if claudeMenuRule.MatchString(l) {

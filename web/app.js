@@ -2541,7 +2541,7 @@
     if (!mount) return;
     const wrap = el('div', 'approve-card question-card');
     if (info.readOnly) { renderQuestionReadOnly(s, info, wrap, mount); return; }
-    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> ' + esc(s.tool === 'codex' ? 'Codex' : 'Agent') + ' needs input</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
+    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> ' + esc(s.tool === 'codex' ? 'Codex' : s.tool === 'claude' ? 'Claude' : 'Agent') + ' needs input' + ((info.questions || []).length > 1 ? ' · ' + info.questions.length + ' questions' : '') + '</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
     syncComposerLock();
@@ -2552,7 +2552,7 @@
       field.appendChild(legend);
       field.appendChild(el('div', 'question-text', q.question || ''));
       (q.options || []).forEach((opt, i) => {
-        const label = el('label', 'question-option');
+        const label = el('label', 'question-option' + (/\((rec\.?|recommended)\)/i.test(opt.label) ? ' rec' : ''));
         const input = document.createElement('input');
         input.type = 'radio'; input.name = q.id; input.value = opt.label; input.required = true;
         label.appendChild(input);
