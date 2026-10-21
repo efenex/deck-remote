@@ -134,9 +134,8 @@ func (s *server) towerActionOK(r *http.Request) (device string, reason string) {
 	return s.actorOK(r, bearerHeaderOnly(r))
 }
 
-// actorOK is towerActionOK for a token the caller extracted: the header for every
-// action endpoint; the ?token= query only for the terminal WebSocket (typed.go),
-// which a browser cannot give an Authorization header.
+// actorOK is towerActionOK for a token the caller extracted (every caller passes the
+// Authorization header; the terminal WebSocket uses a ticket instead, ws_ticket.go).
 func (s *server) actorOK(r *http.Request, tok string) (device string, reason string) {
 	if s.cfg.towerOperator == "" {
 		return "", "actions disabled: --tower-operator not set"

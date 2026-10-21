@@ -9,14 +9,11 @@ package main
 // identity through `tailscale serve` (towerActionOK). Reads, the read-only SSE hub and push
 // stay on s.auth.
 //
-// The terminal WebSocket (/ws/, agent-deck's pane over the proxy) is the same power, but a
-// browser cannot set headers on a WebSocket, so there alone the token may come from ?token=;
-// the act cap and the identity are still required.
+// The terminal WebSocket (/ws/, agent-deck's pane over the proxy) is the same power. A browser
+// cannot set headers on a WebSocket, so it takes a short single-use ticket minted through this
+// gate instead of a bearer (F12 = a, ws_ticket.go).
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
 // typedPaths are deck-remote's own endpoints that type into a pane or answer a prompt.
 var typedPaths = []string{
@@ -44,22 +41,11 @@ func (s *server) authTyped(next http.Handler) http.Handler {
 	})
 }
 
-// authProxyTyped gates the agent-deck reverse proxy: the terminal WebSocket needs act +
-// identity (token from the header or, for the WebSocket only, ?token=); any other non-GET
-// through the proxy (agent-deck's own write API) takes authTyped. GET/HEAD pass unchanged.
+// authProxyTyped gates the agent-deck reverse proxy (/api/, /events/; /ws/ has authWS): any
+// non-GET through the proxy (agent-deck's own write API) takes authTyped. GET/HEAD pass unchanged.
 func (s *server) authProxyTyped(next http.Handler) http.Handler {
 	typed := s.authTyped(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/ws/") {
-			device, reason := s.actorOK(r, bearer(r))
-			if reason != "" {
-				s.towerLog(map[string]any{"action": "ws", "allowed": false, "device": device, "login": tsLogin(r), "reason": reason})
-				httpError(w, http.StatusForbidden, "the terminal "+typedRefusal(reason)[len("sending into a session "):])
-				return
-			}
-			next.ServeHTTP(w, r)
-			return
-		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			typed.ServeHTTP(w, r)
 			return

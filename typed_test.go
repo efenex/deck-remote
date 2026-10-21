@@ -90,20 +90,26 @@ func TestTypedInputBoundary(t *testing.T) {
 		}
 	}
 
-	// The terminal WebSocket: act + identity, the token may come from ?token= (browsers cannot
-	// set headers on a WebSocket); a read-only token is refused either way.
+	// The terminal WebSocket takes a ticket only (ws_ticket.go): minted through the typed gate
+	// above (the ticket endpoint is in its matrix below), never ?token= or a header bearer.
 	for _, c := range []struct {
 		k    kind
 		want int
 	}{
-		{kind{"act ws query", act, true, "op@example.com", "127.0.0.1:1", true}, 200},
-		{kind{"act ws header", act, false, "op@example.com", "127.0.0.1:1", true}, 200},
+		{kind{"act ws query", act, true, "op@example.com", "127.0.0.1:1", false}, 403},
+		{kind{"act ws header", act, false, "op@example.com", "127.0.0.1:1", false}, 403},
 		{kind{"ro ws query", ro, true, "op@example.com", "127.0.0.1:1", false}, 403},
 		{kind{"shared ws query", "shared", true, "op@example.com", "127.0.0.1:1", false}, 403},
-		{kind{"act ws no identity", act, true, "", "127.0.0.1:1", false}, 403},
 	} {
 		if rec := do("GET", "/ws/session/x", c.k); rec.Code != c.want {
 			t.Errorf("/ws/ as %s: got %d, want %d", c.k.name, rec.Code, c.want)
+		}
+	}
+	for _, k := range kinds {
+		rec := do("POST", "/api/rc/ws/ticket", k)
+		denied := rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden
+		if k.allowed == denied {
+			t.Errorf("POST /api/rc/ws/ticket as %s: got %d (%s)", k.name, rec.Code, rec.Body.String())
 		}
 	}
 

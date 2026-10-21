@@ -152,7 +152,8 @@
   var params = new URLSearchParams(location.search);
   var sessionId = params.get('id') || '';
   // Token: prefer localStorage (set when the deck was opened with ?token=),
-  // fall back to an explicit ?token= for direct links.
+  // fall back to an explicit ?token= for direct links. It only ever travels in the
+  // Authorization header of the ticket request; the WebSocket URL carries the ticket.
   var token = localStorage.getItem(TOKEN_KEY) || params.get('token') || '';
 
   var $term = document.getElementById('term');
@@ -234,6 +235,7 @@
   var reconnectAttempt = 0;
   var wsReconnectEnabled = true;
   var manuallyClosed = false;
+  var ticketPending = false;
   // Give up after a few auto-retries and offer a manual Reconnect, so a dead
   // backend doesn't leave us spinning forever.
   var MAX_RECONNECT_ATTEMPTS = 6;
@@ -311,11 +313,24 @@
   });
 
   // ---- WebSocket ----------------------------------------------------------
-  function wsURL() {
+  // /ws/ takes a 30 s single-use ticket (ws_ticket.go), never the bearer: every connect and
+  // reconnect fetches a fresh one with the token in the Authorization header.
+  function wsURL(ticket) {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
     var u = new URL(proto + '://' + location.host + '/ws/session/' + encodeURIComponent(sessionId));
-    if (token) u.searchParams.set('token', token);
+    u.searchParams.set('ticket', ticket);
     return u.toString();
+  }
+
+  function fetchTicket() {
+    return fetch('/api/rc/ws/ticket', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: sessionId })
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j || {} }; });
+    });
   }
 
   function reconnectDelay(attempt) {
@@ -346,12 +361,37 @@
 
   function connect() {
     if (ws) { try { ws.close(); } catch (_e) {} ws = null; }
+    if (ticketPending) return;
     terminalAttached = false;
     manuallyClosed = false;
     hideNotice();
     setConn('', 'connecting…');
+    ticketPending = true;
+    fetchTicket().then(function (res) {
+      ticketPending = false;
+      if (res.status === 200 && res.body.ticket) { openSocket(res.body.ticket); return; }
+      if (res.status >= 400 && res.status < 500) {
+        // Refused (read-only token, wrong identity, LAN origin): retrying will not help.
+        wsReconnectEnabled = false;
+        setConn('bad', 'refused');
+        showNotice('Terminal refused', res.body.error || ('HTTP ' + res.status),
+          '<span class="btn" id="reconnectBtn">Retry</span>' +
+          '<a class="btn ghost" href="/">Back to deck</a>');
+        wireReconnect();
+        return;
+      }
+      setConn('bad', 'connection error');
+      scheduleReconnect();
+    }, function () {
+      ticketPending = false;
+      setConn('bad', 'connection error');
+      scheduleReconnect();
+    });
+  }
 
-    ws = new WebSocket(wsURL());
+  function openSocket(ticket) {
+    if (manuallyClosed) return;
+    ws = new WebSocket(wsURL(ticket));
     ws.binaryType = 'arraybuffer';
     var sock = ws;
 

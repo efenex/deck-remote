@@ -203,8 +203,9 @@ type server struct {
 	oc         *opencodeClient
 	attn       *attentionCache
 	codexReqs  *codexRequestTracker
-	tokens     *tokenStore // per-device tokens (additive to the shared bearer)
-	tower      *towerStore // optional tower overview (tower.go); nil = feature off
+	tokens     *tokenStore    // per-device tokens (additive to the shared bearer)
+	wsTickets  *wsTicketStore // terminal WebSocket tickets (ws_ticket.go)
+	tower      *towerStore    // optional tower overview (tower.go); nil = feature off
 	towerMu    sync.Mutex
 	webVer     webVersionCache                                             // git HEAD of the --web checkout (version.go)
 	towerM     towerModel                                                  // cached tower_model.py output (tower_actions.go)
@@ -252,8 +253,9 @@ func newServer(cfg config, upstream *url.URL) *server {
 		if r.Header.Get("Origin") != "" {
 			r.Header.Set("Origin", upstream.Scheme+"://"+upstream.Host)
 		}
-		if q := r.URL.Query(); q.Has("token") {
+		if q := r.URL.Query(); q.Has("token") || q.Has("ticket") {
 			q.Del("token")
+			q.Del("ticket")
 			r.URL.RawQuery = q.Encode()
 		}
 	}
@@ -273,6 +275,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		attn:      newAttentionCache(),
 		codexReqs: newCodexRequestTracker(),
 		tokens:    newTokenStore(stateDir(home)),
+		wsTickets: newWSTicketStore(),
 		tower:     newTowerStore(cfg.towerOverview),
 		sess:      newSessionsCache(),
 		lists:     newListCache(),
@@ -309,6 +312,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/rc/attention/respond", s.auth(s.authTyped(http.HandlerFunc(s.handleAttentionRespond)))) // typed input (typed.go)
 	mux.Handle("POST /api/rc/interrupt", s.auth(s.authTyped(http.HandlerFunc(s.handleInterrupt))))                // typed input (typed.go)
 	mux.Handle("GET /api/rc/events", s.auth(http.HandlerFunc(s.handleEvents)))
+	mux.Handle("POST /api/rc/ws/ticket", s.auth(s.authTyped(http.HandlerFunc(s.handleWSTicket)))) // terminal ticket (ws_ticket.go)
 
 	// deck-remote's OWN Web Push (event-driven via the watcher) — the PWA uses
 	// these instead of agent-deck's status-driven push.
@@ -351,7 +355,7 @@ func (s *server) routes() http.Handler {
 	// so an unauthenticated route here would hand any tailnet peer a shell.
 	mux.Handle("/api/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
 	mux.Handle("/events/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
-	mux.Handle("/ws/", s.auth(s.authProxyTyped(sameOrigin(s.proxy))))
+	mux.Handle("/ws/", s.authWS(sameOrigin(s.proxy))) // ?ticket= only (ws_ticket.go), never a bearer
 
 	// Serve the manifest with the correct MIME (Go's FileServer doesn't know
 	// .webmanifest) so installability is clean.

@@ -37,27 +37,31 @@ func TestProxiedRoutesRequireAuth(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s without token: got %d, want 401", path, rec.Code)
 		}
+		want := http.StatusUnauthorized
+		if path == "/ws/session/x" {
+			want = http.StatusForbidden // /ws/ refuses any ?token= (ws_ticket.go)
+		}
 		rec = httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", path+"?token=wrong", nil))
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s with bad token: got %d, want 401", path, rec.Code)
+		if rec.Code != want {
+			t.Errorf("%s with bad token: got %d, want %d", path, rec.Code, want)
 		}
 	}
 
 	gotAuth, gotQuery = "", ""
 	rec := httptest.NewRecorder()
-	ws := httptest.NewRequest("GET", "/ws/session/x?token="+dev+"&cols=80", nil)
+	ws := httptest.NewRequest("GET", "/ws/session/x?ticket="+wsTicketFor(t, h, dev, "x")+"&cols=80", nil)
 	ws.RemoteAddr = "127.0.0.1:5555"
 	ws.Header.Set("Tailscale-User-Login", "op@example.com")
 	h.ServeHTTP(rec, ws)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("device token via query: got %d, want 200", rec.Code)
+		t.Fatalf("ticket via query: got %d, want 200", rec.Code)
 	}
 	if gotAuth != "Bearer shared" {
 		t.Errorf("upstream Authorization = %q, want the shared token", gotAuth)
 	}
 	if gotQuery != "cols=80" {
-		t.Errorf("upstream query = %q, want the token stripped", gotQuery)
+		t.Errorf("upstream query = %q, want the ticket stripped", gotQuery)
 	}
 
 	req := httptest.NewRequest("GET", "/api/sessions", nil)
@@ -91,7 +95,7 @@ func TestProxiedRoutesOrigin(t *testing.T) {
 	}
 	h := s.routes()
 
-	req := httptest.NewRequest("GET", "https://deck.example/ws/session/x?token="+dev, nil)
+	req := httptest.NewRequest("GET", "https://deck.example/ws/session/x?ticket="+wsTicketFor(t, h, dev, "x"), nil)
 	req.RemoteAddr = "127.0.0.1:5555"
 	req.Header.Set("Tailscale-User-Login", "op@example.com")
 	req.Header.Set("Origin", "https://deck.example")
@@ -101,7 +105,7 @@ func TestProxiedRoutesOrigin(t *testing.T) {
 		t.Fatalf("same origin: code %d, upstream Origin %q", rec.Code, gotOrigin)
 	}
 
-	req = httptest.NewRequest("GET", "https://deck.example/ws/session/x?token="+dev, nil)
+	req = httptest.NewRequest("GET", "https://deck.example/ws/session/x?ticket="+wsTicketFor(t, h, dev, "x"), nil)
 	req.RemoteAddr = "127.0.0.1:5555"
 	req.Header.Set("Tailscale-User-Login", "op@example.com")
 	req.Header.Set("Origin", "https://evil.example")
