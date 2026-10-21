@@ -130,11 +130,20 @@ test('keyboard up in the home-screen app: sheet is sized from visualViewport min
   assert.match(f, /const pad = kb && isStandalone\(\) \? kbPad\(\) : 0/);
   assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height - pad\) \+ 'px'/);
   assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
-  // allowance: default 34, clamped 0..120, persisted
+  // allowance: default 0 (vv already excludes the accessory bar), clamped 0..120, persisted
   const k = js.slice(js.indexOf('function kbPad()'), js.indexOf('function applyViewport()'));
-  assert.match(k, /: 34;/);
+  assert.match(k, /: 0;/);
   assert.match(k, /n >= 0 && n <= 120/);
   // the overlay shows kb state and offers -/+
   assert.match(js, /'kb ' \+ document\.documentElement\.classList\.contains\('kb'\)/);
   assert.match(js, /minus\.addEventListener\('click', \(\) => nudge\(-4\)\)/);
+});
+
+test('applyViewport detects the keyboard via DeckViewport.keyboardUp, not vv < innerHeight alone', () => {
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
+  assert.match(f, /DeckViewport\.keyboardUp\(vv, window\.innerHeight, document\.documentElement\.clientHeight\)/);
+  assert.doesNotMatch(f, /vv\.height < window\.innerHeight - 120/);
+  assert.match(css, /<script src="\/viewport\.js\?v=\d+"><\/script>/);
+  assert.match(fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8'), /'\/viewport\.js\?v=\d+'/);
 });

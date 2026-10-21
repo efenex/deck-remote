@@ -1289,21 +1289,21 @@
   // viewport instead, so the header stays and the composer sits on the
   // keyboard.
   //
-  // The home-screen app has no Safari chrome, but iOS still puts its form
-  // accessory bar (the ^ v ✓ pill) above the keyboard, and visualViewport only
-  // excludes the keyboard proper: the sheet bottom landed ~35pt behind the bar
-  // (device screenshot 13:21Z). The bar's height is not exposed anywhere, so
-  // while the keyboard is up in standalone the sheet is shortened by KB_PAD
-  // (default 34pt, adjustable from the layout debug chip, kept in localStorage).
+  // In the home-screen app innerHeight shrinks with the keyboard (device overlay
+  // 13:36Z: innerH 447, clientH 793, vv 449), so the old vv < innerHeight - 120
+  // test never fired, the 100lvh pin stayed on and the 852pt sheet ran 59pt past
+  // the visible area. Detection is in viewport.js. vv.height already excludes the
+  // accessory bar (vv bottom 449 = top of its backing), so the allowance KB_PAD
+  // defaults to 0; it stays adjustable from the layout debug chip (localStorage).
   const KB_PAD_KEY = 'dr-kb-pad';
   function kbPad() {
     const n = Number(localStorage.getItem(KB_PAD_KEY));
-    return localStorage.getItem(KB_PAD_KEY) !== null && Number.isFinite(n) && n >= 0 && n <= 120 ? n : 34;
+    return localStorage.getItem(KB_PAD_KEY) !== null && Number.isFinite(n) && n >= 0 && n <= 120 ? n : 0;
   }
   function applyViewport() {
     const vv = window.visualViewport;
     if (!vv) return;
-    const kb = vv.height < window.innerHeight - 120;
+    const kb = DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
     const was = document.documentElement.classList.contains('kb');
     document.documentElement.classList.toggle('kb', kb);
     const sheet = $('#sheet');
