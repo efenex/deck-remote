@@ -447,11 +447,11 @@ func (s *server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // phoneURL builds an enrollment URL (origin + ?token=). A configured public base
-// (DECK_REMOTE_PUBLIC_URL, e.g. the fixed tailscale hostname) is preferred and
+// (--public-url / DECK_REMOTE_PUBLIC_URL, e.g. the fixed tailscale hostname; also the passkey rpId) is preferred and
 // trusted; otherwise it derives the origin from the request's forwarded
 // host/proto (tailscale serve sets these), falling back to Host.
 func (s *server) phoneURL(r *http.Request, raw string) string {
-	if base := strings.TrimRight(os.Getenv("DECK_REMOTE_PUBLIC_URL"), "/"); base != "" {
+	if base := strings.TrimRight(s.cfg.publicURL, "/"); base != "" {
 		return fmt.Sprintf("%s/?token=%s", base, raw)
 	}
 	scheme := "https"

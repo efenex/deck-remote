@@ -682,6 +682,7 @@ func TestPasskeyRevokeCascade(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2 := testServer(t, e.s.cfg)
+	s2.passkeys.startup(s2.tokens)
 	if n := len(s2.passkeys.recs); n != 0 {
 		t.Fatalf("restart kept %d orphaned credentials", n)
 	}

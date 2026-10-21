@@ -136,9 +136,15 @@ func newPasskeyHub(dir string) *passkeyHub {
 	if b, err := os.ReadFile(filepath.Join(dir, passkeyStoreFile)); err == nil {
 		_ = json.Unmarshal(b, &h.recs)
 	}
-	// A code file left by an earlier process is dead (codes live in memory); do not leave it lying around.
-	_ = os.Remove(filepath.Join(dir, enrolCodeFile))
 	return h
+}
+
+// startup is main()'s housekeeping, kept out of the constructor so tests that build a server
+// against the real home never touch its state: a code file left by an earlier process is dead
+// (codes live in memory), and credentials of a token revoked elsewhere are dropped.
+func (h *passkeyHub) startup(ts *tokenStore) {
+	_ = os.Remove(h.codePath())
+	h.prune(ts)
 }
 
 func (h *passkeyHub) saveLocked() error {
@@ -196,7 +202,7 @@ func (h *passkeyHub) credsLocked(device string) []webauthn.Credential {
 }
 
 // prune drops credentials whose device token no longer exists (a revoke by an older binary, or
-// a hand-edited token file). Called once at startup.
+// a hand-edited token file).
 func (h *passkeyHub) prune(ts *tokenStore) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

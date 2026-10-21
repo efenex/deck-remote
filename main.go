@@ -131,6 +131,7 @@ func main() {
 	}
 
 	srv := newServer(cfg, up)
+	srv.passkeys.startup(srv.tokens)
 
 	// deck-remote-native push + the event watcher that drives it.
 	home, _ := os.UserHomeDir()
@@ -287,7 +288,6 @@ func newServer(cfg config, upstream *url.URL) *server {
 		replies:   newReplyCache(),
 		pulse:     newStatuslineStore(cfg.homeDir),
 	}
-	s.passkeys.prune(s.tokens)
 	s.phones = newPhoneLog(home)
 	s.hub.tap = s.phones.tap
 	return s
