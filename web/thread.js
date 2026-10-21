@@ -220,7 +220,31 @@
     return Object.assign({}, prev || {}, LIVE_DEFAULTS, fresh);
   }
 
-  const api = { mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  // The Deck row's badge for a session that needs the operator: what is waiting, not just "needs you".
+  function attentionChipLabel(s) {
+    if (!s || !s.needsAttention) return '';
+    if (s.attentionKind === 'question') {
+      const n = Number(s.attentionN) || 0;
+      return n > 1 ? n + ' questions' : 'question';
+    }
+    if (s.attentionKind === 'approval') return 'approval';
+    return 'needs you';
+  }
+
+  // One line for an answer walk's progress event ({step, n, total}); '' for an unknown step.
+  function answerProgressLabel(ev) {
+    if (!ev) return '';
+    const of = ev.total > 1 ? ' ' + ev.n + '/' + ev.total : '';
+    switch (ev.step) {
+      case 'checking': return 'Checking the menu…';
+      case 'answering': return 'Answering' + of + '…';
+      case 'verifying': return 'Verifying the answers…';
+      case 'submitting': return 'Submitting…';
+      default: return '';
+    }
+  }
+
+  const api = { attentionChipLabel, answerProgressLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -245,3 +245,20 @@ test('a phone send the target filed as a peer message is one row, delivered', ()
   assert.strictEqual(merged.length, 1);
   assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · delivered');
 });
+
+const { attentionChipLabel, answerProgressLabel } = require('./thread.js');
+
+test('the Deck row badge says what is waiting', () => {
+  assert.strictEqual(attentionChipLabel({ needsAttention: false, attentionKind: 'question' }), '');
+  assert.strictEqual(attentionChipLabel({ needsAttention: true, attentionKind: 'question', attentionN: 1 }), 'question');
+  assert.strictEqual(attentionChipLabel({ needsAttention: true, attentionKind: 'question', attentionN: 4 }), '4 questions');
+  assert.strictEqual(attentionChipLabel({ needsAttention: true, attentionKind: 'approval' }), 'approval');
+  assert.strictEqual(attentionChipLabel({ needsAttention: true }), 'needs you');
+});
+
+test('answer progress reads as steps', () => {
+  assert.strictEqual(answerProgressLabel({ step: 'answering', n: 2, total: 4 }), 'Answering 2/4…');
+  assert.strictEqual(answerProgressLabel({ step: 'answering', n: 1, total: 1 }), 'Answering…');
+  assert.strictEqual(answerProgressLabel({ step: 'verifying', n: 4, total: 4 }), 'Verifying the answers…');
+  assert.strictEqual(answerProgressLabel({ step: 'nope' }), '');
+});

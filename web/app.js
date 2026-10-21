@@ -1339,7 +1339,7 @@
     // Title row: title + state (needs-you chip or new-reply dot).
     const top = el('div', 'card-top');
     top.appendChild(el('div', 'card-title', s.title || s.id));
-    if (s.needsAttention) top.appendChild(el('span', 'attention-chip', 'needs you'));
+    if (s.needsAttention) top.appendChild(el('span', 'attention-chip', DeckThread.attentionChipLabel(s)));
     else if (hasNewReply(s)) {
       const dot = el('span', 'new-dot');
       dot.title = 'New reply';
@@ -1964,6 +1964,7 @@
         // thread stays within one poll (~3s) of the transcript. (A transition-only
         // trigger missed turns that completed during a continuous "working" run.)
         state.lastWorking.set(id, !!(a && a.working));
+        syncAttentionFromProbe(s, a);
         reconcileTranscriptTail(id);
       } catch (_) {
         // Graceful: on error just fall back to idle, don't spam.
@@ -1972,6 +1973,21 @@
     }
     probe();
     state.activityTimer = setInterval(probe, ACTIVITY_MS);
+  }
+
+  // The probe carries the id of the pending request (from the sweep's cache): when it is not the one
+  // docked, fetch the card. Each id is tried at most every 15 s, so an id the card endpoint cannot
+  // confirm does not turn the probe into a poll of the pane.
+  const attnTried = { id: '', at: 0 };
+  function syncAttentionFromProbe(s, a) {
+    if (!s || state.openSheetId !== s.id || attnSend.key) return;
+    const want = (a && a.attentionId) || '';
+    const docked = $('#approveMount .approve-card');
+    const have = docked ? docked.dataset.attnId || '' : '';
+    if (want === have) return;
+    if (want && attnTried.id === want && Date.now() - attnTried.at < 15000) return;
+    attnTried.id = want; attnTried.at = Date.now();
+    checkAttention(s, false);
   }
 
   function stopActivityPoll() {
@@ -2431,6 +2447,11 @@
       if (state.openSheetId !== s.id) return;
       if (r && r.pending) {
         s.needsAttention = true;
+        s.attentionKind = r.kind;
+        s.attentionN = (r.questions || []).length;
+        // The same request is already docked: keep the form (a half-filled answer, a send in progress).
+        const docked = mount.querySelector('.approve-card');
+        if (docked && docked.dataset.attnId === r.id) { renderDeck(); return; }
         if (r.kind === 'question') renderQuestionPanel(s, r);
         else renderApprovePanel(s, r);
       } else if (r && r.unavailable) {
@@ -2497,6 +2518,7 @@
     if (!mount) return;
     const sum = permissionSummary(info.text);
     const wrap = el('div', 'approve-card');
+    wrap.dataset.attnId = info.id || '';
     wrap.innerHTML =
       '<div class="approve-head"><span class="dot"></span><div class="approve-sum">' +
         '<div class="approve-kind">' + esc(sum.kind) + '</div>' +
@@ -2540,6 +2562,7 @@
     const mount = $('#approveMount');
     if (!mount) return;
     const wrap = el('div', 'approve-card question-card');
+    wrap.dataset.attnId = info.id || '';
     if (info.readOnly) { renderQuestionReadOnly(s, info, wrap, mount); return; }
     wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> ' + esc(s.tool === 'codex' ? 'Codex' : s.tool === 'claude' ? 'Claude' : 'Agent') + ' needs input' + ((info.questions || []).length > 1 ? ' · ' + info.questions.length + ' questions' : '') + '</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
     mount.innerHTML = '';
@@ -2592,9 +2615,10 @@
   // A question menu the agent is parked on (Claude AskUserQuestion): shown so
   // the session does not read as idle, answered in the terminal.
   function renderQuestionReadOnly(s, info, wrap, mount) {
-    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Waiting for your choice</div><div class="approve-body"><div id="roQuestions"></div><div class="approve-foot">Answer it in the terminal; it cannot be answered from here.</div></div>';
+    wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> Waiting for your choice</div><div class="approve-body"><div id="roQuestions"></div><div class="approve-foot" id="roReason"></div></div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
+    $('#roReason', wrap).textContent = info.readOnlyReason || 'Answer it in the terminal; it cannot be answered from here.';
     const box = $('#roQuestions', wrap);
     (info.questions || []).forEach((q) => {
       const field = el('fieldset', 'question-field');
@@ -2624,7 +2648,38 @@
     ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((ev) => button.addEventListener(ev, cancel));
   }
 
+  // An answer walk takes seconds (a key per question, each verified against the live pane), so the
+  // docked card says what it is doing: server progress when it arrives ("Answering 2/4…"), the
+  // elapsed time, and on failure the reason, on the card and as a note in the thread.
+  const attnSend = { key: '', t0: 0, timer: null, label: '' };
+
+  function attnFoot(text, bad) {
+    const foot = $('#approveFoot');
+    if (!foot) return;
+    foot.textContent = text;
+    foot.style.color = bad ? 'var(--red)' : '';
+  }
+
+  function attnSendTick() {
+    const sec = Math.floor((Date.now() - attnSend.t0) / 1000);
+    attnFoot(attnSend.label + (sec >= 2 ? ' ' + sec + ' s' : ''));
+  }
+
+  function attnLock(on) {
+    const card = $('#approveMount .approve-card');
+    if (!card) return;
+    card.classList.toggle('sending', on);
+    card.querySelectorAll('button,input').forEach((b) => { b.disabled = on; });
+  }
+
   async function respondAttention(s, info, action, answers) {
+    attnSend.key = s.id + '|' + info.id;
+    attnSend.t0 = Date.now();
+    attnSend.label = action === 'answer' ? 'Sending your answers…' : 'Sending…';
+    attnLock(true);
+    clearInterval(attnSend.timer);
+    attnSend.timer = setInterval(attnSendTick, 500);
+    attnSendTick();
     try {
       const r = await api('POST', '/api/rc/attention/respond', {
         sessionId: s.id, profile: CURRENT_PROFILE, attentionId: info.id, action, answers: answers || [],
@@ -2633,14 +2688,25 @@
         s.needsAttention = false;
         const mount = $('#approveMount'); if (mount) mount.innerHTML = '';
         syncComposerLock();
-        ensureConvo(s.id).push({ role: 'note', content: '✓ response sent' + (r.cleared ? '' : ' · confirming…'), ts: Date.now() / 1000 });
+        const secs = ((Date.now() - attnSend.t0) / 1000).toFixed(1);
+        ensureConvo(s.id).push({ role: 'note', content: (action === 'answer' ? '✓ answers submitted' : '✓ response sent') + ' · ' + secs + ' s' + (r.cleared ? '' : ' · confirming…'), ts: Date.now() / 1000 });
         renderConvo(s.id); renderDeck();
       }
     } catch (e) {
-      const foot = $('#approveFoot');
-      if (foot) { foot.textContent = 'Response failed: ' + e.message; foot.style.color = 'var(--red)'; }
+      const msg = e.status === 403 ? e.message : 'Not sent: ' + e.message;
+      attnLock(false);
+      attnFoot(msg, true);
       if (e.status === 403) toast('Not sent', e.message);
-      checkAttention(s, false);
+      else {
+        ensureConvo(s.id).push({ role: 'error', content: 'Answer ' + msg.charAt(0).toLowerCase() + msg.slice(1), ts: Date.now() / 1000 });
+        renderConvo(s.id);
+      }
+      await checkAttention(s, false);
+      if (state.openSheetId === s.id && $('#approveMount .approve-card')) attnFoot(msg, true);
+    } finally {
+      clearInterval(attnSend.timer);
+      attnSend.timer = null;
+      attnSend.key = '';
     }
   }
 
@@ -2693,12 +2759,24 @@
   function resyncAll() {
     loadSessions(false);
     loadInbox(); // pushes that arrived while backgrounded (no SSE then)
-    if (state.openSheetId) reconcileTranscriptTail(state.openSheetId);
+    if (state.openSheetId) {
+      reconcileTranscriptTail(state.openSheetId);
+      const open = state.sessions.get(state.openSheetId);
+      if (open) checkAttention(open, false);
+    }
   }
 
   function handleRCEvent(ev) {
     if (!ev || !ev.type) return;
-    if (ev.type === 'notification') { addInboxItem(ev.notification); return; }
+    if (ev.type === 'notification') {
+      addInboxItem(ev.notification);
+      const n = ev.notification || {};
+      if ((n.kind === 'question' || n.kind === 'approval') && n.sessionId && n.sessionId === state.openSheetId) {
+        const open = state.sessions.get(n.sessionId);
+        if (open) checkAttention(open, false);
+      }
+      return;
+    }
     if (ev.type === 'tower-overview') {
       if (!$('#screenTower').hidden) loadTower(); else { tower.unseen = true; renderTowerBadge(); }
       return;
@@ -2763,6 +2841,21 @@
     } else if (ev.type === 'approve-result') {
       if (id && state.openSheetId === id) {
         const s = state.sessions.get(id); if (s) checkAttention(s, false);
+      }
+    } else if (ev.type === 'attention-progress') {
+      if (attnSend.key === ev.sessionId + '|' + ev.attentionId) {
+        attnSend.label = DeckThread.answerProgressLabel(ev) || attnSend.label;
+        attnSendTick();
+      }
+    } else if (ev.type === 'attention') {
+      // A request appeared, changed or went away on the sweep: the row and an open sheet follow at once.
+      const s = state.sessions.get(id);
+      if (s) {
+        s.needsAttention = !!ev.pending;
+        s.attentionKind = ev.pending ? ev.kind : '';
+        s.attentionN = ev.pending ? (ev.n || 0) : 0;
+        renderDeck();
+        if (state.openSheetId === id) checkAttention(s, false);
       }
     } else if (ev.type === 'attention-result') {
       if (id && state.openSheetId === id && ev.responded) {
