@@ -50,6 +50,7 @@ type config struct {
 	tlsCert      string // PEM cert (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve
 	tlsKey       string // PEM private key matching tlsCert
 	publicURL    string // fixed tailnet origin (https://host.ts.net); the passkey rpId and only allowed origin (passkeys.go)
+	vaultURL     string // Vault origin the run-bang arm sheet signs through (tower_vaultarm.go); empty = phone arming off
 
 	// Optional tower overview tab (tower.go). Empty towerOverview = feature off.
 	towerOverview    string // path to tower's state/overview/overview.json
@@ -83,6 +84,7 @@ func loadConfig() config {
 	flag.StringVar(&c.tlsCert, "tls-cert", def("DECK_REMOTE_TLS_CERT", ""), "PEM cert to terminate TLS with (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve")
 	flag.StringVar(&c.tlsKey, "tls-key", def("DECK_REMOTE_TLS_KEY", ""), "PEM key matching --tls-cert")
 	flag.StringVar(&c.publicURL, "public-url", def("DECK_REMOTE_PUBLIC_URL", ""), "phone PWA origin, e.g. https://host.tailnet.ts.net: required for pairing, device enrollment and passkeys; empty disables all three")
+	flag.StringVar(&c.vaultURL, "vault-url", def("DECK_REMOTE_VAULT_URL", ""), "Vault origin, e.g. https://vault.host.ts.net: the run-bang power arm signs there from the PWA (Forgejo OIDC, role runbang-signer) and it joins the CSP connect-src; empty = phone arming off")
 	flag.StringVar(&c.towerOverview, "tower-overview", def("DECK_REMOTE_TOWER_OVERVIEW", ""), "path to tower's overview.json; empty = no tower tab")
 	flag.StringVar(&c.towerOperator, "tower-operator", def("DECK_REMOTE_TOWER_OPERATOR", ""), "Tailscale login allowed to perform tower actions (reply-to-ask); empty = actions refused")
 	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")
@@ -347,6 +349,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/tower/run/verify", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunVerify))))
 	mux.Handle("GET /api/rc/tower/run/stream", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunStream))))
 	mux.Handle("GET /api/rc/tower/run/log", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunLog))))
+	mux.Handle("POST /api/rc/tower/run/arm", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunArm)))) // V-2 Vault-signed arm (tower_vaultarm.go)
 	// run-bang phase 2 #5 passkeys (passkeys.go). The enrol code is laptop-only and goes to a 0600
 	// file, never into a response; the rest is the act chain.
 	mux.Handle("POST /api/rc/passkey/enrol-code", s.auth(http.HandlerFunc(s.handleEnrolCode)))
@@ -391,10 +394,12 @@ func (s *server) routes() http.Handler {
 	// files heuristically (from Last-Modified), so a phone could keep running
 	// an old page for days after a deploy.
 	files := http.FileServer(http.Dir(s.cfg.webDir))
+	vault := vaultOrigin(s.cfg.vaultURL)
+	mux.Handle("GET "+vaultCallback, withCSP(http.HandlerFunc(s.handleVaultCallback), vault)) // OIDC redirect (tower_vaultarm.go)
 	mux.Handle("/", withCSP(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
-	})))
+	}), vault))
 
 	return logRequests(mux)
 }

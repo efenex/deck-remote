@@ -118,12 +118,42 @@ type runVerify struct {
 	AskTS  any       `json:"ask_ts,omitempty"` // proposal time (F11: re-signing cannot make it look fresh)
 	SigTS  any       `json:"sig_ts,omitempty"` // last signature time
 	Items  []runItem `json:"items"`
+	// Seq is verify's sequence block, passed to the PWA as is (the arm sheet is built from it);
+	// absent for a loose ask. armState reads seq.arm.state from it.
+	Seq json.RawMessage `json:"seq,omitempty"`
 }
 
 var errRunAskNotFound = errors.New("no such open ask")
 
-func (s *server) runVerify(ask string) (*runVerify, error) {
-	rc, out := s.runBang(s.runBangArgv("verify", "--ask", ask))
+// armState is seq.arm.state (armed | missing | expired | tampered | revoked | key-unknown |
+// wrong-profile | exp-too-far), "missing" when verify has no arm block (a loose ask, an invalid
+// sequence, a runner before V-1).
+func (v *runVerify) armState() string {
+	var sq struct {
+		Arm *struct {
+			State string `json:"state"`
+		} `json:"arm"`
+	}
+	if len(v.Seq) == 0 || json.Unmarshal(v.Seq, &sq) != nil || sq.Arm == nil || sq.Arm.State == "" {
+		return "missing"
+	}
+	return sq.Arm.State
+}
+
+// armRefusal is the run endpoints' reason for a prog step whose revision is not armed.
+func armRefusal(state string) string {
+	return "prog step needs a Vault-signed arm of this revision: arm-" + state
+}
+
+// runVerify is `run_bang.py verify --ask <ask> [--device <id>]`. device is the calling device
+// token's id: the runner then emits seq.arm_payload for that device (run-bang-vault-sign §2.1, the
+// string the arm sheet signs), and the arm endpoint passes the same id to `seq arm --device`.
+func (s *server) runVerify(ask, device string) (*runVerify, error) {
+	args := []string{"verify", "--ask", ask}
+	if device != "" {
+		args = append(args, "--device", device)
+	}
+	rc, out := s.runBang(s.runBangArgv(args...))
 	var v runVerify
 	var failure struct {
 		Error string `json:"error"`
@@ -210,7 +240,7 @@ func (s *server) handleTowerRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.towerActMu.Lock()
 	defer s.towerActMu.Unlock()
-	v, err := s.runVerify(req.Ask)
+	v, err := s.runVerify(req.Ask, dt.ID)
 	if err != nil {
 		refuse(http.StatusBadGateway, err.Error(), nil)
 		return
@@ -237,6 +267,13 @@ func (s *server) handleTowerRun(w http.ResponseWriter, r *http.Request) {
 	if needsPasskey && (it.PhoneOK == nil || !*it.PhoneOK) {
 		refuse(http.StatusForbidden, "laptop only", map[string]any{"refused": "laptop-only", "hint": runHint("laptop-only", req.Ask)})
 		return
+	}
+	if it.Class == "prog" { // the arm gate, before the assertion is even looked at (V-2)
+		if st := v.armState(); st != "armed" {
+			entry["arm"] = st
+			refuse(http.StatusForbidden, armRefusal(st), map[string]any{"refused": "arm-" + st, "needsArm": true})
+			return
+		}
 	}
 	if !it.Runnable {
 		refuse(http.StatusForbidden, "runner says not runnable: "+it.Why, map[string]any{"refused": it.Why, "hint": runHint(it.Why, req.Ask)})
@@ -302,7 +339,8 @@ func (s *server) handleTowerRun(w http.ResponseWriter, r *http.Request) {
 // GET /api/rc/tower/run/verify?ask= — the runner's dry run for the confirm sheet (class, sig,
 // runnable, why, cwd, timeout, latest run), plus the re-sign hint per item. Gated by authAct.
 func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
-	if _, why := s.runCapOK(r); why != "" {
+	dt, why := s.runCapOK(r)
+	if why != "" {
 		httpError(w, http.StatusForbidden, why)
 		return
 	}
@@ -311,7 +349,7 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "ask required")
 		return
 	}
-	v, err := s.runVerify(ask)
+	v, err := s.runVerify(ask, dt.ID)
 	if err != nil {
 		code := http.StatusBadGateway
 		if errors.Is(err, errRunAskNotFound) {
@@ -340,7 +378,15 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 		_, m["passkey"] = passkeyClasses[it.Class]
 		items = append(items, m)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ask": v.Ask, "status": v.Status, "ask_ts": v.AskTS, "sig_ts": v.SigTS, "items": items})
+	out := map[string]any{"ask": v.Ask, "status": v.Status, "ask_ts": v.AskTS, "sig_ts": v.SigTS, "items": items}
+	if len(v.Seq) > 0 {
+		// The sequence block and what the arm sheet needs around it: the device id the payload
+		// names (the PWA recomputes the string from it) and whether this server can arm at all.
+		out["seq"] = v.Seq
+		out["arm_device"] = dt.ID
+		out["arm"] = s.armConfig(dt)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // runIDOK: a run id is "<ask>:<item>:<sha8>[:<attempt>]" (tower runs.py); the stream is only for
@@ -414,7 +460,7 @@ func (s *server) handleTowerRunStream(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	for {
 		if st := fileStamp(journal); st != stamp {
-			if v, err := s.runVerify(ask); err == nil {
+			if v, err := s.runVerify(ask, ""); err == nil {
 				// A failed verify leaves this stamp pending for the next poll.
 				stamp = st
 				if it := v.item(item); it != nil && it.Run != nil && it.Run["id"] == id {

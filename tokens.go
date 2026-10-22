@@ -53,7 +53,9 @@ func containsFold(xs []string, c string) bool {
 // capImplies maps a cap to the caps it carries with it (docs/design/run-bang-phase2-review.md
 // §5 #4): run:mut runs mutating lines and read-only ones. run:* needing act is a mint rule
 // (mint refuses run:* without act), not an implication: hasCap("act") never derives from run:*.
-var capImplies = map[string][]string{"run:mut": {"run:ro"}}
+// run:prog carries run:ro too (the run surface, verify and the streams sit behind run:ro), never
+// run:mut; run:mut never carries run:prog (run-bang-vault-sign §3.4).
+var capImplies = map[string][]string{"run:mut": {"run:ro"}, "run:prog": {"run:ro"}}
 
 // hasCap reports whether the token carries the capability (case-insensitive), directly or
 // through capImplies.
@@ -88,7 +90,13 @@ func (t deviceToken) effectiveCaps() []string {
 // ask's signed `! ` lines the phone may run (tower_run.go). Phase 1 runs the ro
 // class only; run:mut and run:secret are known so they can be minted ahead of
 // their review, but runCapFor grants nothing with them yet.
-var knownCaps = map[string]bool{"act": true, "doc": true, "run:ro": true, "run:mut": true, "run:secret": true}
+// run:prog runs a sequence's `prog` steps (one Face ID each, and only under a Vault-signed arm
+// of the revision, docs/design/run-bang-vault-sign.md §2.4); prof:power / prof:guarded name the
+// token's run-bang profile (run-bang-sequences §6): prof:power may post that arm
+// (tower_vaultarm.go). Neither implies anything, and run:mut never implies run:prog. Like run:*,
+// prof:* are minted from the laptop only (handleDeviceMint, pair.go).
+var knownCaps = map[string]bool{"act": true, "doc": true, "run:ro": true, "run:mut": true, "run:secret": true,
+	"run:prog": true, "prof:power": true, "prof:guarded": true}
 
 // runCapFor is the cap a device token needs to run a line of class cls from the
 // phone, or "" when no cap runs that class in this phase. ro needs run:ro; mut needs
@@ -102,6 +110,8 @@ func runCapFor(cls string) string {
 		return "run:ro"
 	case "mut":
 		return "run:mut" // plus one passkey assertion per line (passkeys.go); the runner's phone gate opens at W4
+	case "prog":
+		return "run:prog" // plus one passkey assertion per step, and the revision's Vault-signed arm (V-2)
 	}
 	return ""
 }
@@ -254,7 +264,7 @@ func normCaps(caps []string) ([]string, error) {
 	for _, c := range cl {
 		// The run endpoints sit behind authAct, so a run:* cap without act
 		// would mint a token that looks able to run and cannot.
-		if strings.HasPrefix(c, "run:") && !containsFold(cl, "act") {
+		if (strings.HasPrefix(c, "run:") || strings.HasPrefix(c, "prof:")) && !containsFold(cl, "act") {
 			return nil, fmt.Errorf("capability %q needs act", c)
 		}
 	}
@@ -389,12 +399,12 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	for _, c := range body.Caps {
-		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c)), "run:") {
+		if c = strings.ToLower(strings.TrimSpace(c)); !strings.HasPrefix(c, "run:") && !strings.HasPrefix(c, "prof:") {
 			continue
 		}
 		if why := localClient(r); why != "" {
 			s.towerLog(map[string]any{"action": "devices/mint", "allowed": false, "caps": body.Caps, "login": tsLogin(r), "reason": why})
-			httpError(w, http.StatusForbidden, "run:* caps are minted from the laptop only: "+why)
+			httpError(w, http.StatusForbidden, "run:* and prof:* caps are minted from the laptop only: "+why)
 			return
 		}
 		break

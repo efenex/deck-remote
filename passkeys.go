@@ -17,7 +17,7 @@ package main
 //   POST /api/rc/passkey/register/finish   authAct + {code, credential} → stored credential
 //        The code is checked at begin and at finish; 3 wrong codes void it (file removed).
 //   GET  /api/rc/passkey/list              authAct: this device token's credentials (id8, created)
-//   POST /api/rc/tower/run/challenge       authAct + run:mut + {ask, item, sha256[, cred]} → request
+//   POST /api/rc/tower/run/challenge       authAct + run:mut|run:prog (the line's class) + {ask, item, sha256[, cred]} → request
 //        options; the 60 s single-use challenge is bound to (ask, item, sha, class, signature
 //        fingerprint, device-token id, allowed credential ids)
 //   verifyRunAssertion                     the run handler (tower_run.go) calls it: spends the challenge, checks
@@ -658,13 +658,26 @@ func runSigFingerprint(ask string, it *runItem, sigTS any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// passkeyClasses are the classes whose phone run needs an assertion. secret stays phase 3,
-// destructive and interactive never run from the phone.
-var passkeyClasses = map[string]string{"mut": "run:mut"}
+// passkeyClasses are the classes whose phone run needs an assertion, and the cap each needs.
+// prog (a sequence step tagged prog, V-2) also needs the revision's Vault-signed arm (runLineOK).
+// secret stays phase 3, destructive and interactive never run from the phone.
+var passkeyClasses = map[string]string{"mut": "run:mut", "prog": "run:prog"}
+
+// hasPasskeyCap: the token carries the cap of at least one passkey class (the challenge's
+// pre-check, before the class is known).
+func hasPasskeyCap(dt deviceToken) bool {
+	for _, c := range passkeyClasses {
+		if dt.hasCap(c) {
+			return true
+		}
+	}
+	return false
+}
 
 // runLineOK is the line-side gate shared by the challenge and the assertion: the item exists with
-// this sha, its class needs an assertion, its signature verifies, the runner calls it phone-ok and
-// would run it now.
+// this sha, its class needs an assertion, its signature verifies, the runner calls it phone-ok,
+// a prog step's revision is armed (run-bang-vault-sign §3.4: no Face ID for an unarmed step), and
+// the runner would run it now.
 func runLineOK(v *runVerify, item int, sha string) (*runItem, int, string) {
 	it := v.item(item)
 	if it == nil {
@@ -681,6 +694,11 @@ func runLineOK(v *runVerify, item int, sha string) (*runItem, int, string) {
 	}
 	if it.PhoneOK == nil || !*it.PhoneOK {
 		return it, http.StatusForbidden, "laptop only"
+	}
+	if it.Class == "prog" {
+		if st := v.armState(); st != "armed" {
+			return it, http.StatusForbidden, armRefusal(st)
+		}
 	}
 	if !it.Runnable { // no Face ID for a line the runner would refuse (before W4: class:mut)
 		return it, http.StatusForbidden, "runner says not runnable: " + it.Why
@@ -729,15 +747,15 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusConflict, why)
 		return
 	}
-	if !dt.hasCap("run:mut") {
-		refuse(http.StatusForbidden, "device token "+dt.Name+" lacks the run:mut capability")
+	if !hasPasskeyCap(dt) {
+		refuse(http.StatusForbidden, "device token "+dt.Name+" lacks the run:mut or run:prog capability")
 		return
 	}
 	if !s.passkeys.allow("challenge:" + dt.ID) {
 		refuse(http.StatusTooManyRequests, "too many passkey requests; wait a minute")
 		return
 	}
-	v, err := s.runVerify(req.Ask)
+	v, err := s.runVerify(req.Ask, dt.ID)
 	if err != nil {
 		refuse(http.StatusBadGateway, err.Error())
 		return
@@ -748,6 +766,10 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 	if why != "" {
 		refuse(code, why)
+		return
+	}
+	if !dt.hasCap(passkeyClasses[it.Class]) {
+		refuse(http.StatusForbidden, "device token "+dt.Name+" lacks "+passkeyClasses[it.Class])
 		return
 	}
 	h := s.passkeys
@@ -859,8 +881,8 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if !allowed {
 		return refuse(http.StatusForbidden, "the assertion's credential is not the one the challenge named")
 	}
-	if cur, ok := s.tokens.byID(dt.ID); !ok || !cur.hasCap("run:mut") {
-		return refuse(http.StatusForbidden, "device token revoked or lacks run:mut")
+	if cur, ok := s.tokens.byID(dt.ID); !ok || !cur.hasCap(passkeyClasses[ch.class]) {
+		return refuse(http.StatusForbidden, "device token revoked or lacks "+passkeyClasses[ch.class])
 	}
 	h.mu.Lock()
 	creds := h.credsLocked(dt.ID)
@@ -878,7 +900,7 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 		return refuse(http.StatusForbidden, "user verification (Face ID) did not happen")
 	}
 	if v == nil {
-		if v, err = s.runVerify(ask); err != nil {
+		if v, err = s.runVerify(ask, dt.ID); err != nil {
 			return refuse(http.StatusBadGateway, err.Error())
 		}
 	}

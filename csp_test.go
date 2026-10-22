@@ -29,7 +29,7 @@ func TestCSPOnStaticPages(t *testing.T) {
 		}
 	}
 	// A hostile Host header cannot widen the policy.
-	if p := cspPolicy("evil.com; script-src *"); strings.Contains(p, "evil") {
+	if p := cspPolicy("evil.com; script-src *", ""); strings.Contains(p, "evil") {
 		t.Fatalf("host injected into the policy: %q", p)
 	}
 	// Inline-script audit: no <script> without src, no on*= handler attribute, no javascript: URL.
