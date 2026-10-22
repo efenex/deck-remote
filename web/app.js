@@ -3312,7 +3312,8 @@
     const msg = $('#passkeyMsg');
     const btn = $('#passkeyEnrol');
     const code = ($('#passkeyCode').value || '').replace(/\D/g, '');
-    if (code.length !== 6) { msg.textContent = 'Type the 6-digit code from the laptop.'; return; }
+    // Empty uses the pairing grant (5 min after scanning a pairing QR); the server says if there is none.
+    if (code.length !== 6 && code.length !== 0) { msg.textContent = 'Type the 6-digit code from the laptop.'; return; }
     if (!(window.PublicKeyCredential && navigator.credentials)) { msg.textContent = 'No passkeys here: open the app from the https tailnet URL.'; return; }
     btn.disabled = true;
     msg.textContent = 'Starting…';
@@ -3617,6 +3618,7 @@
     showTokenScreen();
     const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
     if (standalone || confirm('Pair this browser tab? The code works once; to pair the home-screen app, cancel and scan from inside it.')) redeemPair(pairCode);
+    else if (TOKEN) { tokenScreen.hidden = true; appEl.hidden = false; boot(); }
   } else if (!TOKEN) {
     showTokenScreen();
   } else {

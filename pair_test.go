@@ -108,6 +108,7 @@ func TestPairExpiryAndGrantExpiry(t *testing.T) {
 func TestPairRedeemIdentity(t *testing.T) {
 	e := pkServer(t)
 	code, _ := e.offerPair("act")
+	actCode := code
 	other := func(r *http.Request) { r.Header.Set("Tailscale-User-Login", "someone@example.com") }
 	expectCode(t, "act offer, not the operator", e.redeem(code, other), 403, "not the operator")
 	noID := func(r *http.Request) { r.Header.Del("Tailscale-User-Login") }
@@ -128,7 +129,7 @@ func TestPairRedeemIdentity(t *testing.T) {
 	expectCode(t, "garbage", e.redeem("not-a-code"), 403, "unknown")
 	e.expectRefusedLog("devices/pair/redeem", "unknown")
 	for _, m := range actionLog(t) {
-		if b, _ := json.Marshal(m); strings.Contains(string(b), code) {
+		if b, _ := json.Marshal(m); strings.Contains(string(b), code) || strings.Contains(string(b), actCode) {
 			t.Fatalf("action log carries a pairing code: %s", b)
 		}
 	}
