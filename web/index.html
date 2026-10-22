@@ -569,6 +569,10 @@
   .token-screen input{width:100%;max-width:340px;background:var(--card);border:1px solid var(--border);border-radius:calc(12px*var(--round));
     color:var(--text);font-size:16px;padding:13px 14px;font-family:var(--mono)}
   .token-screen .btn-enable{max-width:340px}
+  .token-screen .pair-box{width:100%;max-width:340px;display:flex;flex-direction:column;gap:10px;align-items:center}
+  .token-screen .pair-box video{width:100%;aspect-ratio:1;object-fit:cover;border-radius:calc(14px*var(--round));background:#000}
+  .token-screen .pair-done{width:100%;max-width:340px;display:flex;flex-direction:column;gap:8px;align-items:center}
+  .token-screen .pair-cancel{background:none;border:0;color:var(--accent);font-size:15px;padding:10px;cursor:pointer}
   .token-screen .err{color:var(--red);font-size:12.5px;min-height:16px}
 
 
@@ -788,7 +792,17 @@ html[data-turns=block] .ts{margin-left:4px}
 <div class="token-screen" id="tokenScreen" hidden>
   <div class="hero-bell"><span class="gi">🔑</span></div>
   <h2>Connect deck-remote</h2>
-  <p>Paste the bearer token from your deck-remote server, or open this page with <code>?token=…</code>.</p>
+  <p>On the laptop run <code>scripts/pair-phone.sh</code>, then scan its QR here. Or paste a bearer token.</p>
+  <button class="btn-enable" id="pairScan">Scan pairing QR</button>
+  <div class="pair-box" id="pairBox" hidden>
+    <video id="pairVideo" playsinline muted></video>
+    <button class="pair-cancel" id="pairCancel">Cancel</button>
+  </div>
+  <div class="pair-done" id="pairDone" hidden>
+    <p id="pairMsg"></p>
+    <button class="btn-enable" id="pairFaceID" hidden>Set up Face ID</button>
+    <button class="pair-cancel" id="pairContinue">Continue</button>
+  </div>
   <input id="tokenInput" type="password" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="bearer token">
   <button class="btn-enable" id="tokenSave">Connect</button>
   <div class="err" id="tokenErr"></div>
@@ -948,6 +962,7 @@ html[data-turns=block] .ts{margin-left:4px}
 <script src="/viewport.js?v=35"></script>
 <script src="/pulse.js?v=35"></script>
 <script src="/runbang.js?v=35"></script>
+<script src="/pair.js?v=35"></script>
 <script src="/thread.js?v=35"></script>
 <script src="/markdown.js?v=35"></script>
 <script src="/gestures.js?v=35"></script>

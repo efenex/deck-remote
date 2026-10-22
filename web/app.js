@@ -217,6 +217,77 @@
     if (e.key === 'Enter') $('#tokenSave').click();
   });
 
+  // Pairing by QR (pair.go, pair.js). The laptop's QR holds a single-use code, not a token; the
+  // redeem mints this phone's device token and, for an act token, allows one passkey enrol without
+  // the 6-digit code.
+  let pairScanner = null;
+  function enterApp(tok) {
+    localStorage.setItem(TOKEN_KEY, tok);
+    TOKEN = tok;
+    tokenScreen.hidden = true;
+    appEl.hidden = false;
+    boot();
+  }
+  function pairUI(state, msg) {
+    $('#pairBox').hidden = state !== 'scan';
+    $('#pairDone').hidden = state !== 'done';
+    $('#pairScan').hidden = state === 'scan' || state === 'done';
+    $('#tokenInput').hidden = $('#tokenSave').hidden = state === 'done';
+    $('#tokenErr').textContent = state === 'error' ? msg : '';
+    if (state === 'done') $('#pairMsg').textContent = msg;
+  }
+  async function redeemPair(code) {
+    pairUI('busy');
+    $('#tokenErr').textContent = 'Pairing…';
+    let data = {};
+    try {
+      const res = await fetch('/api/rc/devices/pair/redeem', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+      });
+      data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    } catch (e) {
+      pairUI('error', 'Not paired: ' + (e.message || e));
+      return;
+    }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    TOKEN = data.token;
+    const canPasskey = data.passkeyGrant > 0 && window.PublicKeyCredential && navigator.credentials;
+    if (!canPasskey) { enterApp(data.token); return; }
+    $('#pairFaceID').hidden = false;
+    pairUI('done', '✓ Paired as ' + data.name + '. Set up Face ID now (within ' + Math.round(data.passkeyGrant / 60) + ' min) to run mutating lines; no code needed.');
+  }
+  $('#pairScan').addEventListener('click', async () => {
+    pairUI('scan');
+    pairScanner = DeckPair.scan($('#pairVideo'));
+    let text;
+    try { text = await pairScanner.result; } catch (e) {
+      pairUI(e.message === 'cancelled' ? 'idle' : 'error', 'Scan failed: ' + (e.message || e));
+      return;
+    } finally { pairScanner = null; }
+    const p = DeckPair.parse(text, location.origin);
+    if (p.error) { pairUI('error', p.error); return; }
+    if (p.token) { pairUI('idle'); enterApp(p.token); return; }
+    redeemPair(p.code);
+  });
+  $('#pairCancel').addEventListener('click', () => { if (pairScanner) pairScanner.stop(); });
+  $('#pairContinue').addEventListener('click', () => enterApp(TOKEN));
+  $('#pairFaceID').addEventListener('click', async () => {
+    const btn = $('#pairFaceID');
+    btn.disabled = true;
+    try {
+      const opts = await api('POST', '/api/rc/passkey/register/begin', { code: '' });
+      const cred = await navigator.credentials.create({ publicKey: DeckRunBang.creationOptions(opts) });
+      if (!cred) throw new Error('cancelled');
+      const done = await api('POST', '/api/rc/passkey/register/finish', { code: '', credential: DeckRunBang.credentialJSON(cred) });
+      $('#pairMsg').textContent = '✓ Passkey ' + done.cred + ' enrolled.';
+      btn.hidden = true;
+      $('#pairContinue').textContent = 'Open deck-remote';
+    } catch (e) {
+      $('#pairMsg').textContent = 'Face ID not set up: ' + (e.message || e) + '. Continue, and enrol later in Settings with a code.';
+    } finally { btn.disabled = false; }
+  });
+
   // ---------------------------------------------------------------------------
   // Tab navigation
   // ---------------------------------------------------------------------------
@@ -3537,8 +3608,16 @@
     pushPrefsToServer(); // sync server-honored prefs once on launch
   }
 
-  // Entry point.
-  if (!TOKEN) {
+  // Entry point. A #pair= link (the QR opened outside the app) pairs right away in the home-screen
+  // app; in a browser tab it asks first, since the code is single use and a browser tab's storage is
+  // not the installed app's.
+  const pairCode = DeckPair.fromHash(location.hash);
+  if (pairCode) {
+    history.replaceState(null, '', location.pathname + location.search);
+    showTokenScreen();
+    const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
+    if (standalone || confirm('Pair this browser tab? The code works once; to pair the home-screen app, cancel and scan from inside it.')) redeemPair(pairCode);
+  } else if (!TOKEN) {
     showTokenScreen();
   } else {
     appEl.hidden = false;

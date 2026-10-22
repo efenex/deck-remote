@@ -11,7 +11,9 @@ package main
 //   POST /api/rc/passkey/enrol-code        laptop only (loopback, no serve identity: localClient).
 //        Writes a 6-digit, 5-minute, single-use code to <state>/deck-remote-enrol-code (0600) and
 //        answers with the path only: the code never crosses the network and never reaches a log.
-//   POST /api/rc/passkey/register/begin    authAct + {code} → creation options (platform, UV required)
+//   POST /api/rc/passkey/register/begin    authAct + {code} → creation options (platform, UV required).
+//        An empty code uses the device's pairing grant instead (pair.go: 5 min, once, set when the
+//        token was minted by scanning a laptop pairing QR).
 //   POST /api/rc/passkey/register/finish   authAct + {code, credential} → stored credential
 //        The code is checked at begin and at finish; 3 wrong codes void it (file removed).
 //   GET  /api/rc/passkey/list              authAct: this device token's credentials (id8, created)
@@ -127,13 +129,14 @@ type passkeyHub struct {
 	mu    sync.Mutex
 	recs  []passkeyRecord
 	code  *enrolCode
+	pairs map[string]time.Time    // device-token id → pairing enrol grant expiry (pair.go)
 	regs  map[string]pendingReg   // device-token id → registration in flight
 	chals map[string]runChallenge // challenge (base64url) → binding
 	hits  map[string][]time.Time  // rate-limit bucket → recent hits
 }
 
 func newPasskeyHub(dir string) *passkeyHub {
-	h := &passkeyHub{dir: dir, now: time.Now, regs: map[string]pendingReg{}, chals: map[string]runChallenge{}, hits: map[string][]time.Time{}}
+	h := &passkeyHub{dir: dir, now: time.Now, pairs: map[string]time.Time{}, regs: map[string]pendingReg{}, chals: map[string]runChallenge{}, hits: map[string][]time.Time{}}
 	if b, err := os.ReadFile(filepath.Join(dir, passkeyStoreFile)); err == nil {
 		_ = json.Unmarshal(b, &h.recs)
 	}
@@ -342,6 +345,37 @@ func (h *passkeyHub) checkCode(presented, device string, consume bool) string {
 	return ""
 }
 
+// grantPair lets device enrol one passkey without a code, for pairGrantTTL: the device token was
+// just minted by redeeming a laptop pairing QR (pair.go), which is the same laptop-presence proof the
+// code is, with 128 bits instead of 20.
+func (h *passkeyHub) grantPair(device string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pairs[device] = h.now().Add(pairGrantTTL)
+}
+
+// checkEnrol is checkCode, except that an empty code asks for the device's pairing grant. An empty
+// code never counts toward the code's lockout. consume spends whichever one was accepted.
+func (h *passkeyHub) checkEnrol(presented, device string, consume bool) string {
+	if strings.TrimSpace(presented) != "" {
+		return h.checkCode(presented, device, consume)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	exp, ok := h.pairs[device]
+	if !ok {
+		return "no enrol code given, and this device has no pairing grant: get a code from the laptop"
+	}
+	if !h.now().Before(exp) {
+		delete(h.pairs, device)
+		return "pairing grant expired: get a code from the laptop"
+	}
+	if consume {
+		delete(h.pairs, device)
+	}
+	return ""
+}
+
 // --- relying party ---------------------------------------------------------------
 
 // webAuthn builds the relying party from --public-url: rpId is its hostname and its origin is the
@@ -467,7 +501,7 @@ func (s *server) handlePasskeyRegisterBegin(w http.ResponseWriter, r *http.Reque
 		refuse(http.StatusBadRequest, "bad json")
 		return
 	}
-	if why := s.passkeys.checkCode(body.Code, dt.ID, false); why != "" {
+	if why := s.passkeys.checkEnrol(body.Code, dt.ID, false); why != "" {
 		refuse(http.StatusForbidden, why)
 		return
 	}
@@ -535,7 +569,7 @@ func (s *server) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Requ
 	reg, had := h.regs[dt.ID]
 	delete(h.regs, dt.ID)
 	h.mu.Unlock()
-	if why := h.checkCode(body.Code, dt.ID, false); why != "" {
+	if why := h.checkEnrol(body.Code, dt.ID, false); why != "" {
 		refuse(http.StatusForbidden, why)
 		return
 	}
@@ -566,7 +600,7 @@ func (s *server) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Requ
 	}
 	entry["cred"] = credID8(cred.ID)
 	// Spend the code only now: a ceremony that failed above may be retried with the same code.
-	if why := h.checkCode(body.Code, dt.ID, true); why != "" {
+	if why := h.checkEnrol(body.Code, dt.ID, true); why != "" {
 		refuse(http.StatusForbidden, why)
 		return
 	}

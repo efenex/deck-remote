@@ -209,6 +209,7 @@ type server struct {
 	tokens     *tokenStore    // per-device tokens (additive to the shared bearer)
 	wsTickets  *wsTicketStore // terminal WebSocket tickets (ws_ticket.go)
 	passkeys   *passkeyHub    // WebAuthn credentials, enrol code, run challenges (passkeys.go)
+	pairs      *pairHub       // phone pairing QR offers (pair.go)
 	tower      *towerStore    // optional tower overview (tower.go); nil = feature off
 	towerMu    sync.Mutex
 	webVer     webVersionCache                                             // git HEAD of the --web checkout (version.go)
@@ -281,6 +282,7 @@ func newServer(cfg config, upstream *url.URL) *server {
 		tokens:    newTokenStore(stateDir(home)),
 		wsTickets: newWSTicketStore(),
 		passkeys:  newPasskeyHub(stateDir(home)),
+		pairs:     newPairHub(),
 		tower:     newTowerStore(cfg.towerOverview),
 		sess:      newSessionsCache(),
 		lists:     newListCache(),
@@ -356,6 +358,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/devices", s.authShared(http.HandlerFunc(s.handleDevicesList)))
 	mux.Handle("POST /api/rc/devices/mint", s.authShared(http.HandlerFunc(s.handleDeviceMint)))
 	mux.Handle("POST /api/rc/devices/revoke", s.authShared(http.HandlerFunc(s.handleDeviceRevoke)))
+	// Phone pairing (pair.go): the laptop makes a single-use QR code; the PWA scans it and redeems
+	// it without a bearer (the code is the credential) for a fresh device token.
+	mux.Handle("POST /api/rc/devices/pair", s.authShared(http.HandlerFunc(s.handlePairOffer)))
+	mux.Handle("POST /api/rc/devices/pair/redeem", sameOrigin(http.HandlerFunc(s.handlePairRedeem)))
 
 	// Everything else agent-deck already serves (session list API, Web Push,
 	// /events/menu SSE, /ws/session/* terminal) is reverse-proxied so the phone

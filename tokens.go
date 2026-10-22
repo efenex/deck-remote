@@ -230,13 +230,10 @@ func (ts *tokenStore) byID(id string) (deviceToken, bool) {
 	return deviceToken{}, false
 }
 
-// mint creates and persists a new device token with the given name and returns
-// the metadata plus the RAW secret (shown exactly once — never stored raw).
-func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		name = "device"
-	}
+// normCaps lower-cases and checks a cap list against knownCaps and the run:*-needs-act rule.
+// mint uses it, and so does a pairing offer (pair.go), so an offer can never promise caps the
+// redeem would then fail to mint.
+func normCaps(caps []string) ([]string, error) {
 	var cl []string
 	for _, c := range caps {
 		c = strings.ToLower(strings.TrimSpace(c))
@@ -244,7 +241,7 @@ func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, er
 			continue
 		}
 		if !knownCaps[c] {
-			return deviceToken{}, "", fmt.Errorf("unknown capability %q", c)
+			return nil, fmt.Errorf("unknown capability %q", c)
 		}
 		cl = append(cl, c)
 	}
@@ -252,8 +249,22 @@ func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, er
 		// The run endpoints sit behind authAct, so a run:* cap without act
 		// would mint a token that looks able to run and cannot.
 		if strings.HasPrefix(c, "run:") && !containsFold(cl, "act") {
-			return deviceToken{}, "", fmt.Errorf("capability %q needs act", c)
+			return nil, fmt.Errorf("capability %q needs act", c)
 		}
+	}
+	return cl, nil
+}
+
+// mint creates and persists a new device token with the given name and returns
+// the metadata plus the RAW secret (shown exactly once — never stored raw).
+func (ts *tokenStore) mint(name string, caps ...string) (deviceToken, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "device"
+	}
+	cl, err := normCaps(caps)
+	if err != nil {
+		return deviceToken{}, "", err
 	}
 	raw, err := genSecret()
 	if err != nil {
@@ -455,18 +466,5 @@ func (s *server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 // trusted; otherwise it derives the origin from the request's forwarded
 // host/proto (tailscale serve sets these), falling back to Host.
 func (s *server) phoneURL(r *http.Request, raw string) string {
-	if base := strings.TrimRight(s.cfg.publicURL, "/"); base != "" {
-		return fmt.Sprintf("%s/?token=%s", base, raw)
-	}
-	scheme := "https"
-	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
-		scheme = xf
-	} else if r.TLS == nil && r.Header.Get("X-Forwarded-For") == "" {
-		scheme = "http"
-	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	return fmt.Sprintf("%s://%s/?token=%s", scheme, host, raw)
+	return s.originURL(r) + "/?token=" + raw
 }

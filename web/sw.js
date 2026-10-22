@@ -10,7 +10,7 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v37';
+const CACHE = 'deck-remote-v38';
 const SHELL_NET_TIMEOUT = 1500; // ms before the shell is served from cache
 const SHELL = [
   '/',
@@ -20,6 +20,7 @@ const SHELL = [
   '/viewport.js?v=35',
   '/pulse.js?v=35',
   '/runbang.js?v=35',
+  '/pair.js?v=35',
   '/thread.js?v=35',
   '/markdown.js?v=35',
   '/gestures.js?v=35',

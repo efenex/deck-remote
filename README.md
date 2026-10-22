@@ -112,6 +112,17 @@ go build -o deck-remote .
 3. On the phone (Safari): open the printed URL → **Add to Home Screen** → launch
    from the icon → enable notifications in Settings.
 
+## Pairing a phone
+
+On the laptop: `scripts/pair-phone.sh [name] [caps]` (default `iphone act,run:ro,run:mut`; needs
+`qrencode`). It prints a QR holding a **single-use, 3-minute pairing code**, not a token. On the
+phone, open deck-remote from the home screen (Settings → Forget token first if it already has
+one) and tap **Scan pairing QR**. The app mints its own device token and, for an `act` token,
+offers **Set up Face ID** right away, with no 6-digit code (the QR is the same laptop-presence
+proof, with more entropy; the grant lasts 5 minutes and works once). A second scan of the same QR
+fails with "already used". If that happens to a QR you did not scan yourself, revoke the device.
+Details: `pair.go`.
+
 ## Off-tailnet LAN fallback
 
 Optional. Lets the phone reach deck-remote at home **without Tailscale running**,
