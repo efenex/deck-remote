@@ -1,0 +1,27 @@
+{
+ "comment": "run-bang-vault-sign \u00a72.1 run-bang-arm/v2: the canonical arm string, byte-exact. Shared with deck-remote's web/runbang.test.js (V-2).",
+ "fields": {
+  "ask": "webshare-path-a \"33.0.10\"",
+  "seq_rev": "0123456789abcdef",
+  "n": 7,
+  "seq_sha256": "abababababababababababababababababababababababababababababababab",
+  "exp": 1800014400,
+  "device": "dev-7f3a",
+  "profile": "power"
+ },
+ "text": "run-bang-arm/v2\n\"webshare-path-a \\\"33.0.10\\\"\"\n0123456789abcdef\n7\nabababababababababababababababababababababababababababababababab\n1800014400\n\"dev-7f3a\"\npower\n",
+ "b64": "cnVuLWJhbmctYXJtL3YyCiJ3ZWJzaGFyZS1wYXRoLWEgXCIzMy4wLjEwXCIiCjAxMjM0NTY3ODlhYmNkZWYKNwphYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiCjE4MDAwMTQ0MDAKImRldi03ZjNhIgpwb3dlcgo=",
+ "sha256": "78c8dafddb42f75fdc6bdce956784aeb03c082031dc6134ac0eed742c1f62a98",
+ "seq": {
+  "v": 1,
+  "title": "t",
+  "steps": [
+   {
+    "title": "one",
+    "tag": "prog"
+   },
+   {}
+  ]
+ },
+ "seq_sha256": "90e586af39e0f5f8a4d4ddab08c02512e4d10097d2d2244ae92eac2ea074e230"
+}

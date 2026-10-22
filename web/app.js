@@ -431,7 +431,7 @@
   // Tailscale identity (the server refuses otherwise). Nothing is ever sent
   // automatically; "send to session" is deliberately not in this version.
   // ---------------------------------------------------------------------------
-  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runLocal: new Map() };
+  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runProg: false, profPower: false, runLocal: new Map() };
 
   async function initTower() {
     // The overview (counts for the badge) and whoami load concurrently; the badge
@@ -447,6 +447,8 @@
       // run-bang phase 1: Run needs act (above) AND the run:ro cap; the server checks both again.
       tower.runRo = tower.act && (who.value.caps || []).includes('run:ro');
       tower.runMut = tower.act && (who.value.caps || []).includes('run:mut');
+      tower.runProg = tower.act && (who.value.caps || []).includes('run:prog');
+      tower.profPower = tower.act && (who.value.caps || []).includes('prof:power'); // may post the Vault-signed arm (V-2)
     }
   }
 
@@ -539,6 +541,7 @@
       else if (b0.offer === 'laptop') line.append(el('span', 'trbnote', 'laptop only'));
       else if (b0.offer === 'never') line.append(el('span', 'trbnote', 'copy-only'));
       else if (b0.offer === 'blocked') line.append(el('span', 'trbnote', b0.why));
+      else if (b0.offer === 'arm') line.append(el('span', 'trbnote', b0.why));
       wrap.append(line);
       if (b0.hint) wrap.append(el('div', 'trbhint', '↳ ' + b0.hint));
     }
@@ -550,10 +553,15 @@
     const b = el('button', 'tcopy', 'Copy');
     b.addEventListener('click', () => towerCopy(text, b));
     row.append(pre, b);
-    if (b0 && b0.offer === 'run' && (b0.passkey ? tower.runMut : tower.runRo)) {
+    if (b0 && b0.offer === 'run' && (b0.passkey ? (b0.cls === 'prog' ? tower.runProg : tower.runMut) : tower.runRo)) {
       const rbtn = el('button', 'tcopy trun', b0.passkey ? 'Run…' : 'Run');
       rbtn.addEventListener('click', (e) => { e.stopPropagation(); openRunSheet(askId, text, rb); });
       row.append(rbtn);
+    }
+    if (b0 && b0.offer === 'arm' && tower.runProg && tower.profPower) {
+      const abtn = el('button', 'tcopy trun', 'Arm…');
+      abtn.addEventListener('click', (e) => { e.stopPropagation(); openArmSheet(askId, null); });
+      row.append(abtn);
     }
     wrap.append(row);
     const local = rb && tower.runLocal.get(askId + ':' + rb.index + ':' + rb.sha256);
@@ -664,8 +672,16 @@
     (rb.learnings || []).forEach((h) => facts.append(el('div', 'rbwarn', '⚠ ' + h)));
     if (v.sha256 !== sha) { note.textContent = 'The line changed since this tab loaded: refresh before running.'; return; }
     if (R.hasInvisible(text)) { note.textContent = 'Copy only.'; return; }
+    if (m.state === 'arm' && tower.runProg && tower.profPower) {
+      note.textContent = m.why;
+      const arm = el('button', 'tbtn tprimary', 'Arm…');
+      arm.addEventListener('click', () => { close(); openArmSheet(askId, null); });
+      btns.append(arm);
+      return;
+    }
     if (m.state !== 'run') { note.textContent = m.why + (m.hint ? '\n↳ ' + m.hint : ''); return; }
-    if (m.passkey && !tower.runMut) { note.textContent = 'This phone lacks the run:mut capability: copy the line.'; return; }
+    const capNeed = v.class === 'prog' ? 'run:prog' : 'run:mut';
+    if (m.passkey && !(v.class === 'prog' ? tower.runProg : tower.runMut)) { note.textContent = 'This phone lacks the ' + capNeed + ' capability: copy the line.'; return; }
     if (!m.passkey && !tower.runRo) { note.textContent = 'This phone lacks the run:ro capability: copy the line.'; return; }
     note.textContent = 'Runs as you on blackbird with your credentials.' + (m.passkey ? ' Face ID confirms this one line, once.' : ' One tap, one run.');
     run.hidden = false;
@@ -694,6 +710,158 @@
       status.textContent = '⏳ running…';
       btns.append(runLogButton(res.id));
       streamRun(sh, askId, rb, res.id, out, status);
+    });
+  }
+
+  // --- V-2: the Vault-signed power arm (docs/design/run-bang-vault-sign.md §2.4) ---
+  // The sheet is built from a fresh run/verify only (DeckRunBang.armCheck recomputes the
+  // run-bang-arm/v2 string from what it shows and must equal the runner's). Signing: Vault's OIDC
+  // flow in this tab (auth_url → Forgejo → /vault/callback → back here), then oidc/callback for a
+  // 5-minute sign-only token that lives in one local variable, one transit sign, and the signature
+  // (never the token) goes to POST /api/rc/tower/run/arm. Across the Forgejo hop only the nonce,
+  // Vault's state and the shown fields sit in sessionStorage; the diff baseline (titles and hashes
+  // of the last armed revision's prog steps) sits in localStorage.
+  const ARM_LAST = 'deckArmLast';
+  const ARM_PENDING = 'deckArmPending';
+  const ARM_CALLBACK = 'deckArmCallback';
+  const ARM_HOP_MAX = 10 * 60 * 1000;
+  const ARM_SAME = ['ask', 'seq_rev', 'n', 'seq_sha256', 'device', 'profile'];
+
+  function armLast(askId) {
+    try { return (JSON.parse(localStorage.getItem(ARM_LAST) || '{}') || {})[askId] || null; } catch (_) { return null; }
+  }
+  function armRemember(askId, chk) {
+    try {
+      const all = JSON.parse(localStorage.getItem(ARM_LAST) || '{}') || {};
+      all[askId] = { rev: chk.fields.seq_rev, at: Date.now(), steps: chk.prog.map((p) => ({ index: p.index, title: p.title, sha256: p.sha256 })) };
+      const keep = Object.keys(all).sort((a, b) => (all[b].at || 0) - (all[a].at || 0)).slice(0, 30);
+      localStorage.setItem(ARM_LAST, JSON.stringify(Object.fromEntries(keep.map((k) => [k, all[k]]))));
+    } catch (_) { /* the diff baseline is a convenience */ }
+  }
+  // takeArmCallback: the pending arm and the callback's state/code, read once and removed at once.
+  function takeArmCallback() {
+    let p = null;
+    let cb = null;
+    try {
+      p = JSON.parse(sessionStorage.getItem(ARM_PENDING) || 'null');
+      cb = JSON.parse(sessionStorage.getItem(ARM_CALLBACK) || 'null');
+    } catch (_) { /* fall through */ }
+    try { sessionStorage.removeItem(ARM_PENDING); sessionStorage.removeItem(ARM_CALLBACK); } catch (_) { /* gone anyway */ }
+    return p && cb ? { p, cb } : null;
+  }
+  function resumeArm() {
+    const r = takeArmCallback();
+    if (!r) { toast('Arm', 'No arm was waiting in this window: open the step and tap Arm again.'); return; }
+    if (r.cb.error) { toast('Vault sign-in failed', r.cb.error); return; }
+    if (!r.cb.code || r.cb.state !== r.p.state) { toast('Arm refused', 'The sign-in answer does not belong to this arm (state mismatch): tap Arm again.'); return; }
+    if (Date.now() - (r.p.at || 0) > ARM_HOP_MAX) { toast('Arm', 'The sign-in took over 10 minutes: tap Arm again.'); return; }
+    openArmSheet(r.p.ask, r);
+  }
+
+  async function openArmSheet(askId, resume) {
+    const R = DeckRunBang;
+    const back = el('div', 'rbback');
+    const sh = el('div', 'rbsheet');
+    sh.setAttribute('data-rb', 'arm-sheet');
+    back.append(sh);
+    const close = () => back.remove();
+    back.addEventListener('click', (e) => { if (e.target === back) close(); });
+    sh.append(el('div', 'rbtitle', resume ? 'Sign this arm with Vault?' : 'Arm this revision\'s prog steps for the phone?'));
+    const facts = el('div', 'rbfacts', 'checking with the runner…');
+    facts.setAttribute('data-rb', 'facts');
+    const steps = el('div', 'rbsteps');
+    const note = el('div', 'rbnote', '');
+    note.setAttribute('data-rb', 'note');
+    const btns = el('div', 'rbbtns');
+    const cancel = el('button', 'tbtn', 'Cancel');
+    const go = el('button', 'tbtn tprimary', resume ? 'Sign with Vault & arm' : 'Sign in to Vault…');
+    go.setAttribute('data-rb', 'arm');
+    go.hidden = true;
+    cancel.addEventListener('click', close);
+    btns.append(cancel, go);
+    sh.append(facts, steps, note, btns);
+    document.body.append(back);
+    let top;
+    let chk;
+    try {
+      top = await api('GET', '/api/rc/tower/run/verify?ask=' + encodeURIComponent(askId));
+      chk = await R.armCheck(top, askId);
+    } catch (e) { facts.textContent = 'check failed: ' + (e.message || e); return; }
+    const cfg = top.arm || {};
+    if (!chk.ok) { facts.textContent = ''; note.textContent = 'Cannot arm: ' + chk.why; return; }
+    let fields = chk.fields;
+    if (resume) {
+      // The string signed is the one the first sheet showed (its exp); everything else must still be the runner's now.
+      const was = resume.p.fields || {};
+      if (ARM_SAME.some((k) => was[k] !== chk.fields[k])) { facts.textContent = ''; note.textContent = 'The sequence changed while you signed in (revision ' + chk.fields.seq_rev + '): close and arm again.'; return; }
+      if (!Number.isSafeInteger(was.exp) || was.exp <= Date.now() / 1000 + 60) { facts.textContent = ''; note.textContent = 'The arm this sign-in was for has expired: arm again.'; return; }
+      fields = Object.assign({}, chk.fields, { exp: was.exp });
+    }
+    const text = R.armString(fields);
+    const sha = await R.sha256Hex(text);
+    facts.innerHTML = '';
+    const fact = (k, v) => {
+      const d = el('div', 'rbfact');
+      d.setAttribute('data-rb', 'fact-' + k);
+      d.append(el('span', 'rbk', k), el('span', 'rbv', v));
+      facts.append(d);
+    };
+    fact('ask', askId);
+    fact('revision', fields.seq_rev + ' · ' + fields.n + ' steps, ' + chk.prog.length + ' prog');
+    fact('expires', new Date(fields.exp * 1000).toISOString().replace('.000Z', 'Z') + ' (4 h, the runner\'s clock)');
+    fact('device', fields.device);
+    fact('payload', 'sha256 ' + sha.slice(0, 8) + ' (the TUI shows the same 8 hex)');
+    const last = armLast(askId);
+    const diff = R.armDiff(chk.prog, last);
+    if (last) steps.append(el('div', 'rbnote', 'Compared with the revision this phone armed ' + R.age(Math.round(last.at / 1000)) + ' (' + last.rev + ').'));
+    let invisible = false;
+    diff.rows.forEach((row) => {
+      const head = el('div', 'rbfact');
+      head.setAttribute('data-rb', 'step-' + row.index);
+      head.append(el('span', 'rbk', 'step ' + row.index), el('span', 'rbv', (row.title || '') + ' · ' + (row.state === 'unchanged' ? 'unchanged' : row.state === 'changed' ? 'CHANGED' : 'NEW')));
+      steps.append(head);
+      const pre = el('pre', 'rbline');
+      R.visibleParts(row.line).forEach((p) => pre.append(p.esc ? el('span', 'rbesc', p.s) : document.createTextNode(p.s)));
+      if (R.hasInvisible(row.line)) invisible = true;
+      if (row.state === 'unchanged') {
+        const det = el('details', '');
+        det.append(el('summary', 'rbnote', 'same bytes as the armed revision: show'), pre);
+        steps.append(det);
+      } else steps.append(pre);
+    });
+    if (diff.removed.length) steps.append(el('div', 'rbnote', 'Gone since the last arm: ' + diff.removed.join(', ')));
+    if (invisible) { note.textContent = 'A prog step holds invisible or direction-changing characters (⟨U+…⟩): arm it on the laptop, not here.'; return; }
+    if (!cfg.enabled) { note.textContent = cfg.why || 'arming from the phone is off on this server'; return; }
+    if (!cfg.can) { note.textContent = cfg.can_why || 'this phone cannot arm'; return; }
+    note.textContent = resume
+      ? 'Vault signs exactly this string with your login; the token stays in this tab for one call and is dropped.'
+      : 'Arming lets this phone run these prog steps (one Face ID each) until the expiry. Next: Forgejo sign-in (hardware key), then back here to sign.';
+    go.hidden = false;
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      go.textContent = '…';
+      try {
+        if (!resume) {
+          const n = R.nonce();
+          const a = await R.vaultAuthURL(cfg, n, window.fetch.bind(window));
+          sessionStorage.setItem(ARM_PENDING, JSON.stringify({ ask: askId, fields, nonce: n, state: a.state, at: Date.now() }));
+          location.assign(a.url);
+          return;
+        }
+        let token = await R.vaultLogin(cfg, resume.cb, resume.p.nonce, window.fetch.bind(window));
+        let sig;
+        try { sig = await R.vaultSign(cfg, token, R.b64(R.utf8(text)), window.fetch.bind(window)); } finally { token = null; }
+        const res = await api('POST', '/api/rc/tower/run/arm', { ask: askId, seq_rev: fields.seq_rev, exp: fields.exp, sig });
+        armRemember(askId, chk);
+        go.hidden = true;
+        cancel.textContent = 'Close';
+        note.textContent = '✓ armed (' + res.id + ') until ' + new Date(res.exp * 1000).toISOString().replace('.000Z', 'Z') + '. Run each prog step with Face ID.';
+        loadTower();
+      } catch (e) {
+        try { sessionStorage.removeItem(ARM_PENDING); } catch (_) { /* gone */ }
+        note.textContent = 'Refused: ' + (e.message || e) + (e.data && e.data.hint ? '\n↳ ' + e.data.hint : '') + (resume ? '\nThe sign-in is spent: close and arm again.' : '');
+        go.textContent = 'Failed';
+      }
     });
   }
 
@@ -3874,6 +4042,8 @@
   // app; in a browser tab it asks first, since the code is single use and a browser tab's storage is
   // not the installed app's.
   const pairCode = DeckPair.fromHash(location.hash);
+  const armBack = location.hash === '#arm-callback'; // back from Vault's sign-in (vault-callback.js)
+  if (armBack) history.replaceState(null, '', location.pathname + location.search);
   if (pairCode) {
     history.replaceState(null, '', location.pathname + location.search);
     showTokenScreen();
@@ -3885,5 +4055,6 @@
   } else {
     appEl.hidden = false;
     boot();
+    if (armBack) resumeArm();
   }
 })();

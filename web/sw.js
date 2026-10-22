@@ -66,7 +66,8 @@ self.addEventListener('fetch', (event) => {
   if (
     url.pathname.startsWith('/api/') ||
     url.pathname.startsWith('/events/') ||
-    url.pathname.startsWith('/ws/')
+    url.pathname.startsWith('/ws/') ||
+    url.pathname.startsWith('/vault/') // the OIDC callback's URL carries a one-time code: never cached
   ) {
     return; // let the network handle live endpoints
   }

@@ -20,10 +20,17 @@
     'laptop-only': 'laptop only (phase 2, F8a/F10a): copy the line and run it on the laptop',
     'params-changed': 'the signed cwd/timeout changed since the sheet loaded (re-signed?): reload and confirm again',
     'still-running': "the previous attempt's process group is still alive: wait for it, or stop it on the laptop",
+    'arm-missing': 'a prog step runs from the phone only under a Vault-signed arm of this revision: Arm… (power), or run_bang.py seq arm --ask <id> --via tui --payload on the laptop',
+    'arm-expired': 'the arm expired (4 h): arm this revision again',
+    'arm-revoked': 'the arm was revoked on the laptop: arm again if that was not meant',
+    'arm-tampered': 'the arm record does not verify against this revision: arm again',
+    'arm-key-unknown': 'the arm was signed by a key version the laptop no longer pins: arm again',
+    'arm-exp-too-far': 'the arm expires further out than 4 h: refused, arm again',
+    'arm-wrong-profile': 'the arm is not a power arm: arm again',
   };
   const PHASE2 = new Set(['mut', 'secret']); // mut: phase 2 (passkey per line); secret: phase 3
-  const RUN_CLASSES = new Set(['ro', 'mut']);
-  const PASSKEY_CLASSES = new Set(['mut']); // one Face ID per line
+  const RUN_CLASSES = new Set(['ro', 'mut', 'prog']);
+  const PASSKEY_CLASSES = new Set(['mut', 'prog']); // one Face ID per line (prog: under the revision's arm, V-2)
 
   function hint(reason, ask) { return HINTS[reason] ? HINTS[reason].replace('<id>', ask || '<id>') : ''; }
 
@@ -42,7 +49,14 @@
       tone: ok ? 'ok' : (sig === 'tampered' || sig === 'sig-stale-params' ? 'urgent' : 'warn'),
       hint: hint(sig, ask), offer: 'run', why: '', passkey: PASSKEY_CLASSES.has(cls),
     };
-    const gated = cls === 'mut' && !rb.ok && /class|copy-only|phase/.test(String(rb.why || ''));
+    const gated = (cls === 'mut' || cls === 'prog') && !rb.ok && /class|copy-only|phase/.test(String(rb.why || ''));
+    const armWhy = cls === 'prog' && !rb.ok && (String(rb.why || '').match(/\barm-[a-z-]+/) || [])[0];
+    if (armWhy && ok) {
+      out.offer = 'arm';
+      out.why = 'needs an arm (' + armWhy + ')';
+      out.hint = hint(armWhy, ask);
+      return out;
+    }
     if (!RUN_CLASSES.has(cls) || gated) {
       out.offer = PHASE2.has(cls) ? 'phase2' : 'never';
       out.why = PHASE2.has(cls) ? 'class ' + cls + ': copy-only here, needs phase 2' : 'class ' + cls + ': copy-only, never run from the phone';
@@ -130,7 +144,7 @@
     top = top || {};
     const facts = [];
     const sub = v.class === 'mut' ? (v.phone_ok ? ' · phone list' : ' · laptop only') : '';
-    facts.push(['class', v.class + (v.class === 'ro' ? ' (read-only)' : v.class === 'mut' ? ' (changes things)' : '') + sub]);
+    facts.push(['class', v.class + (v.class === 'ro' ? ' (read-only)' : v.class === 'mut' ? ' (changes things)' : v.class === 'prog' ? ' (a program; runs under the arm)' : '') + sub]);
     facts.push(['cwd', v.cwd || 'not reported by the runner']);
     facts.push(['timeout', v.timeout ? v.timeout + ' s' : 'not reported by the runner']);
     const sigAge = age(top.sig_ts, nowMs);
@@ -155,12 +169,175 @@
     } else if (v.phone_cap === false) {
       out.state = 'phase2';
       out.why = 'Class ' + v.class + ' is copy-only on the phone in this phase.';
+    } else if (v.class === 'prog' && /^arm-/.test(String(v.why || ''))) {
+      out.state = 'arm';
+      out.why = 'This step needs a Vault-signed arm of its revision first (' + v.why + ').';
+      out.hint = out.hint || hint(v.why, '');
     } else if (!v.runnable) {
       out.state = 'blocked';
       out.why = 'The runner would refuse: ' + v.why;
       out.hint = out.hint || hint(v.why, '');
     }
     return out;
+  }
+
+  // --- V-2: the Vault-signed power arm (docs/design/run-bang-vault-sign.md §2.1, §2.4, §3.1) ---
+  // The runner canonicalises once (verify's seq.arm_payload); the sheet recomputes the same string
+  // from the fields it shows and refuses to sign when the two differ.
+
+  const ARM_TAG = 'run-bang-arm/v2';
+  const ARM_TTL = 4 * 3600; // operator Q-V3; the runner enforces it, the sheet only sanity-checks
+  const ARM_SKEW = 3600; // phone clock slack for that sanity check (the runner's clock decides)
+
+  // pyStr(s): Python json.dumps(s) (ensure_ascii): everything outside printable ASCII is \uXXXX
+  // (lower-case hex, UTF-16 units), with the five short escapes json uses.
+  const PY_SHORT = { '"': '\\"', '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' };
+  function pyStr(s) {
+    let out = '"';
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      const c = s.charCodeAt(i);
+      if (PY_SHORT[ch]) out += PY_SHORT[ch];
+      else if (c >= 0x20 && c <= 0x7e) out += ch;
+      else out += '\\u' + c.toString(16).padStart(4, '0');
+    }
+    return out + '"';
+  }
+  const cpCmp = (a, b) => {
+    const x = Array.from(a);
+    const y = Array.from(b);
+    for (let i = 0; i < Math.min(x.length, y.length); i++) {
+      const d = x[i].codePointAt(0) - y[i].codePointAt(0);
+      if (d) return d;
+    }
+    return x.length - y.length;
+  };
+  // canonJSON(v): tower sign.canon = json.dumps(v, sort_keys=True, separators=(",", ":")). Throws
+  // on a non-integer number (Python's float repr is not JavaScript's; a sequence never holds one).
+  function canonJSON(v) {
+    if (v === null) return 'null';
+    if (v === true) return 'true';
+    if (v === false) return 'false';
+    if (typeof v === 'number') {
+      if (!Number.isSafeInteger(v)) throw new Error('canonJSON: non-integer number');
+      return String(v);
+    }
+    if (typeof v === 'string') return pyStr(v);
+    if (Array.isArray(v)) return '[' + v.map(canonJSON).join(',') + ']';
+    if (typeof v === 'object') return '{' + Object.keys(v).sort(cpCmp).map((k) => pyStr(k) + ':' + canonJSON(v[k])).join(',') + '}';
+    throw new Error('canonJSON: ' + typeof v);
+  }
+
+  const cleanId = (s) => typeof s === 'string' && s.length > 0 && s.length <= 200 && /^[\x20-\x7e]+$/.test(s);
+
+  // armString(f): the canonical run-bang-arm/v2 string of fields f (varm.canonical).
+  function armString(f) {
+    return [ARM_TAG, pyStr(f.ask), f.seq_rev, String(f.n), f.seq_sha256, String(f.exp), pyStr(f.device), f.profile].join('\n') + '\n';
+  }
+
+  function utf8(s) { return new TextEncoder().encode(s); }
+  function b64(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return typeof btoa === 'function' ? btoa(bin) : Buffer.from(bin, 'binary').toString('base64');
+  }
+  async function sha256Hex(s) {
+    const c = typeof crypto !== 'undefined' ? crypto : globalThis.crypto;
+    if (!(c && c.subtle)) throw new Error('no WebCrypto here (needs the https tailnet URL)');
+    const d = await c.subtle.digest('SHA-256', utf8(s));
+    return Array.from(new Uint8Array(d)).map((x) => x.toString(16).padStart(2, '0')).join('');
+  }
+  async function canonSha256(seq) { return sha256Hex(canonJSON(seq)); }
+
+  // armCheck(top, askId, nowSec) -> {ok, why, fields, text, b64, sha256, prog: [{index, title, line, sha256}]}
+  // from one run/verify response: every field of the string is recomputed from what the sheet
+  // shows (ask id from the card, rev / n from the seq block and items, device from arm_device,
+  // profile power, each prog line's sha256 from its own bytes, seq_sha256 from the raw data.seq
+  // when verify carries it as seq.data) and the string must equal verify's arm_payload and its sha.
+  async function armCheck(top, askId, nowSec) {
+    const bad = (why) => ({ ok: false, why });
+    const seq = top && top.seq;
+    if (!seq || typeof seq !== 'object') return bad('not a sequence ask');
+    if (seq.sig !== 'ok') return bad('the sequence signature is ' + seq.sig + ': re-sign it on the laptop');
+    const f = seq.arm_fields;
+    if (!f || typeof seq.arm_payload !== 'string') return bad('the runner sent no arm payload for this device (an older tower?)');
+    const items = Array.isArray(top.items) ? top.items : [];
+    const now = nowSec == null ? Date.now() / 1000 : nowSec;
+    if (f.ask !== askId || top.ask !== askId) return bad('verify names another ask');
+    if (!cleanId(f.ask) || !cleanId(f.device)) return bad('the ask or device id is not printable ASCII');
+    if (f.device !== top.arm_device) return bad('the payload names another device');
+    if (f.seq_rev !== seq.rev || !/^[0-9a-f]{16}$/.test(f.seq_rev)) return bad('the payload names another revision');
+    if (f.n !== items.length) return bad('the payload counts ' + f.n + ' steps, verify lists ' + items.length);
+    if (f.profile !== 'power') return bad('not a power arm');
+    if (!/^[0-9a-f]{64}$/.test(String(f.seq_sha256))) return bad('bad seq_sha256');
+    if (!Number.isSafeInteger(f.exp) || f.exp <= now - ARM_SKEW || f.exp > now + ARM_TTL + ARM_SKEW) return bad('the arm expiry is not within 4 h of now: check the phone clock, reload');
+    if (seq.data && typeof seq.data === 'object' && (await canonSha256(seq.data)) !== f.seq_sha256) return bad('data.seq does not hash to the payload');
+    const steps = new Map((Array.isArray(seq.steps) ? seq.steps : []).map((s) => [s.index, s]));
+    const prog = [];
+    for (const it of items) {
+      if (it.class !== 'prog') continue;
+      if (typeof it.line !== 'string' || (await sha256Hex(it.line)) !== it.sha256) return bad('step ' + it.index + ': the line does not match its hash');
+      prog.push({ index: it.index, title: (steps.get(it.index) || {}).title || '', line: it.line, sha256: it.sha256 });
+    }
+    if (!prog.length) return bad('no prog step in this revision: nothing to arm');
+    const text = armString(f);
+    const sha = await sha256Hex(text);
+    if (text !== seq.arm_payload || sha !== seq.arm_payload_sha256) return bad('verify and card disagree: reload');
+    return { ok: true, why: '', fields: f, text, b64: b64(utf8(text)), sha256: sha, prog };
+  }
+
+  // armDiff(prog, last) -> {rows: [{index, title, line, state: new|changed|unchanged}], removed: [title]}
+  // against the last revision this phone armed for the ask (last = {rev, at, steps: [{index,
+  // title, sha256}]} or null): unchanged steps (same bytes) are collapsed and named (review P2-6).
+  function armDiff(prog, last) {
+    const was = new Map(((last && last.steps) || []).map((s) => [s.sha256, s]));
+    const byIndex = new Map(((last && last.steps) || []).map((s) => [s.index, s]));
+    const now = new Set(prog.map((p) => p.sha256));
+    const rows = prog.map((p) => Object.assign({}, p, { state: !last ? 'new' : was.has(p.sha256) ? 'unchanged' : byIndex.has(p.index) ? 'changed' : 'new' }));
+    const removed = ((last && last.steps) || []).filter((s) => !now.has(s.sha256) && !prog.some((p) => p.index === s.index)).map((s) => s.title || 'step ' + s.index);
+    return { rows, removed };
+  }
+
+  // --- Vault, from the PWA (design §2.4 step 2-3). The token is a return value, never stored:
+  // the caller keeps it in a local, spends it on one sign and drops it. No cookies, no referrer.
+  function vaultInit(method, headers, body) {
+    return { method, headers: Object.assign({ 'X-Vault-Request': 'true' }, body ? { 'Content-Type': 'application/json' } : {}, headers || {}),
+      body: body ? JSON.stringify(body) : undefined, credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', redirect: 'error', mode: 'cors' };
+  }
+  async function vaultErr(res, what) {
+    let errs = '';
+    try { errs = ((await res.json()).errors || []).map(String).join('; ').slice(0, 200); } catch (_) { /* no body */ }
+    return new Error(what + ': HTTP ' + res.status + (errs ? ' (' + errs + ')' : ''));
+  }
+  // vaultAuthURL(cfg, nonce, fetchFn) -> {url, state}: the Forgejo URL to open and the state Vault put in it.
+  async function vaultAuthURL(cfg, nonce, fetchFn) {
+    const res = await fetchFn(cfg.vault + '/v1/auth/' + cfg.mount + '/oidc/auth_url', vaultInit('POST', null, { role: cfg.role, redirect_uri: cfg.redirect, client_nonce: nonce }));
+    if (!res.ok) throw await vaultErr(res, 'Vault auth_url');
+    const url = ((await res.json()).data || {}).auth_url;
+    if (typeof url !== 'string' || !/^https:\/\//.test(url)) throw new Error('Vault auth_url: no https URL (is the redirect allowed on role ' + cfg.role + '?)');
+    return { url, state: new URL(url).searchParams.get('state') || '' };
+  }
+  // vaultLogin(cfg, cb, nonce, fetchFn) -> the client token (the caller must not store it).
+  async function vaultLogin(cfg, cb, nonce, fetchFn) {
+    const q = '?state=' + encodeURIComponent(cb.state) + '&code=' + encodeURIComponent(cb.code) + '&client_nonce=' + encodeURIComponent(nonce);
+    const res = await fetchFn(cfg.vault + '/v1/auth/' + cfg.mount + '/oidc/callback' + q, vaultInit('GET'));
+    if (!res.ok) throw await vaultErr(res, 'Vault login');
+    const tok = ((await res.json()).auth || {}).client_token;
+    if (typeof tok !== 'string' || !tok) throw new Error('Vault login: no token in the answer');
+    return tok;
+  }
+  // vaultSign(cfg, token, input64, fetchFn) -> "vault:v<N>:<base64>".
+  async function vaultSign(cfg, token, input64, fetchFn) {
+    const res = await fetchFn(cfg.vault + '/v1/' + cfg.transit + '/sign/' + cfg.key, vaultInit('POST', { 'X-Vault-Token': token }, { input: input64 }));
+    if (!res.ok) throw await vaultErr(res, 'Vault sign');
+    const sig = ((await res.json()).data || {}).signature;
+    if (typeof sig !== 'string' || !/^vault:v[1-9][0-9]{0,5}:[A-Za-z0-9+/]{86}==$/.test(sig)) throw new Error('Vault sign: not an ed25519 signature');
+    return sig;
+  }
+  function nonce() {
+    const u = new Uint8Array(24);
+    (typeof crypto !== 'undefined' ? crypto : globalThis.crypto).getRandomValues(u);
+    return bufToB64u(u);
   }
 
   // --- WebAuthn JSON codecs (the server speaks go-webauthn's base64url JSON) ---
@@ -216,6 +393,8 @@
   const api = {
     badge, runState, parseSSE, hint, SIG_BAD, HINTS, PASSKEY_CLASSES,
     visibleParts, hasInvisible, age, sheet, b64uToBuf, bufToB64u, creationOptions, requestOptions, credentialJSON,
+    ARM_TTL, pyStr, canonJSON, armString, sha256Hex, canonSha256, armCheck, armDiff, b64, utf8,
+    vaultAuthURL, vaultLogin, vaultSign, nonce,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckRunBang = api;
