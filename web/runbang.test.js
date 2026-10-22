@@ -225,6 +225,9 @@ test('badge and sheet: a prog step without an arm offers Arm, an armed one runs 
   const arm = R.badge(rb({ class: 'prog', ok: false, why: 'runner: arm-missing' }), 's1');
   assert.strictEqual(arm.offer, 'arm');
   assert.match(arm.hint, /Vault-signed arm/);
+  const fed = R.badge(rb({ class: 'ro', ok: false, why: 'runner: arm-missing' }), 's1'); // the feed carries the classifier's class
+  assert.strictEqual(fed.offer, 'arm');
+  assert.strictEqual(R.badge(rb({ class: 'ro', ok: false, why: 'already ran, rc=0' }), 's1').offer, 'blocked');
   const run = R.badge(rb({ class: 'prog', ok: true, phone_ok: true }), 's1');
   assert.strictEqual(run.offer, 'run');
   assert.strictEqual(run.passkey, true);

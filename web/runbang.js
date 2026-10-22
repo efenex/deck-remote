@@ -50,7 +50,9 @@
       hint: hint(sig, ask), offer: 'run', why: '', passkey: PASSKEY_CLASSES.has(cls),
     };
     const gated = (cls === 'mut' || cls === 'prog') && !rb.ok && /class|copy-only|phase/.test(String(rb.why || ''));
-    const armWhy = cls === 'prog' && !rb.ok && (String(rb.why || '').match(/\barm-[a-z-]+/) || [])[0];
+    // The feed's class is the classifier's (a `pwd` tagged prog reads ro); the runner's arm-* reason
+    // is the authority that the step is a prog step waiting for an arm.
+    const armWhy = !rb.ok && (String(rb.why || '').match(/\barm-[a-z-]+/) || [])[0];
     if (armWhy && ok) {
       out.offer = 'arm';
       out.why = 'needs an arm (' + armWhy + ')';
