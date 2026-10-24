@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -204,8 +205,38 @@ func (s *server) watchSnapshotReply(se sessionInfo, sw *sessWatch, isNew bool, s
 	s.push.send(pushPayload{Title: se.Title, Body: content, SessionID: se.ID, Kind: "reply"})
 }
 
+// pushDenyPrefixes are the session-title prefixes that must never trigger an
+// attention push (watchAttention). "zz-" marks local scratch/test sessions;
+// extra test-group prefixes come from DECK_REMOTE_PUSH_DENY_PREFIXES
+// (comma-separated, matched literally against the title).
+func pushDenyPrefixes() []string {
+	prefixes := []string{"zz-"}
+	for _, p := range strings.Split(os.Getenv("DECK_REMOTE_PUSH_DENY_PREFIXES"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			prefixes = append(prefixes, p)
+		}
+	}
+	return prefixes
+}
+
+// pushDenylisted reports whether a session title is denylisted from attention
+// pushes: test sessions exist to be exercised, and their permission prompts
+// and questions must not page the phone (the session state still shows in the
+// UI; only the push is suppressed).
+func pushDenylisted(title string) bool {
+	for _, p := range pushDenyPrefixes() {
+		if strings.HasPrefix(title, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *server) watchAttention(se sessionInfo, sw *sessWatch, isNew bool, info attentionInfo) {
-	if !stepAttentionNotification(sw, isNew, info) {
+	notify := stepAttentionNotification(sw, isNew, info)
+	// The latch is stepped even for denylisted sessions so an attention that is
+	// pending while a test session is denied can't fire if it is renamed later.
+	if !notify || pushDenylisted(se.Title) {
 		return
 	}
 	body := "Permission requested — tap to review"
