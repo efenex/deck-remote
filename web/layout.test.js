@@ -95,8 +95,8 @@ test('keyboard up: no 100lvh rule can apply (it does not shrink with the keyboar
   const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
   assert.match(f, /classList\.toggle\('kb', kb\)/);
-  assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
-  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height - pad\)/);
+  assert.match(f, /sheet\.style\.top = kb \? Math\.max\(0, vv\.offsetTop\)/);
+  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height\)/);
   assert.match(f, /sheet\.style\.bottom = kb \? 'auto' : ''/);
   // 3. with the keyboard down the inline overrides are cleared, so 100lvh governs again
   assert.match(f, /kb \? [^:]+: ''/);
@@ -124,19 +124,43 @@ test('inbox cards carry their session id so doc links resolve against that sessi
   assert.match(js, /a\.closest\('\.notif'\)\) session = a\.closest\('\.notif'\)\.dataset\.session/);
 });
 
-test('keyboard up in the home-screen app: sheet is sized from visualViewport minus the accessory-bar allowance', () => {
+test('keyboard up in the home-screen app: the sheet rides the visual viewport exactly (no hand-set pad)', () => {
   const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   const f = js.slice(js.indexOf('function applyViewport()'), js.indexOf('window.visualViewport.addEventListener'));
-  assert.match(f, /const pad = kb && isStandalone\(\) \? kbPad\(\) : 0/);
-  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height - pad\) \+ 'px'/);
-  assert.match(f, /sheet\.style\.top = kb \? vv\.offsetTop/);
-  // allowance: default 0 (vv already excludes the accessory bar), clamped 0..120, persisted
-  const k = js.slice(js.indexOf('function kbPad()'), js.indexOf('function applyViewport()'));
-  assert.match(k, /: 0;/);
-  assert.match(k, /n >= 0 && n <= 120/);
-  // the overlay shows kb state and offers -/+
+  // vv.height already stops at the keyboard + its accessory bar (device overlay
+  // 13:36Z: vv 449); subtracting a persisted allowance there is exactly what
+  // reopened a ~150px dead band under the composer with the tab bar showing
+  // through into the keys (phone screenshot 2026-10-24).
+  assert.match(f, /sheet\.style\.top = kb \? Math\.max\(0, vv\.offsetTop\) \+ 'px'/);
+  assert.match(f, /sheet\.style\.height = kb \? Math\.max\(0, vv\.height\) \+ 'px'/);
+  assert.doesNotMatch(f, /kbPad|vv\.height - pad/);
+  // the whole pad mechanism is gone (old phones keep a stale localStorage entry)
+  assert.doesNotMatch(js, /KB_PAD_KEY|function kbPad/);
+  // the overlay still reports the kb state; the pad -/+ controls died with it
   assert.match(js, /'kb ' \+ document\.documentElement\.classList\.contains\('kb'\)/);
-  assert.match(js, /minus\.addEventListener\('click', \(\) => nudge\(-4\)\)/);
+  assert.doesNotMatch(js, /nudge\(-4\)/);
+});
+
+test('keyboard up: the tab bar hides and the slash circle leaves the composer row (textarea was ~45%)', () => {
+  // the bottom nav is unreachable behind the sheet + keyboard; any sliver of it
+  // left visible read as dead space between the composer and the keys
+  assert.match(rule('html.kb .tabbar'), /display:none/);
+  // the soft keyboard has its own '/' key (and typing '/' opens the popup), so
+  // the 44px circle is dead weight in the row exactly when width matters
+  assert.match(rule('html.kb .slash-btn'), /display:none/);
+  // the textarea is the flexed item that reclaims that width
+  assert.match(rule('.composer textarea'), /flex:1/);
+  // hide-keyboard and send stay: they are the only way out / to send
+  assert.match(rule('html.kb .kb-hide'), /display:grid/);
+});
+
+test('keyboard up: the sheet handle reserves a status-bar band so the title clears the iOS clock', () => {
+  // iOS pans the layout viewport up to reveal the focused input and during the
+  // pan env(safe-area-inset-top) can resolve to 0 while the sheet top reaches
+  // the physical screen top — the title landed under the status-bar clock
+  // (phone screenshot 2026-10-24). max() leaves the normal 59px inset untouched.
+  const r = rule('html.kb .sheet-handle');
+  assert.match(r, /padding-top:max\(var\(--safe-top\),54px\)/);
 });
 
 test('applyViewport detects the keyboard via DeckViewport.keyboardUp, not vv < innerHeight alone', () => {

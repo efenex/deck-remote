@@ -1545,14 +1545,12 @@
   // In the home-screen app innerHeight shrinks with the keyboard (device overlay
   // 13:36Z: innerH 447, clientH 793, vv 449), so the old vv < innerHeight - 120
   // test never fired, the 100lvh pin stayed on and the 852pt sheet ran 59pt past
-  // the visible area. Detection is in viewport.js. vv.height already excludes the
-  // accessory bar (vv bottom 449 = top of its backing), so the allowance KB_PAD
-  // defaults to 0; it stays adjustable from the layout debug chip (localStorage).
-  const KB_PAD_KEY = 'dr-kb-pad';
-  function kbPad() {
-    const n = Number(localStorage.getItem(KB_PAD_KEY));
-    return localStorage.getItem(KB_PAD_KEY) !== null && Number.isFinite(n) && n >= 0 && n <= 120 ? n : 0;
-  }
+  // the visible area. Detection is in viewport.js. vv.height already stops at the
+  // keyboard (vv bottom 449 = accessory-bar backing), so the sheet takes it
+  // VERBATIM: the old localStorage "kb pad" allowance (default 0, adjustable
+  // from the debug chip, clamped 0..120) was itself what reopened a ~150px dead
+  // band under the composer with the tab bar showing through into the keys
+  // (phone screenshot 2026-10-24). No hand-tuned offsets anymore.
   function applyViewport() {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -1561,9 +1559,11 @@
     document.documentElement.classList.toggle('kb', kb);
     const sheet = $('#sheet');
     if (!sheet) return;
-    const pad = kb && isStandalone() ? kbPad() : 0;
-    sheet.style.top = kb ? vv.offsetTop + 'px' : '';
-    sheet.style.height = kb ? Math.max(0, vv.height - pad) + 'px' : '';
+    // top is clamped at 0: iOS pans the layout viewport to reveal the focused
+    // input and can report a negative offsetTop, which would slide the sheet
+    // header above the screen.
+    sheet.style.top = kb ? Math.max(0, vv.offsetTop) + 'px' : '';
+    sheet.style.height = kb ? Math.max(0, vv.height) + 'px' : '';
     sheet.style.bottom = kb ? 'auto' : '';
     // Snap to the tail only when the keyboard appears (the thread shrinks); on
     // dismiss the thread just grows, and snapping would throw away the scroll
@@ -1596,7 +1596,7 @@
         ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) : 'none'),
       'safe top ' + ps.paddingTop + ' bottom ' + ps.paddingBottom,
       'standalone ' + matchMedia('(display-mode: standalone)').matches + ' navStandalone ' + !!navigator.standalone,
-      'kb ' + document.documentElement.classList.contains('kb') + ' pad ' + kbPad() + ' (standalone ' + isStandalone() + ')' +
+      'kb ' + document.documentElement.classList.contains('kb') + ' (standalone ' + isStandalone() + ')' +
         (vv ? ' vv bottom ' + r(vv.offsetTop + vv.height) : ''),
       'html.class "' + document.documentElement.className + '"',
       '#sheet style "' + (($('#sheet') && $('#sheet').getAttribute('style')) || '') + '"',
@@ -1640,23 +1640,7 @@
         layoutDebug(false);
       });
       bar.append(chip, x);
-      // keyboard accessory-bar allowance (see applyViewport): -/+ 4pt, applied live
-      const padBar = el('div', 'dbg-bar dbg-pad');
-      const padLbl = el('span', 'dbg-chip', '');
-      const nudge = (d) => {
-        localStorage.setItem(KB_PAD_KEY, String(Math.max(0, Math.min(120, kbPad() + d))));
-        padLbl.textContent = 'kb pad ' + kbPad();
-        applyViewport();
-        box.querySelector('.dbg-text').textContent = layoutDebugText();
-      };
-      const minus = el('button', 'dbg-x', '−');
-      const plus = el('button', 'dbg-x', '+');
-      minus.type = plus.type = 'button';
-      minus.addEventListener('click', () => nudge(-4));
-      plus.addEventListener('click', () => nudge(4));
-      padLbl.textContent = 'kb pad ' + kbPad();
-      padBar.append(padLbl, minus, plus);
-      box.append(bar, padBar, el('pre', 'dbg-text'));
+      box.append(bar, el('pre', 'dbg-text'));
       document.body.appendChild(box);
     }
     const tick = () => { if (box.classList.contains('open')) box.querySelector('.dbg-text').textContent = layoutDebugText(); };
