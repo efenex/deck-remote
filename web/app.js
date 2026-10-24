@@ -1843,11 +1843,16 @@
       ta.disabled = true;
       ta.placeholder = s.degradedReason || 'Structured controls unavailable — open terminal';
     }
-    // One line by default, growing to ~4 lines (max-height) while typing; back
-    // to one line when it loses focus or is sent.
+    // One line by default, growing to ~40% of the visible viewport while
+    // typing, then scrolling internally; back to one line when it loses focus
+    // or is sent. The cap comes from visualViewport — the part not covered by
+    // the keyboard — because dvh does not shrink with the keyboard in a
+    // standalone PWA.
+    const composerCap = () =>
+      Math.max(110, Math.round((window.visualViewport ? window.visualViewport.height : window.innerHeight) * 0.4));
     const autosize = () => {
       ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight, 110) + 'px';
+      ta.style.height = Math.min(ta.scrollHeight, composerCap()) + 'px';
     };
     ta.addEventListener('input', () => {
       autosize();
@@ -1893,16 +1898,21 @@
       send.disabled = !ta.value.trim();
       updateSlashPop(s.id, ta);
     });
-    composer.appendChild(slashBtn);
-    composer.appendChild(ta);
-    // Hide-keyboard control: visible only while the keyboard is up (html.kb).
-    const kbHide = el('button', 'kb-hide', '⌄');
+    // In-card control row (Claude-remote style): / commands on the left, send
+    // at the right end. The dismiss-keyboard pill (visible only while the
+    // keyboard is up, html.kb) sits beside the commands; it blurs the input,
+    // which is what dismisses the keyboard.
+    const kbHide = el('button', 'kb-hide', '⌄ hide');
     kbHide.type = 'button';
     kbHide.title = 'Hide keyboard';
     kbHide.setAttribute('aria-label', 'Hide keyboard');
     kbHide.addEventListener('click', () => ta.blur());
-    composer.appendChild(kbHide);
-    composer.appendChild(send);
+    const row = el('div', 'composer-row');
+    row.appendChild(slashBtn);
+    row.appendChild(kbHide);
+    row.appendChild(send);
+    composer.appendChild(ta);
+    composer.appendChild(row);
     composerWrap.appendChild(composer);
     sheet.appendChild(composerWrap);
 

@@ -40,10 +40,12 @@ test('wide bash output scrolls in its own pre', () => {
   assert.match(r, /overflow-x:auto/);
 });
 
-test('composer sits on the home-indicator inset only (max, not inset + 8px)', () => {
-  const r = rule('  .composer'); // indented: skip `html.kb .composer`
+test('composer card floats above the home-indicator inset, which lives on the wrap (max, not inset + 8px)', () => {
+  const r = rule('  .composer-wrap'); // the inset is OUTSIDE the card, on the wrap
   assert.match(r, /padding-bottom:max\(var\(--safe-bottom\),8px\)/);
   assert.doesNotMatch(r, /calc\(8px \+ var\(--safe-bottom\)\)/);
+  // keyboard up: the home-bar inset belongs under the keyboard — flat 8px
+  assert.match(rule('html.kb .composer-wrap'), /padding-bottom:8px$/);
 });
 
 test('hide-keyboard button exists only while the keyboard is up', () => {
@@ -51,8 +53,40 @@ test('hide-keyboard button exists only while the keyboard is up', () => {
   assert.match(rule('html.kb .kb-hide'), /display:grid/);
 });
 
-test('composer textarea is capped at ~4 lines', () => {
-  assert.match(rule('.composer textarea'), /max-height:110px/);
+test('composer textarea grows to ~40% of the visible viewport, then scrolls inside the card', () => {
+  // dvh does not track the keyboard in a standalone PWA, so the real cap is
+  // computed in app.js from visualViewport (the part not covered by the keys)
+  assert.match(rule('.composer textarea'), /max-height:40dvh/);
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  assert.match(js, /composerCap = \(\) =>\s*Math\.max\(110, Math\.round\(\(window\.visualViewport \? window\.visualViewport\.height : window\.innerHeight\) \* 0\.4\)\)/);
+});
+
+test('composer is ONE rounded card (Claude-remote style): textarea on top, control row inside the card', () => {
+  const r = rule('  .composer'); // indented: skip the html.kb variants
+  assert.match(r, /flex-direction:column/);
+  assert.match(r, /background:var\(--card\)/);
+  assert.match(r, /border-radius/);
+  assert.match(rule('.composer-row'), /display:flex/);
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  assert.match(js, /el\('div', 'composer-row'\)/);
+  // DOM order inside the card: textarea first, control row below it
+  assert.ok(js.indexOf('composer.appendChild(ta)') < js.indexOf('composer.appendChild(row)'),
+    'textarea must precede the control row');
+});
+
+test('send is a small circle at the right end of the in-card row (was a big button beside the text)', () => {
+  const r = rule('.send-btn');
+  assert.match(r, /margin-left:auto/);
+  assert.match(r, /width:36px/);
+  assert.match(r, /border-radius:50%/);
+});
+
+test('dismiss-keyboard is a labelled pill in the row, not a greyed-looking round slot beside the text', () => {
+  const r = rule('.kb-hide');
+  assert.match(r, /height:36px/);
+  assert.doesNotMatch(r, /width:var\(--tap\)/);
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  assert.match(js, /el\('button', 'kb-hide', '⌄ hide'\)/);
 });
 
 test('.sheet is sized by inset:0, not a (possibly stale) 100dvh height', () => {
@@ -141,15 +175,15 @@ test('keyboard up in the home-screen app: the sheet rides the visual viewport ex
   assert.doesNotMatch(js, /nudge\(-4\)/);
 });
 
-test('keyboard up: the tab bar hides and the slash circle leaves the composer row (textarea was ~45%)', () => {
+test('keyboard up: the tab bar hides and the slash circle leaves the control row (text owns the width)', () => {
   // the bottom nav is unreachable behind the sheet + keyboard; any sliver of it
   // left visible read as dead space between the composer and the keys
   assert.match(rule('html.kb .tabbar'), /display:none/);
   // the soft keyboard has its own '/' key (and typing '/' opens the popup), so
-  // the 44px circle is dead weight in the row exactly when width matters
+  // the circle is dead weight in the row exactly when width matters
   assert.match(rule('html.kb .slash-btn'), /display:none/);
-  // the textarea is the flexed item that reclaims that width
-  assert.match(rule('.composer textarea'), /flex:1/);
+  // the textarea spans the card; the controls moved into the row below it
+  assert.match(rule('.composer textarea'), /width:100%/);
   // hide-keyboard and send stay: they are the only way out / to send
   assert.match(rule('html.kb .kb-hide'), /display:grid/);
 });
