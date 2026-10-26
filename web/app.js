@@ -81,7 +81,7 @@
     return path + (path.includes('?') ? '&' : '?') + 'profile=' + encodeURIComponent(CURRENT_PROFILE);
   }
 
-  async function api(method, path, body) {
+  async function api(method, path, body, raw = false) {
     const opts = { method, headers: authHeaders() };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
@@ -96,6 +96,7 @@
         }
         let data = null;
         const text = await res.text();
+        if (raw && res.ok) return text;
         if (text) { try { data = JSON.parse(text); } catch (_) { data = { raw: text }; } }
         if (!res.ok) {
           const msg = (data && (data.error || data.raw)) || ('HTTP ' + res.status);
@@ -560,8 +561,36 @@
       const tail = ((local || rb.run || {}).tail || []);
       wrap.append(st);
       if (rs.glyph === '✗' && tail.length) wrap.append(el('pre', 'trbtail', tail.slice(-5).join('\n')));
+      const run = local || rb.run;
+      if (tower.act && run.id) wrap.append(runLogButton(run.id));
     }
     return wrap;
+  }
+
+  function runLogButton(id) {
+    const button = el('button', 'tcopy', 'Unfold log');
+    button.type = 'button';
+    button.addEventListener('click', () => openRunLog(id));
+    return button;
+  }
+
+  function openRunLog(id) {
+    const back = el('div', 'rbback');
+    const sheet = el('div', 'rbsheet');
+    const out = el('pre', 'rbout', 'Loading log…');
+    out.setAttribute('data-rb', 'full-log');
+    const close = el('button', 'tbtn', 'Close');
+    close.addEventListener('click', () => back.remove());
+    back.addEventListener('click', e => { if (e.target === back) back.remove(); });
+    const refresh = el('button', 'tbtn', 'Refresh log');
+    const load = () => refreshButton(refresh, 'Run log', async () => {
+      try { out.textContent = (await api('GET', '/api/rc/tower/run/log?id=' + encodeURIComponent(id), undefined, true)) || '(empty log)'; }
+      catch (e) { out.textContent = 'Log unavailable: ' + e.message; throw e; }
+    });
+    refresh.addEventListener('click', load);
+    sheet.append(el('div', 'rbtitle', 'Run log'), el('div', 'rbnote', id), out, refresh, close);
+    back.append(sheet); document.body.append(back);
+    load();
   }
 
   async function sha256Hex(s) {
@@ -629,6 +658,7 @@
       facts.append(d);
     });
     if (m.prev && m.prev.tail.length) facts.append(el('pre', 'trbtail', m.prev.tail.join('\n')));
+    if (v.run && v.run.id) facts.append(runLogButton(v.run.id));
     (rb.learnings || []).forEach((h) => facts.append(el('div', 'rbwarn', '⚠ ' + h)));
     if (v.sha256 !== sha) { note.textContent = 'The line changed since this tab loaded: refresh before running.'; return; }
     if (R.hasInvisible(text)) { note.textContent = 'Copy only.'; return; }
@@ -660,6 +690,7 @@
       note.textContent = 'started ' + res.id + ' (timeout ' + res.timeout + ' s)';
       out.hidden = false;
       status.textContent = '⏳ running…';
+      btns.append(runLogButton(res.id));
       streamRun(sh, askId, rb, res.id, out, status);
     });
   }

@@ -404,3 +404,27 @@ func TestRunLogUnfold(t *testing.T) {
 		t.Fatalf("unfold without run:ro: %d", w.Code)
 	}
 }
+
+func TestRunVerifyClosedAndMissingAsk(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		rc, want     int
+	}{
+		{"closed", `{"ask":"ask1","status":"closed","items":[]}`, 0, 404},
+		{"answered", `{"ask":"ask1","status":"answered","items":[]}`, 0, 404},
+		{"missing", `{"error":"no such ask"}`, 1, 404},
+		{"runner failure", `{"error":"journal unreadable"}`, 1, 502},
+		{"malformed", `runner crashed`, 1, 502},
+		{"open", `{"ask":"ask1","status":"open","items":[]}`, 0, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := runServer(t)
+			s.towerExec = func(context.Context, []string) (int, string) { return tc.rc, tc.output }
+			tok := mintTok(t, s, "phone", "act", "run:ro")
+			w := runReq(s, tok, "GET", "/api/rc/tower/run/verify?ask=ask1", "", s.handleTowerRunVerify)
+			if w.Code != tc.want {
+				t.Fatalf("got %d %s, want %d", w.Code, w.Body.String(), tc.want)
+			}
+		})
+	}
+}

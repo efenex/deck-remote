@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -119,9 +120,17 @@ type runVerify struct {
 	Items  []runItem `json:"items"`
 }
 
+var errRunAskNotFound = errors.New("no such open ask")
+
 func (s *server) runVerify(ask string) (*runVerify, error) {
 	rc, out := s.runBang(s.runBangArgv("verify", "--ask", ask))
 	var v runVerify
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(lastLine(out)), &failure) == nil && failure.Error == "no such ask" {
+		return nil, errRunAskNotFound
+	}
 	if err := json.Unmarshal([]byte(lastLine(out)), &v); err != nil || rc != 0 {
 		return nil, fmt.Errorf("run_bang.py verify rc=%d: %s", rc, oneLineGo(out, 160))
 	}
@@ -304,7 +313,15 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := s.runVerify(ask)
 	if err != nil {
-		httpError(w, http.StatusBadGateway, err.Error())
+		code := http.StatusBadGateway
+		if errors.Is(err, errRunAskNotFound) {
+			code = http.StatusNotFound
+		}
+		httpError(w, code, err.Error())
+		return
+	}
+	if v.Status != "open" {
+		httpError(w, http.StatusNotFound, "ask is no longer open")
 		return
 	}
 	items := make([]map[string]any, 0, len(v.Items))

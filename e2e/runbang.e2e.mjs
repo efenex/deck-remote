@@ -44,7 +44,7 @@ function writeFixture(dir) {
   const cwd = path.join(dir, 'cwd');
   fs.mkdirSync(cwd);
   const items = [
-    { index: 1, sha256: sha(LINES.mut), class: 'mut', phone_ok: true, laptop_only: null, sig: 'ok', runnable: true, why: null, run: { state: 'done', rc: 1, attempt: 1, tail: ['error: cannot pull with rebase'] }, cwd, timeout: 900, exp: Math.floor(Date.now() / 1000) + 43200, kid: 'k-e2e' },
+    { index: 1, sha256: sha(LINES.mut), class: 'mut', phone_ok: true, laptop_only: null, sig: 'ok', runnable: true, why: null, run: { id: 'ask1:1:' + sha(LINES.mut).slice(0, 8), state: 'done', rc: 1, attempt: 1, tail: ['error: cannot pull with rebase'] }, cwd, timeout: 900, exp: Math.floor(Date.now() / 1000) + 43200, kid: 'k-e2e' },
     { index: 2, sha256: sha(LINES.laptop), class: 'mut', phone_ok: false, laptop_only: 'opaque code', sig: 'ok', runnable: false, why: 'laptop-only', run: null, cwd, timeout: 900, exp: Math.floor(Date.now() / 1000) + 43200, kid: 'k-e2e' },
     { index: 3, sha256: sha(LINES.bidi), class: 'ro', phone_ok: true, sig: 'ok', runnable: true, why: null, run: null, cwd, timeout: 120, exp: Math.floor(Date.now() / 1000) + 86400, kid: 'k-e2e' },
     { index: 4, sha256: sha(LINES.zw), class: 'copy', phone_ok: false, sig: 'ok', runnable: false, why: 'class:copy', run: null, cwd, timeout: 120, kid: 'k-e2e' },
@@ -67,7 +67,7 @@ else:
     print(json.dumps({"error": "unexpected"}))
     sys.exit(1)
 `);
-  const rb = (k, it, extra) => Object.assign({ index: it.index, sha256: it.sha256, class: it.class, sig: 'ok', ok: it.runnable, phone_ok: it.phone_ok, why: it.why, run: null }, extra || {});
+  const rb = (k, it, extra) => Object.assign({ index: it.index, sha256: it.sha256, class: it.class, sig: 'ok', ok: it.runnable, phone_ok: it.phone_ok, why: it.why, run: it.run || null }, extra || {});
   const model = {
     generated_at: new Date().toISOString(), header: 'e2e fixture', legend: [],
     sections: [{ id: 'waiting', title: 'Waiting on you', count: 1, items: [{
@@ -163,6 +163,16 @@ test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID
   assert.match(await lap.textContent(), /laptop only/);
   assert.strictEqual(await page.locator('.tcmdwrap pre').filter({ hasText: '⟨U+200B⟩' }).count(), 1);
   assert.strictEqual(await page.locator('.tcmdwrap pre .rbesc', { hasText: '⟨U+200B⟩' }).count(), 1);
+
+  // Unfold reads the redacted log and never invokes run.
+  await row(LINES.mut).getByRole('button', { name: 'Unfold log' }).click();
+  await page.locator('[data-rb="full-log"]').filter({ hasText: 'fake runner: nothing ran' }).waitFor();
+  await page.locator('.rbsheet').getByRole('button', { name: 'Refresh log' }).click();
+  await page.waitForFunction(() => ![...document.querySelectorAll('.rbsheet button')].find(b => b.textContent === 'Refresh log').disabled);
+  await page.locator('.rbsheet').getByRole('button', { name: 'Close', exact: true }).click();
+  const beforeRun = fs.readFileSync(path.join(root, 'calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.ok(beforeRun.some(a => a[0] === 'log'));
+  assert.ok(!beforeRun.some(a => a[0] === 'run'), 'unfold must not run commands');
 
   // A bidi character inside an ro line: the sheet shows it and offers Copy only.
   await row('! ls /tmp/a').locator('button.trun').click();

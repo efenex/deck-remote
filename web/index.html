@@ -475,6 +475,7 @@
   .sheet-check{border-radius:calc(12px*var(--round));flex:0 0 auto}
   .sheet-back{border-radius:calc(12px*var(--round));flex:0 0 auto;margin-right:4px;font-size:26px;line-height:1}
   .icon-btn.busy{opacity:.5}
+  button.busy:not(.icon-btn)::before{content:"↻ ";display:inline-block;animation:spin .8s linear infinite}
   .appbar-actions{display:flex;align-items:center;gap:8px}
   .profile-sel{background:var(--card,#1a1a1e);color:var(--title);border:1px solid var(--border,#333);border-radius:calc(12px*var(--round));padding:0 10px;min-height:var(--tap);font-size:16px;max-width:150px}
   .icon-btn.busy .gi,.icon-btn.busy .ico{display:inline-block;animation:spin .8s linear infinite}
