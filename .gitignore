@@ -19,3 +19,6 @@ mockups/
 # Python bytecode (scripts/ui mock server)
 __pycache__/
 *.pyc
+
+# local task worktrees
+/.worktrees/
