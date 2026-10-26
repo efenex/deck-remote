@@ -87,22 +87,34 @@
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    const res = await fetch(withProfileParam(path), opts);
-    if (res.status === 401) {
-      forgetToken('Token rejected — re-enter it.');
-      throw new Error('unauthorized');
-    }
-    let data = null;
-    const text = await res.text();
-    if (text) { try { data = JSON.parse(text); } catch (_) { data = { raw: text }; } }
-    if (!res.ok) {
-      const msg = (data && (data.error || data.raw)) || ('HTTP ' + res.status);
-      const e = new Error(msg);
-      e.status = res.status;
-      e.data = data;
+    try {
+      return await DeckNetwork.request(fetch, withProfileParam(path), opts, async (res) => {
+        connection.lastContact = Date.now();
+        if (res.status === 401) {
+          forgetToken('Token rejected — re-enter it.');
+          throw new Error('unauthorized');
+        }
+        let data = null;
+        const text = await res.text();
+        if (text) { try { data = JSON.parse(text); } catch (_) { data = { raw: text }; } }
+        if (!res.ok) {
+          const msg = (data && (data.error || data.raw)) || ('HTTP ' + res.status);
+          const e = new Error(msg);
+          e.status = res.status;
+          e.data = data;
+          throw e;
+        }
+        return data;
+      });
+    } catch (e) {
+      if (!e.status && e.message !== 'unauthorized') {
+        connection.error = e.message || 'Network request failed';
+        connection.offline = true;
+        if (evRC && evRC.readyState === 1) startStreams();
+        renderConnection();
+      }
       throw e;
     }
-    return data;
   }
 
   // ---------------------------------------------------------------------------
@@ -435,8 +447,9 @@
     }
   }
 
-  async function loadTower() {
-    if (!tower.enabled) return;
+  async function loadTower(userInitiated = false) {
+    if (!tower.enabled) { if (userInitiated) throw new Error('Tower is unavailable'); return; }
+    let failure = null;
     // Progressive: the cheap overview paints first (badge + the legacy list), the
     // TUI-derived model (python, cached server-side) replaces it when it lands.
     const ovP = api('GET', '/api/rc/tower').then((r) => {
@@ -448,14 +461,16 @@
         $('#towerList').innerHTML = '<div class="placeholder">' + esc(r.error) + '</div>';
       }
     }, (e) => {
+      failure = e;
       if (!tower.loaded) $('#towerList').innerHTML = '<div class="placeholder">Overview unavailable: ' + esc(e.message || String(e)) + '</div>';
     });
     const mdP = api('GET', '/api/rc/tower/model').then((r) => {
       tower.model = (r && r.model) || null;
       tower.modelError = tower.model ? '' : ((r && r.error) || 'model unavailable');
-    }, (e) => { tower.model = null; tower.modelError = e.message || 'model unavailable'; });
+    }, (e) => { failure = e; tower.modelError = e.message || 'model unavailable'; });
     await Promise.all([ovP, mdP]);
     if (tower.loaded) renderTower();
+    if (userInitiated && failure) throw failure;
   }
 
   function renderTowerBadge() {
@@ -875,8 +890,8 @@
     const gen = m.generated_at || '';
     const ageMin = Math.round((Date.now() - Date.parse(gen)) / 60000);
     const asOf = $('#towerAsOf');
-    if (asOf) { asOf.textContent = 'rendered ' + towerAgo(gen) + ' ago'; asOf.classList.toggle('stale', ageMin > 30); }
-    list.append(el('div', 'thint', m.header + (ageMin > 30 ? ' · STALE render' : '')));
+    if (asOf) { asOf.textContent = 'Data ' + (gen || 'time unknown') + ' · ' + towerAgo(gen) + ' ago' + (connection.offline ? ' · OFFLINE / STALE' : ''); asOf.classList.toggle('stale', ageMin > 30); }
+    list.append(el('div', 'thint', m.header + (ageMin > 30 ? ' · STALE data' : '')));
     if (!tower.act) list.append(el('div', 'thint', 'Read-only here' + (tower.actReason ? ': ' + tower.actReason : '') + '. Queue / close / fold need an act-capable device token.'));
     m.sections.forEach((sec, n) => {
       const key = 'section:' + sec.id;
@@ -916,9 +931,9 @@
     const gen = o.generated_at || '';
     const ageMin = Math.round((Date.now() - Date.parse(gen)) / 60000);
     const asOf = $('#towerAsOf');
-    if (asOf) { asOf.textContent = 'rendered ' + towerAgo(gen) + ' ago'; asOf.classList.toggle('stale', ageMin > 30); }
+    if (asOf) { asOf.textContent = 'Data ' + (gen || 'time unknown') + ' · ' + towerAgo(gen) + ' ago' + (connection.offline ? ' · OFFLINE / STALE' : ''); asOf.classList.toggle('stale', ageMin > 30); }
     const c = o.counts || {};
-    const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + (c.waiting_folded ? ' [' + c.waiting_folded + ' folded]' : '') + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE render' : ''));
+    const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + (c.waiting_folded ? ' [' + c.waiting_folded + ' folded]' : '') + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE data' : ''));
     list.append(head);
 
     list.append(el('div', 'tsec', '1 · Waiting on you'));
@@ -1004,13 +1019,18 @@
     });
     renderTowerBadge();
   }
-  $('#towerRefresh').addEventListener('click', () => loadTower());
+  async function refreshButton(btn, title, work) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add('busy');
+    btn.setAttribute('aria-busy', 'true');
+    try { await work(); toast(title, 'Updated.'); }
+    catch (e) { toast(title + ' failed', e.message || String(e)); }
+    finally { btn.disabled = false; btn.classList.remove('busy'); btn.setAttribute('aria-busy', 'false'); }
+  }
+  $('#towerRefresh').addEventListener('click', () => refreshButton($('#towerRefresh'), 'Tower refresh', () => loadTower(true)));
   $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.tab)));
-  $('#goRefresh').addEventListener('click', async () => {
-    const b = $('#goRefresh');
-    b.classList.add('busy');
-    try { await loadSessions(false); } finally { b.classList.remove('busy'); }
-  });
+  $('#goRefresh').addEventListener('click', () => refreshButton($('#goRefresh'), 'Deck refresh', () => loadSessions(false, true)));
 
   // ---------------------------------------------------------------------------
   // Inbox: every notification the server recorded, with its full text (the OS
@@ -1043,12 +1063,12 @@
     if (newest > inboxSeenAt()) localStorage.setItem(INBOX_SEEN_KEY, String(newest));
     renderInboxBadge();
   }
-  async function loadInbox() {
+  async function loadInbox(userInitiated = false) {
     try {
       const r = await api('GET', '/api/rc/notifications?limit=200');
       inbox.items = (r && r.notifications) || [];
       inbox.loaded = true;
-    } catch (_) { /* keep what we have; api() already surfaced auth problems */ }
+    } catch (e) { if (userInitiated) throw e; }
     renderInboxBadge();
     if (!$('#screenInbox').hidden) renderInbox();
   }
@@ -1169,7 +1189,7 @@
     showTab('deck');
     if (state.openSheetId !== id) openSheet(id);
   }
-  $('#inboxRefresh').addEventListener('click', () => loadInbox());
+  $('#inboxRefresh').addEventListener('click', () => refreshButton($('#inboxRefresh'), 'Inbox refresh', () => loadInbox(true)));
   $('#inboxMarkRead').addEventListener('click', () => markAllRead());
   $$('#inboxFilter .seg-opt').forEach((b) => b.addEventListener('click', () => { inbox.filter = b.dataset.v; renderInbox(); }));
   $('#inboxList').addEventListener('click', onCodeAction);
@@ -1554,7 +1574,9 @@
   function applyViewport() {
     const vv = window.visualViewport;
     if (!vv) return;
-    const kb = DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
+    const focused = document.activeElement;
+    const editing = focused && (focused.matches('input, textarea') || focused.isContentEditable);
+    const kb = !!editing && DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
     const was = document.documentElement.classList.contains('kb');
     document.documentElement.classList.toggle('kb', kb);
     const sheet = $('#sheet');
@@ -1573,6 +1595,8 @@
       if (convo) convo.scrollTop = convo.scrollHeight;
     }
   }
+  document.addEventListener('focusout', () => setTimeout(applyViewport, 0));
+  document.addEventListener('focusin', applyViewport);
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', applyViewport);
     window.visualViewport.addEventListener('scroll', applyViewport);
@@ -1733,6 +1757,11 @@
     // DOM order top→bottom: handle (already in sheet.innerHTML) → convo (flex:1)
     // → approval dock → status strip (live activity + Stop) →
     // composer-wrap (slash popup + composer, pinned to the very bottom).
+    const connectionNote = el('div', 'conn bad');
+    connectionNote.id = 'sheetConnection';
+    connectionNote.setAttribute('role', 'status');
+    sheet.appendChild(connectionNote);
+    renderConnection();
     const convo = el('div', 'convo');
     convo.id = 'convo';
     sheet.appendChild(convo);
@@ -2168,15 +2197,19 @@
   // (non-Claude sessions return {messages:[], hasMore:false}).
   async function loadHistory(id) {
     state.history.set(id, { loaded: 0, hasMore: false, loading: true });
+    renderConvo(id);
     let r;
     try {
       r = await api('GET', '/api/rc/history?id=' + encodeURIComponent(id) +
         '&limit=' + HISTORY_PAGE + '&offset=0');
     } catch (e) {
-      // Graceful: don't wipe the thread. Fall back to the last-reply behavior.
+      // Keep any existing thread, but make a failed first load visible immediately.
       const hs = state.history.get(id);
       if (hs) hs.loading = false;
-      if (state.openSheetId === id) loadReply(id);
+      if (state.openSheetId === id) {
+        ensureConvo(id).push({ role: 'note', content: 'Transcript unavailable: ' + e.message + '. Use refresh or reconnect to retry.' });
+        renderConvo(id);
+      }
       return;
     }
     if (state.openSheetId !== id) return; // sheet closed while in flight
@@ -2364,7 +2397,7 @@
     const hs = state.history.get(id);
     if (hs && (hs.hasMore || hs.loading)) {
       const more = el('div', 'history-more' + (hs.loading ? ' loading' : ''));
-      more.textContent = hs.loading ? 'Loading older…' : 'Scroll up for older messages';
+      more.textContent = hs.loading ? (conv.length ? 'Loading older…' : 'Loading transcript…') : 'Scroll up for older messages';
       convo.appendChild(more);
     }
 
@@ -2557,7 +2590,8 @@
     if (!mount || state.openSheetId !== s.id) return;
 
     const btn = $('#sheetCheckPerm');
-    if (btn) btn.classList.add('busy');
+    if (btn && btn.disabled) return;
+    if (btn) { btn.classList.add('busy'); btn.disabled = true; }
     try {
       const r = await api('GET', '/api/rc/attention?id=' + encodeURIComponent(s.id));
       if (state.openSheetId !== s.id) return;
@@ -2584,9 +2618,10 @@
     } catch (e) {
       if (state.openSheetId !== s.id) return;
       if (!mount.querySelector('.approve-card')) mount.innerHTML = '';
-      if (userInitiated) mount.appendChild(approveNote('Couldn\'t check attention: ' + e.message));
+      mount.appendChild(approveNote('Couldn\'t check attention: ' + e.message));
+      if (userInitiated) toast('Attention refresh failed', e.message);
     } finally {
-      if (btn) btn.classList.remove('busy');
+      if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
       syncComposerLock();
     }
   }
@@ -2832,42 +2867,66 @@
   // SSE streams
   // ---------------------------------------------------------------------------
   let evRC = null;
+  let reconnectTimer = null, connectDeadline = null;
+  const connection = { offline: true, attempt: 0, failures: 0, nextRetry: 0, lastContact: 0, error: '' };
 
   function teardownStreams() {
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    clearTimeout(connectDeadline); connectDeadline = null;
     if (evRC) { evRC.close(); evRC = null; }
   }
 
-  // Live: a green dot by the title. Anything else also shows the detail strip.
   function setConn(text, cls) {
     const led = $('#titleLed');
     if (led) { led.className = 'title-led' + (cls ? ' ' + cls : ''); led.title = text; }
     const strip = $('#connStrip');
-    if (!strip) return;
-    strip.className = 'conn' + (cls ? ' ' + cls : '');
-    strip.hidden = cls === 'live';
-    $('#connText').textContent = text;
+    if (strip) { strip.className = 'conn ' + cls; strip.hidden = cls === 'live'; $('#connText').textContent = text; }
+    const sheet = $('#sheetConnection');
+    if (sheet) { sheet.hidden = cls === 'live'; sheet.textContent = text; }
   }
-
+  function renderConnection() {
+    setConn(connection.offline ? DeckNetwork.feedback(connection) : 'Live', connection.offline ? 'bad' : 'live');
+    const stamp = $('#towerAsOf');
+    const gen = (tower.model || tower.data || {}).generated_at;
+    if (stamp && gen) {
+      stamp.textContent = 'Data ' + gen + ' · ' + towerAgo(gen) + ' ago' + (connection.offline ? ' · OFFLINE / STALE' : '');
+      stamp.classList.toggle('stale', connection.offline || Date.now() - Date.parse(gen) > 1800000);
+    }
+  }
 
   function startStreams() {
     teardownStreams();
-
-    // deck-remote's own events: ask-state / reply / approve-result.
-    // The stream carries no session state and has no replay, so whatever was
-    // missed while it was down is only recovered by refetching: after any
-    // reconnect, pull the list, the inbox and the open sheet's tail again.
-    let wasDown = false;
+    if (!TOKEN) return;
+    connection.attempt++;
+    connection.nextRetry = 0;
+    renderConnection();
     const es = new EventSource(tokenURL('/api/rc/events'));
     evRC = es;
+    const failed = (message) => {
+      if (evRC !== es) return;
+      teardownStreams();
+      connection.offline = true;
+      connection.failures++;
+      connection.error = message;
+      const delay = DeckNetwork.retryDelay(connection.failures);
+      connection.nextRetry = Date.now() + delay;
+      renderConnection();
+      reconnectTimer = setTimeout(startStreams, delay);
+    };
+    connectDeadline = setTimeout(() => failed('Event stream connection timed out after 12 s'), 12000);
     es.onopen = () => {
-      setConn('Live', 'live');
-      if (wasDown) { wasDown = false; resyncAll(); }
+      if (evRC !== es) return;
+      clearTimeout(connectDeadline); connectDeadline = null;
+      const recovering = connection.offline;
+      connection.offline = false; connection.failures = 0; connection.attempt = 0;
+      connection.lastContact = Date.now(); connection.error = ''; connection.nextRetry = 0;
+      renderConnection();
+      if (recovering) resyncAll();
     };
-    es.onerror = () => {
-      wasDown = true;
-      setConn('Reconnecting…', 'bad'); // EventSource auto-reconnects, unless the browser closed it
-    };
+    es.onerror = () => failed('Event stream lost (network or host unavailable)');
     es.onmessage = (m) => {
+      if (evRC !== es) return;
+      connection.lastContact = Date.now();
       let ev; try { ev = JSON.parse(m.data); } catch (_) { return; }
       handleRCEvent(ev);
     };
@@ -2876,6 +2935,7 @@
   // Everything a backgrounded or disconnected app can have missed.
   function resyncAll() {
     loadSessions(false);
+    if (tower.enabled) loadTower();
     loadInbox(); // pushes that arrived while backgrounded (no SSE then)
     if (state.openSheetId) {
       reconcileTranscriptTail(state.openSheetId);
@@ -3416,7 +3476,7 @@
   // Boot
   // ---------------------------------------------------------------------------
   let retryTimer = null;
-  async function loadSessions(initial) {
+  async function loadSessions(initial, userInitiated = false) {
     try {
       const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
       const list = (r && r.sessions) || [];
@@ -3432,11 +3492,13 @@
       });
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       if (!state.showAll) saveDeckCache(list);
-      setConn('Live', 'live');
+      if (evRC && evRC.readyState === 1) connection.offline = false;
+      renderConnection();
       renderQuota();
       refreshSheetPulse();
     } catch (e) {
-      setConn('Can\'t reach server: ' + e.message, 'bad');
+      connection.error = e.message; connection.offline = true; renderConnection();
+      if (userInitiated) throw e;
       // Right after a resume the network may not be back yet: one quick retry
       // instead of showing last night's rows for another refresh interval.
       if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; if (document.visibilityState === 'visible') loadSessions(false); }, 3000);
@@ -3525,7 +3587,8 @@
       if (!c || !Array.isArray(c.sessions) || (c.profile || '') !== (CURRENT_PROFILE || '')) return false;
       c.sessions.forEach((s) => state.sessions.set(s.id, s));
       state.view = c.view || {};
-      setConn('Updating…', 'bad');
+      connection.lastContact = c.at || 0;
+      renderConnection();
       renderDeck();
       return true;
     } catch (_) { return false; }
@@ -3557,8 +3620,9 @@
     showTab('deck');
     registerSW();
     wirePresence();
-    startStreams();
     paintCachedDeck();
+    startStreams();
+    setInterval(renderConnection, 1000);
     // Everything below runs concurrently: the slow session list no longer gates
     // the profile list, the inbox or the tower tab.
     const profile0 = CURRENT_PROFILE;
@@ -3593,6 +3657,8 @@
       const away = hiddenAt ? Date.now() - hiddenAt : 0;
       hiddenAt = 0;
       if (!evRC || evRC.readyState === 2 || away > 30000) startStreams();
+      applyViewport();
+      setTimeout(applyViewport, 300);
       resyncAll();
       checkVersion();
     }

@@ -82,3 +82,10 @@ test('doc links cannot inject attributes or markup', () => {
   assert.ok(!out.includes('<img'), out);
   assert.ok(!/data-path="[^"]*"[^>]*onmouseover/.test(out), out);
 });
+
+test('bold can surround inline code and colon without interpreting code contents', () => {
+  const md = require('./markdown.js');
+  assert.match(md.render('**`ga-devtraces2`:** finished'), /<b><code>ga-devtraces2<\/code>:<\/b> finished/);
+  assert.match(md.render('`**literal**`'), /<code>\*\*literal\*\*<\/code>/);
+  assert.ok(!md.render('**`<script>`:**').includes('<script>'));
+});

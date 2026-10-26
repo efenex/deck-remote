@@ -20,7 +20,7 @@ function loadApi(token) {
     'function withProfileParam(p) { return p; } function forgetToken() {}' +
     src.slice(start, authEnd) + src.slice(apiStart, apiEnd) + 'return api;';
   const fetch = async (url, opts) => { calls.push({ url, opts }); return { status: 202, ok: true, text: async () => '{}' }; };
-  return { api: new Function('fetch', body)(fetch), calls };
+  return { api: new Function('fetch', 'DeckNetwork', 'connection', 'renderConnection', body)(fetch, require('./network.js'), {}, () => {}), calls };
 }
 
 test('api() sends Authorization: Bearer and keeps the token out of the URL', async () => {

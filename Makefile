@@ -15,4 +15,4 @@ test:
 # Browser end-to-end (run-bang phase 2 #7): system Chrome via playwright-core; `cd e2e && npm install` once.
 .PHONY: e2e
 e2e:
-	cd e2e && node --test runbang.e2e.mjs pair.e2e.mjs
+	cd e2e && node --test runbang.e2e.mjs pair.e2e.mjs offline.e2e.mjs

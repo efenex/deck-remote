@@ -835,6 +835,7 @@ html[data-turns=block] .ts{margin-left:4px}
   <!-- server/web version drift (version.js): non-blocking, dismissible -->
   <div class="vbanner" id="versionBanner" role="status" hidden><span id="versionText"></span><button type="button" id="versionClose" aria-label="Dismiss">×</button></div>
 
+      <div class="conn" id="connStrip" role="status" hidden><span class="led"></span><span id="connText">Connecting…</span></div>
   <!-- DECK tab -->
   <div class="screen" id="screenDeck">
     <div class="appbar">
@@ -846,7 +847,7 @@ html[data-turns=block] .ts{margin-left:4px}
         </div>
       </div>
       <!-- Connection detail: only shown while not live. -->
-      <div class="conn" id="connStrip" hidden><span class="led"></span><span id="connText">Connecting…</span></div>
+
       <!-- Account quota (pulse.js): week + 5h, always visible with the sticky appbar. -->
       <div class="quota" id="quotaStrip" hidden></div>
     </div>
@@ -988,6 +989,7 @@ html[data-turns=block] .ts{margin-left:4px}
 <script src="/thread.js?v=37"></script>
 <script src="/markdown.js?v=37"></script>
 <script src="/gestures.js?v=37"></script>
-<script src="/app.js?v=37"></script>
+<script src="/network.js?v=41"></script>
+<script src="/app.js?v=41"></script>
 </body>
 </html>

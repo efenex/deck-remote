@@ -43,8 +43,8 @@ function makeEnv(notifs, seenAt, routes) {
     sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     navigator: { serviceWorker: { addEventListener() {}, register: async () => ({}), ready: new Promise(() => {}) }, clipboard: {} }, location: { href: 'http://x/', origin: 'http://x', search: '', hash: '', pathname: '/' },
     history: { replaceState() {} }, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
-    URL, URLSearchParams, EventSource: function () { this.close = () => {}; }, WebSocket: function () { this.close = () => {}; },
-    DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), Notification: { permission: 'default' },
+    URL, URLSearchParams, EventSource: function () { this.readyState = 1; this.close = () => { this.readyState = 2; }; Promise.resolve().then(() => { if (this.readyState === 1 && this.onopen) this.onopen(); }); }, WebSocket: function () { this.close = () => {}; },
+    DeckNetwork: require('./network.js'), DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), Notification: { permission: 'default' },
     confirm: () => true, requestAnimationFrame: (f) => f(), AbortController, Date, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Error,
   };
   ctx.window = Object.assign(win, ctx);
@@ -200,4 +200,50 @@ test('A refused doc shows a Not readable toast and leaves the viewer closed', as
   assert.ok(!env.els.has('#docTitle'), 'the viewer was never populated');
   const toastEl = env.ctx.document.body.children.find((c) => /Not readable/.test(c.innerHTML));
   assert.ok(toastEl && toastEl.innerHTML.includes('path is outside the allowed roots'), 'toast carries the server refusal');
+});
+
+test('all tab refresh buttons stop spinning and toast when the host stops responding', async () => {
+  let offline = false;
+  const env = makeEnv([], null, async (u) => {
+    if (offline) return new Promise(() => {});
+    if (u.includes('/tower/whoami')) return {};
+    if (u.includes('/tower/model')) return { model: { generated_at: '2026-10-25T15:02:00Z', header: 'TOWER', sections: [] } };
+    if (u.includes('/tower')) return { enabled: true, overview: { generated_at: '2026-10-25T15:02:00Z', counts: {} } };
+  });
+  env.ctx.setTimeout = (fn, delay) => delay >= 1000 ? 0 : setTimeout(fn, delay);
+  env.ctx.EventSource = function () { this.readyState = 0; this.close = () => { this.readyState = 2; }; Promise.resolve().then(() => { if (!offline && this.readyState !== 2) { this.readyState = 1; this.onopen(); } }); };
+  const N = require('./network.js');
+  env.ctx.DeckNetwork = { ...N, request: (f, u, o, read) => N.request(f, u, o, read, 20) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx);
+  await new Promise(r => setTimeout(r, 50));
+  offline = true;
+  for (const [sel, label] of [['#goRefresh', 'Deck'], ['#inboxRefresh', 'Inbox'], ['#towerRefresh', 'Tower']]) {
+    const pending = env.listeners.get(sel).click();
+    assert.equal(env.els.get(sel).disabled, true);
+    await pending;
+    assert.equal(env.els.get(sel).disabled, false);
+    assert.ok(env.ctx.document.body.children.some(c => c.innerHTML.includes(label + ' refresh failed') && c.innerHTML.includes('Host did not respond')));
+  }
+  assert.match(env.els.get('#towerAsOf').textContent, /2026-10-25T15:02:00Z.*OFFLINE \/ STALE/);
+});
+
+test('event stream retries have an owned deadline and growing, visible attempts', async () => {
+  const env = makeEnv([]);
+  const sockets = [], timers = new Map(); let seq = 0;
+  env.ctx.EventSource = function () { this.close = () => {}; sockets.push(this); };
+  env.ctx.setTimeout = (fn, delay) => { timers.set(++seq, { fn, delay }); return seq; };
+  env.ctx.clearTimeout = (id) => timers.delete(id);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx);
+  await new Promise(r => setImmediate(r));
+  for (let i = 1; i <= 3; i++) {
+    sockets.at(-1).onerror();
+    assert.match(env.els.get('#connText').textContent, new RegExp('attempt ' + i + '.*next retry in'));
+    const retry = [...timers.entries()].find(([, t]) => t.delay === Math.min(30000, 1000 * 2 ** i));
+    assert.ok(retry, 'retry scheduled');
+    timers.delete(retry[0]); retry[1].fn();
+  }
+  assert.match(env.els.get('#connText').textContent, /Host may be asleep/);
+  sockets.at(-1).onopen();
+  assert.equal(env.els.get('#connStrip').hidden, true);
+  assert.ok(![...timers.values()].some(t => t.delay === 12000), 'connection deadline cleared on recovery');
 });

@@ -39,14 +39,15 @@
   // span that is exactly a document path becomes a link), then **bold** and doc
   // paths in the text between code spans.
   function inline(line) {
-    return line.split('`').map((part, i, all) => {
-      if (i % 2 === 1 && i < all.length - 1) {
-        const m = DOC_WHOLE.exec(part);
-        const code = '<code>' + esc(part) + '</code>';
+    return line.split(/(`[^`]*`|\*\*[^*]+\*\*)/g).map((part) => {
+      if (part.startsWith('`') && part.endsWith('`') && part.length > 1) {
+        const raw = part.slice(1, -1);
+        const m = DOC_WHOLE.exec(raw);
+        const code = '<code>' + esc(raw) + '</code>';
         return m && docOK(m[1]) ? docLink(m[1], m[2], code) : code;
       }
-      const text = i % 2 === 1 ? '`' + part : part; // unmatched trailing backtick
-      return linkDocs(esc(text).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>'));
+      if (part.startsWith('**') && part.endsWith('**') && part.length > 4) return '<b>' + inline(part.slice(2, -2)) + '</b>';
+      return linkDocs(esc(part));
     }).join('');
   }
 

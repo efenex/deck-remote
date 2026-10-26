@@ -93,6 +93,8 @@
   var wsReconnectEnabled = true;
   var manuallyClosed = false;
   var ticketPending = false;
+  var lastContact = 0, lastError = "", nextRetry = 0;
+  var socketDeadline = null;
   // Give up after a few auto-retries and offer a manual Reconnect, so a dead
   // backend doesn't leave us spinning forever.
   var MAX_RECONNECT_ATTEMPTS = 6;
@@ -180,12 +182,13 @@
   }
 
   function fetchTicket() {
-    return fetch('/api/rc/ws/ticket', {
+    return DeckNetwork.request(fetch, '/api/rc/ws/ticket', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ session: sessionId })
-    }).then(function (r) {
+    }, function (r) {
+      lastContact = Date.now();
       return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j || {} }; });
     });
   }
@@ -196,9 +199,10 @@
   }
 
   function giveUpReconnect() {
+    nextRetry = 0;
     setConn('bad', 'disconnected');
     showNotice('Disconnected',
-      'Could not reach the terminal after several attempts.',
+      'Host may be asleep. Last error: ' + lastError + '. Last contact: ' + (lastContact ? new Date(lastContact).toISOString() : 'never') + '.',
       '<span class="btn" id="reconnectBtn">Reconnect</span>' +
       '<a class="btn ghost" href="/">Back to deck</a>');
     wireReconnect();
@@ -209,14 +213,21 @@
     if (reconnectTimer || ws) return;
     if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) { giveUpReconnect(); return; }
     reconnectAttempt += 1;
-    setConn('', 'reconnecting… (' + reconnectAttempt + '/' + MAX_RECONNECT_ATTEMPTS + ')');
+    nextRetry = Date.now() + reconnectDelay(reconnectAttempt);
+    renderReconnect();
     reconnectTimer = setTimeout(function () {
       reconnectTimer = null;
       connect();
     }, reconnectDelay(reconnectAttempt));
   }
 
+  function renderReconnect() {
+    if (reconnectTimer || nextRetry) setConn('bad', DeckNetwork.feedback({ attempt: reconnectAttempt, failures: reconnectAttempt, nextRetry: nextRetry, lastContact: lastContact, error: lastError }));
+  }
+  setInterval(renderReconnect, 1000);
+
   function connect() {
+    nextRetry = 0;
     if (ws) { try { ws.close(); } catch (_e) {} ws = null; }
     if (ticketPending) return;
     terminalAttached = false;
@@ -237,11 +248,13 @@
         wireReconnect();
         return;
       }
-      setConn('bad', 'connection error');
+      lastError = res.body.error || ('HTTP ' + res.status);
+      setConn('bad', lastError);
       scheduleReconnect();
-    }, function () {
+    }, function (error) {
       ticketPending = false;
-      setConn('bad', 'connection error');
+      lastError = error.message || 'Network request failed';
+      setConn('bad', lastError);
       scheduleReconnect();
     });
   }
@@ -251,9 +264,16 @@
     ws = new WebSocket(wsURL(ticket));
     ws.binaryType = 'arraybuffer';
     var sock = ws;
+    socketDeadline = setTimeout(function () {
+      if (ws !== sock) return;
+      lastError = 'Terminal connection timed out after 12 s';
+      ws = null; sock.close(); scheduleReconnect();
+    }, 12000);
 
     sock.onopen = function () {
       if (ws !== sock) return;
+      clearTimeout(socketDeadline); socketDeadline = null;
+      lastContact = Date.now(); lastError = ''; nextRetry = 0;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       reconnectAttempt = 0;
       setConn('live', 'connected');
@@ -262,6 +282,7 @@
 
     sock.onmessage = function (event) {
       if (ws !== sock) return;
+      lastContact = Date.now();
       // String frame => control JSON (status / error). Never write these into
       // the terminal — mirror TerminalPanel.js onmessage exactly.
       if (typeof event.data === 'string') {
@@ -309,11 +330,14 @@
 
     sock.onerror = function () {
       if (ws !== sock) return;
-      setConn('bad', 'connection error');
+      lastError = 'WebSocket network error';
+      setConn('bad', lastError);
     };
 
-    sock.onclose = function () {
+    sock.onclose = function (event) {
       if (ws !== sock) return;
+      clearTimeout(socketDeadline); socketDeadline = null;
+      lastError = lastError || ('WebSocket closed' + (event ? ' (' + event.code + ')' : ''));
       ws = null;
       terminalAttached = false;
       if (manuallyClosed) return;
