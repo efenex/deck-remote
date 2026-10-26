@@ -41,6 +41,8 @@ func (a codexAdapter) Snapshot(ctx context.Context, se sessionInfo, pane string,
 			snap.DegradedReason = err.Error()
 		}
 		snap.State = "idle"
+		snap.Activity = activityInfo{}
+		snap.Attention = attentionInfo{}
 		return snap, nil
 	}
 	if paneOK {
@@ -59,6 +61,11 @@ func (a codexAdapter) Snapshot(ctx context.Context, se sessionInfo, pane string,
 
 func (a codexAdapter) History(ctx context.Context, se sessionInfo) ([]histMsg, error) {
 	_, snap, err := a.resolution(ctx, se)
+	if snap.DegradedReason != "" {
+		// Unknown versions may still contain recognized message records. Keep those
+		// readable and explain why controls are disabled, even for an empty rollout.
+		return append(snap.Messages, histMsg{Role: "commentary", Content: snap.DegradedReason}), nil
+	}
 	if err != nil {
 		return nil, err
 	}

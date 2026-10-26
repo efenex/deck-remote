@@ -32,20 +32,22 @@ type codexRolloutStore struct {
 }
 
 type codexParseState struct {
-	paths       []string
-	offsets     map[string]int64
-	tails       map[string][]byte
-	checkpoints map[string][]byte
-	snapshot    harnessSnapshot
-	working     bool
-	state       string
-	turnID      string
-	lastComment string
-	toolCalls   map[string]codexToolCall
-	attention   *attentionInfo
-	seq         int64
-	version     string
-	supported   bool
+	paths          []string
+	offsets        map[string]int64
+	tails          map[string][]byte
+	checkpoints    map[string][]byte
+	snapshot       harnessSnapshot
+	working        bool
+	state          string
+	turnID         string
+	lastComment    string
+	toolCalls      map[string]codexToolCall
+	attention      *attentionInfo
+	seq            int64
+	version        string
+	supported      bool
+	messageIDs     map[string]bool
+	messageMirrors map[string]map[string]int
 }
 
 type codexToolCall struct {
@@ -66,12 +68,14 @@ func newCodexRolloutStore() *codexRolloutStore {
 
 func newCodexParseState(paths []string) *codexParseState {
 	return &codexParseState{
-		paths:       append([]string(nil), paths...),
-		offsets:     map[string]int64{},
-		tails:       map[string][]byte{},
-		checkpoints: map[string][]byte{},
-		state:       "idle",
-		toolCalls:   map[string]codexToolCall{},
+		paths:          append([]string(nil), paths...),
+		offsets:        map[string]int64{},
+		tails:          map[string][]byte{},
+		checkpoints:    map[string][]byte{},
+		state:          "idle",
+		toolCalls:      map[string]codexToolCall{},
+		messageIDs:     map[string]bool{},
+		messageMirrors: map[string]map[string]int{},
 	}
 }
 
@@ -213,16 +217,18 @@ func (st *codexParseState) apply(env codexEnvelope) {
 	case "event_msg":
 		st.applyEvent(env)
 	case "response_item":
-		st.applyResponseItem(env.Payload)
+		st.applyResponseItem(env)
 	}
 }
 
 func (st *codexParseState) applyEvent(env codexEnvelope) {
 	var p struct {
-		Type    string `json:"type"`
-		TurnID  string `json:"turn_id"`
-		Message string `json:"message"`
-		Phase   string `json:"phase"`
+		Type             string           `json:"type"`
+		TurnID           string           `json:"turn_id"`
+		Message          string           `json:"message"`
+		Phase            string           `json:"phase"`
+		Item             codexMessageItem `json:"item"`
+		LastAgentMessage string           `json:"last_agent_message"`
 		// user_message attachments (empty on every local rollout so far).
 		Images      []json.RawMessage `json:"images"`
 		LocalImages []json.RawMessage `json:"local_images"`
@@ -237,6 +243,9 @@ func (st *codexParseState) applyEvent(env codexEnvelope) {
 		st.toolCalls = map[string]codexToolCall{}
 		st.attention = nil
 	case "task_complete", "turn_complete":
+		if p.LastAgentMessage != "" {
+			st.addMessage(histMsg{Role: "reply", Content: p.LastAgentMessage, Ts: tsUnix(env.Timestamp), TurnID: firstNonempty(p.TurnID, st.turnID)}, "task_complete")
+		}
 		st.working, st.state = false, "completed"
 		st.toolCalls = map[string]codexToolCall{}
 		st.attention = nil
@@ -245,37 +254,40 @@ func (st *codexParseState) applyEvent(env codexEnvelope) {
 		st.toolCalls = map[string]codexToolCall{}
 		st.attention = nil
 	case "user_message":
-		images := len(p.Images) + len(p.LocalImages)
-		if text := strings.TrimSpace(p.Message); text != "" || images > 0 {
-			st.snapshot.Messages = append(st.snapshot.Messages, histMsg{
-				Role: "user", Content: text, Ts: tsUnix(env.Timestamp),
-				TurnID: st.turnID, Seq: st.seq, Images: images,
-			})
-		}
+		st.addMessage(histMsg{Role: "user", Content: p.Message, Ts: tsUnix(env.Timestamp), TurnID: st.turnID, Images: len(p.Images) + len(p.LocalImages)}, "event_msg")
 	case "agent_message":
-		text := strings.TrimSpace(p.Message)
-		if text == "" {
-			return
+		role := codexMessageRole("assistant", p.Phase)
+		if role != "" {
+			st.addMessage(histMsg{Role: role, Content: p.Message, Ts: tsUnix(env.Timestamp), TurnID: st.turnID}, "event_msg")
 		}
-		switch p.Phase {
-		case "final_answer":
-			st.snapshot.Messages = append(st.snapshot.Messages, histMsg{
-				Role: "reply", Content: text, Ts: tsUnix(env.Timestamp),
-				TurnID: st.turnID, Seq: st.seq,
-			})
-			st.snapshot.LastReply = text
-			st.snapshot.LastActivity = tsUnix(env.Timestamp)
-		case "commentary":
-			st.snapshot.Messages = append(st.snapshot.Messages, histMsg{
-				Role: "commentary", Content: text, Ts: tsUnix(env.Timestamp),
-				TurnID: st.turnID, Seq: st.seq,
-			})
-			st.lastComment = preview(text, 180)
+	case "item_completed":
+		switch p.Item.Type {
+		case "UserMessage":
+			p.Item.Role = "user"
+		case "AgentMessage":
+			p.Item.Role = "assistant"
+		default:
+			return // reasoning, token usage and tool telemetry are not conversation text
 		}
+		st.addItemMessage(p.Item, env.Timestamp, firstNonempty(p.TurnID, st.turnID), "item_completed")
 	}
+
 }
 
-func (st *codexParseState) applyResponseItem(raw json.RawMessage) {
+func (st *codexParseState) applyResponseItem(env codexEnvelope) {
+	raw := env.Payload
+	var msg codexMessageItem
+	if json.Unmarshal(raw, &msg) == nil {
+		if msg.Type == "message" {
+			st.addItemMessage(msg, env.Timestamp, firstNonempty(msg.Metadata.TurnID, st.turnID), "response_item")
+			return
+		}
+		if msg.Type == "agent_message" {
+			text, _ := codexContent(msg.Content, nil)
+			st.addMessage(histMsg{ID: msg.ID, Role: "peer", Content: text, Ts: tsUnix(env.Timestamp), TurnID: firstNonempty(msg.Metadata.TurnID, st.turnID), Origin: "peer:" + msg.Author, Sender: msg.Author}, "response_item")
+			return
+		}
+	}
 	var p struct {
 		Type      string          `json:"type"`
 		Name      string          `json:"name"`
@@ -336,6 +348,7 @@ func (st *codexParseState) project() {
 			st.snapshot.Activity.CurrentTool = latest.Name
 		}
 	}
+	st.snapshot.DegradedReason = ""
 	st.snapshot.Attention = attentionInfo{}
 	if st.attention != nil && st.working {
 		st.snapshot.Attention = *st.attention
@@ -344,16 +357,121 @@ func (st *codexParseState) project() {
 		if st.version == "" {
 			st.snapshot.DegradedReason = "Codex rollout metadata is incomplete"
 		} else {
-			st.snapshot.DegradedReason = "unsupported Codex rollout version " + st.version
+			st.snapshot.DegradedReason = "Unverified Codex rollout version " + st.version + "; showing recognized messages read-only. Update deck-remote for structured controls."
 		}
 	}
 }
 
-func codexVersionSupported(v string) bool {
-	// Codex preserves the original session_meta when a newer CLI resumes an
-	// older thread, so a live 0.144 process can keep appending compatible
-	// records to a rollout whose immutable header says 0.143.
-	return strings.HasPrefix(v, "0.143.") || strings.HasPrefix(v, "0.144.")
+// Stable patch releases in these explicitly validated minor families only. A
+// newer CLI may append modern records to a resumed 0.143/0.144 header, so record
+// parsing is shape-based; the version gate controls interactive capabilities.
+var codexKnownVersionRE = regexp.MustCompile(`^0\.(143|144|164)\.(0|[1-9][0-9]*)$`)
+
+func codexVersionSupported(v string) bool { return codexKnownVersionRE.MatchString(v) }
+
+type codexContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+type codexMessageItem struct {
+	Type     string             `json:"type"`
+	ID       string             `json:"id"`
+	Role     string             `json:"role"`
+	Phase    string             `json:"phase"`
+	Author   string             `json:"author"`
+	Content  []codexContentPart `json:"content"`
+	Metadata struct {
+		TurnID string   `json:"turn_id"`
+		Kinds  []string `json:"content_item_kinds"`
+	} `json:"internal_chat_message_metadata_passthrough"`
+}
+
+func codexMessageRole(role, phase string) string {
+	if role == "user" {
+		return "user"
+	}
+	if role != "assistant" {
+		return ""
+	}
+	switch phase {
+	case "final_answer":
+		return "reply"
+	case "commentary":
+		return "commentary"
+	}
+	return "" // never mistake unknown phases or developer instructions for a reply
+}
+
+func codexContent(parts []codexContentPart, kinds []string) (string, int) {
+	var text []string
+	images := 0
+	for i, p := range parts {
+		// 0.164 user messages can mix operator text with AGENTS/environment input.
+		if len(kinds) > 0 && (i >= len(kinds) || kinds[i] != "user.text") {
+			continue
+		}
+		switch p.Type {
+		case "text", "Text", "input_text", "output_text":
+			text = append(text, p.Text)
+		case "image", "Image", "input_image":
+			images++
+		}
+	}
+	return strings.Join(text, "\n"), images
+}
+
+func (st *codexParseState) addItemMessage(p codexMessageItem, timestamp, turnID, source string) {
+	role := codexMessageRole(p.Role, p.Phase)
+	if role == "" {
+		return
+	}
+	var kinds []string
+	if p.Role == "user" {
+		kinds = p.Metadata.Kinds
+	}
+	text, images := codexContent(p.Content, kinds)
+	st.addMessage(histMsg{ID: p.ID, Role: role, Content: text, Images: images, Ts: tsUnix(timestamp), TurnID: turnID}, source)
+}
+
+// The same message appears in response_item and item_completed (and older
+// event_msg). IDs deduplicate native mirrors; per-source occurrence counts also
+// pair user mirrors with different IDs without collapsing repeated user text.
+func (st *codexParseState) addMessage(m histMsg, source string) {
+	m.Content = strings.TrimSpace(m.Content)
+	if m.Content == "" && m.Images == 0 {
+		return
+	}
+	if m.ID != "" {
+		if st.messageIDs[m.ID] {
+			return
+		}
+		st.messageIDs[m.ID] = true
+	}
+	key := m.TurnID + "\x00" + m.Role + "\x00" + fmt.Sprint(m.Images) + "\x00" + m.Content
+	counts := st.messageMirrors[key]
+	if counts == nil {
+		counts = map[string]int{}
+		st.messageMirrors[key] = counts
+	}
+	max := 0
+	for _, count := range counts {
+		if count > max {
+			max = count
+		}
+	}
+	counts[source]++
+	if counts[source] <= max {
+		return
+	}
+	m.Seq = st.seq
+	st.snapshot.Messages = append(st.snapshot.Messages, m)
+	if m.Role == "reply" {
+		st.snapshot.LastReply = m.Content
+		st.snapshot.LastActivity = m.Ts
+	}
+	if m.Role == "commentary" {
+		st.lastComment = preview(m.Content, 180)
+	}
 }
 
 func parseCodexQuestionCall(id string, raw []byte) (attentionInfo, bool) {

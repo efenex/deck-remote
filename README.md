@@ -13,8 +13,10 @@ It is **no-fork and CLI-first**: deck-remote shells the stock `agent-deck` CLI
 agent-deck and no long-running agent-deck web server. You stay on the
 auto-updating stock binary.
 
-> Status: early v0. Claude and Codex 0.144 are structured harnesses. Unknown
-> Codex rollout formats and other/custom harnesses degrade to terminal-only.
+> Status: early v0. Claude and stable Codex 0.143, 0.144 and 0.164 patch releases
+> are structured harnesses. Unverified Codex versions show recognized history read-only
+> with an explanation; structured controls remain disabled. Other/custom harnesses
+> use the terminal. See [rollout compatibility](docs/design/codex-0164.md).
 
 ## Why
 Driving a coding agent from your phone usually means either a cloud relay (not
