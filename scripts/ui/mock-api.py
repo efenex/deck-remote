@@ -13,7 +13,7 @@ QUOTA = [dict(groups=["ligna / services", "deck-remote"], fiveHour=dict(pct=86, 
 S = [
  dict(id="s1", title="ligna-fleet-dispatcher-refactor", path="~/work/ligna/services/dispatcher", group="ligna / services", tool="claude",
       lastReply="Done — 14 files changed, all tests green. PR #482 opened against main with the migration notes.", working=False, lastActivity=now-600,
-      needsAttention=True, capabilities=dict(ask=True), ctx=dict(pct=91, tokens=910000, window=1000000, model="Opus 5.5", asOf=now-30)),
+      needsAttention=True, capabilities=dict(ask=True, images=True), ctx=dict(pct=91, tokens=910000, window=1000000, model="Opus 5.5", asOf=now-30)),
  dict(id="s2", title="codex-rollout-parser", path="~/work/deck-remote", group="deck-remote", tool="codex",
       lastReply="", working=True, activity="Reticulating… (4m 12s · ↓ 18.2k tokens · esc to interrupt)", currentTool="Bash(go test ./... -run TestCodexRollout -count=1 -v 2>&1 | tail -80)",
       lastActivity=now-5, capabilities=dict(ask=True, steer=True, interrupt=True)),
@@ -26,7 +26,7 @@ S = [
  dict(id="s5", title="docs-sweep", path="~/work/ligna/docs", group="ligna / docs", tool="claude",
       lastReply="Rewrote 6 pages; see the diff summary below.", working=False, lastActivity=now-86400*3, capabilities=dict(ask=True)),
  dict(id="s6", title="gemini-scratch", path="~/scratch/gemini", group="scratch", tool="gemini",
-      lastReply="", working=False, lastActivity=0, capabilities=dict(ask=False), degradedReason="Terminal-only harness — open terminal"),
+      lastReply="", working=False, lastActivity=0, capabilities=dict(ask=False, images=True), degradedReason="Terminal-only harness — open terminal"),
 ]
 HIST = {"s1": [dict(role="user", content="why does the dispatcher test flake under -race?", ts=now-1500),
                dict(role="reply", content=LONG, ts=now-1400),

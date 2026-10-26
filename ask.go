@@ -81,6 +81,14 @@ func (s *server) handleSlash(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) ask(w http.ResponseWriter, r *http.Request, slash bool) {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if slash {
+			httpError(w, http.StatusBadRequest, "photos cannot accompany slash commands")
+			return
+		}
+		s.askPhotos(w, r)
+		return
+	}
 	var req askRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body")

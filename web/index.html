@@ -474,6 +474,11 @@
   /* header check-for-approval button busy state */
   .sheet-check{border-radius:calc(12px*var(--round));flex:0 0 auto}
   .sheet-back{border-radius:calc(12px*var(--round));flex:0 0 auto;margin-right:4px;font-size:26px;line-height:1}
+  .photo-previews{display:flex;gap:8px;padding:8px;overflow-x:auto}
+  .photo-preview{position:relative;flex:0 0 64px;height:64px}
+  .photo-preview img{width:64px;height:64px;object-fit:cover;border-radius:8px}
+  .photo-preview button{position:absolute;top:0;right:0;min-width:28px;min-height:28px;border:0;border-radius:50%;background:var(--panel);color:var(--text)}
+  .photo-btn{min-height:40px;padding:0 7px;border:1px solid var(--border);border-radius:12px;background:transparent;color:var(--text);font-size:12px}
   .icon-btn.busy{opacity:.5}
   button.busy:not(.icon-btn)::before{content:"↻ ";display:inline-block;animation:spin .8s linear infinite}
   .appbar-actions{display:flex;align-items:center;gap:8px}
@@ -990,7 +995,8 @@ html[data-turns=block] .ts{margin-left:4px}
 <script src="/thread.js?v=37"></script>
 <script src="/markdown.js?v=37"></script>
 <script src="/gestures.js?v=37"></script>
+<script src="/photos.js?v=42"></script>
 <script src="/network.js?v=41"></script>
-<script src="/app.js?v=41"></script>
+<script src="/app.js?v=42"></script>
 </body>
 </html>

@@ -235,6 +235,7 @@ type server struct {
 
 	typedOnce sync.Once // probes `session send --help` once (askqueue.go typedSendFlags)
 	typedOK   bool
+	imageOK   bool
 }
 
 func newServer(cfg config, upstream *url.URL) *server {

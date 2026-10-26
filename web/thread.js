@@ -149,6 +149,7 @@
     // The transcript already proved delivery (promoteDelivered): agent-deck's
     // later, weaker verdict ("unconfirmed") must not take it back.
     if (e.status === 'delivered') return e;
+    if (ev.images) e.images = ev.images;
     e.status = ev.state;
     e.position = ev.position || 0;
     e.error = ev.error || '';
@@ -199,7 +200,7 @@
 
   // Only a send agent-deck says typed nothing may be resent: an "unconfirmed"
   // one can already be sitting in the composer.
-  function canRetry(e) { return e.status === 'failed' && e.retryable !== false; }
+  function canRetry(e) { return !e.images && e.status === 'failed' && e.retryable !== false; }
 
   // Live fields the server drops from a session row when they are falsy
   // (`omitempty`): a session that stopped working is simply sent without

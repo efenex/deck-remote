@@ -14,6 +14,7 @@ type sessionCapabilities struct {
 	Replies       bool              `json:"replies"`
 	Activity      bool              `json:"activity"`
 	Ask           bool              `json:"ask"`
+	Images        bool              `json:"images"`
 	Slash         bool              `json:"slash"`
 	Queue         bool              `json:"queue"`
 	Steer         bool              `json:"steer"`

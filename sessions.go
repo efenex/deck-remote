@@ -195,6 +195,7 @@ func (s *server) buildSessions(ctx context.Context, all bool) ([]byte, string, e
 				sessions[i].State = snap.State
 				sessions[i].DegradedReason = snap.DegradedReason
 			}
+			sessions[i].Capabilities.Images = photoHarness(sessions[i].Tool) && sessions[i].SSHHost == ""
 			attn, ok := s.attn.get(sessions[i].ID)
 			if !ok {
 				attn = snap.Attention

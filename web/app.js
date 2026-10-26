@@ -83,7 +83,9 @@
 
   async function api(method, path, body, raw = false) {
     const opts = { method, headers: authHeaders() };
-    if (body !== undefined) {
+    const multipart = typeof FormData !== 'undefined' && body instanceof FormData;
+    if (multipart) opts.body = body;
+    else if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
@@ -106,7 +108,7 @@
           throw e;
         }
         return data;
-      });
+      }, multipart ? 60000 : 12000);
     } catch (e) {
       if (!e.status && e.message !== 'unauthorized') {
         connection.error = e.message || 'Network request failed';
@@ -1899,10 +1901,27 @@
     ta.rows = 1;
     ta.placeholder = 'Message…';
     const structuredAsk = !s.capabilities || !!s.capabilities.ask;
-    if (!structuredAsk) {
+    const photoCapable = !!(s.capabilities && s.capabilities.images);
+    if (!structuredAsk && !photoCapable) {
       ta.disabled = true;
       ta.placeholder = s.degradedReason || 'Structured controls unavailable — open terminal';
     }
+    if (!structuredAsk && photoCapable) ta.placeholder = 'Add photos and an optional caption…';
+    const photos = { items: [], preparing: false, sending: false };
+    const photoButtons = [];
+    const preview = el('div', 'photo-previews');
+    preview.hidden = true;
+    function updateComposer() {
+      const busy = photos.preparing || photos.sending;
+      ta.readOnly = photos.sending;
+      slashBtn.disabled = ta.disabled || busy || !structuredAsk || photos.items.length > 0;
+      send.disabled = ta.disabled || busy || (!photos.items.length && (!structuredAsk || !ta.value.trim()));
+      photoButtons.forEach(b => { b.disabled = ta.disabled || busy; });
+      preview.querySelectorAll('button').forEach(b => { b.disabled = ta.disabled || busy; });
+      send.classList.toggle('busy', photos.sending);
+      send.setAttribute('aria-busy', String(photos.sending));
+    }
+    composer.updateSend = updateComposer;
     // One line by default, growing to ~40% of the visible viewport while
     // typing, then scrolling internally; back to one line when it loses focus
     // or is sent. The cap comes from visualViewport — the part not covered by
@@ -1916,8 +1935,8 @@
     };
     ta.addEventListener('input', () => {
       autosize();
-      send.disabled = !ta.value.trim();
-      updateSlashPop(s.id, ta);
+      updateComposer();
+      if (structuredAsk && !photos.items.length) updateSlashPop(s.id, ta); else hideSlashPop();
     });
     ta.addEventListener('focus', () => { if (ta.value) autosize(); });
     ta.addEventListener('blur', () => {
@@ -1933,9 +1952,18 @@
     ta.addEventListener('blur', () => setTimeout(() => hideSlashPop(), 120));
     const send = el('button', 'send-btn', '↑');
     send.disabled = true;
-    send.addEventListener('click', () => {
+    send.addEventListener('click', async () => {
+      if (ta.disabled || photos.preparing || photos.sending) return;
       const text = ta.value.trim();
-      if (!text) return;
+      if (photos.items.length) {
+        if (text.startsWith('/')) { toast('Photos not sent', 'Use a message, not a slash command, with photos.'); return; }
+        photos.sending = true; updateComposer();
+        try {
+          if (await sendPhotos(s.id, text, photos.items)) { photos.items = []; ta.value = ''; ta.style.height = ''; renderPhotos(); }
+        } finally { photos.sending = false; updateComposer(); }
+        return;
+      }
+      if (!structuredAsk || !text) return;
       ta.value = '';
       ta.style.height = '';
       send.disabled = true;
@@ -1949,14 +1977,14 @@
     const slashBtn = el('button', 'slash-btn', '/');
     slashBtn.type = 'button';
     slashBtn.title = 'Commands';
-    slashBtn.disabled = ta.disabled;
+    slashBtn.disabled = ta.disabled || !structuredAsk;
     slashBtn.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus
     slashBtn.addEventListener('click', () => {
       if (ta.disabled) return;
       if (ta.value[0] !== '/') ta.value = '/' + ta.value;
       ta.focus();
-      send.disabled = !ta.value.trim();
-      updateSlashPop(s.id, ta);
+      updateComposer();
+      if (structuredAsk && !photos.items.length) updateSlashPop(s.id, ta); else hideSlashPop();
     });
     // In-card control row (Claude-remote style): / commands on the left, send
     // at the right end. The dismiss-keyboard pill (visible only while the
@@ -1969,10 +1997,46 @@
     kbHide.addEventListener('click', () => ta.blur());
     const row = el('div', 'composer-row');
     row.appendChild(slashBtn);
+    function renderPhotos() {
+      preview.innerHTML = ''; preview.hidden = !photos.items.length;
+      photos.items.forEach((photo, index) => {
+        const item = el('div', 'photo-preview');
+        const img = el('img'); img.src = photo.preview; img.alt = photo.name;
+        const remove = el('button', '', '×'); remove.type = 'button';
+        remove.setAttribute('aria-label', 'Remove photo ' + (index + 1));
+        remove.addEventListener('click', () => { photos.items.splice(index, 1); renderPhotos(); updateComposer(); });
+        item.append(img, remove); preview.append(item);
+      });
+    }
+    if (photoCapable) {
+      for (const camera of [true, false]) {
+        const input = el('input'); input.type = 'file'; input.accept = 'image/*'; input.hidden = true;
+        input.id = camera ? 'photoCamera' : 'photoLibrary';
+        if (camera) input.setAttribute('capture', 'environment'); else input.multiple = true;
+        const button = el('button', 'photo-btn', camera ? 'Camera' : 'Photos'); button.type = 'button';
+        button.setAttribute('aria-label', camera ? 'Take a photo' : 'Attach photos');
+        button.addEventListener('click', () => input.click()); photoButtons.push(button);
+        input.addEventListener('change', async () => {
+          const selected = Array.from(input.files || []); input.value = '';
+          if (!selected.length || photos.preparing || photos.sending) return;
+          if (photos.items.length + selected.length > DeckPhotos.MAX_COUNT) { toast('Too many photos', 'Attach up to four photos.'); return; }
+          photos.preparing = true; button.classList.add('busy'); updateComposer();
+          try {
+            const prepared = [];
+            for (const file of selected) prepared.push(await DeckPhotos.prepare(file));
+            photos.items.push(...prepared); hideSlashPop(); renderPhotos();
+          } catch (e) { toast('Photo unavailable', e.message); }
+          finally { photos.preparing = false; button.classList.remove('busy'); updateComposer(); }
+        });
+        row.append(input, button);
+      }
+    }
     row.appendChild(kbHide);
     row.appendChild(send);
     composer.appendChild(ta);
+    composer.appendChild(preview);
     composer.appendChild(row);
+    updateComposer();
     composerWrap.appendChild(composer);
     sheet.appendChild(composerWrap);
 
@@ -2606,6 +2670,29 @@
     }
   }
 
+  async function sendPhotos(id, caption, photos) {
+    const text = caption || 'Please look at the attached photos.';
+    const bubble = { role: 'me', content: text, images: photos.length, ts: Date.now() / 1000, queued: true, status: 'sent', retryable: false };
+    ensureConvo(id).push(bubble); renderConvo(id);
+    const form = new FormData();
+    form.append('sessionId', id); form.append('profile', CURRENT_PROFILE); form.append('text', text);
+    photos.forEach((photo, i) => form.append('photos', photo.blob, 'photo-' + (i + 1) + '.jpg'));
+    try {
+      const r = await api('POST', '/api/rc/ask', form);
+      if (!r || !r.requestId || !r.sendId) throw new Error('No queue receipt returned');
+      bubble.requestId = r.requestId;
+      if (bubble.status === 'sent') { bubble.status = r.status || 'queued'; bubble.queued = true; }
+      toast('Photos queued', 'Delivery status appears below the message.');
+      renderConvo(id); return true;
+    } catch (e) {
+      const uncertain = !e.status || e.status >= 500;
+      bubble.queued = false; bubble.status = uncertain ? 'unconfirmed' : 'failed';
+      bubble.error = uncertain ? 'Delivery unconfirmed. Check the session before sending again.' : e.message;
+      toast(uncertain ? 'Photo delivery unconfirmed' : 'Photos not sent', bubble.error);
+      renderConvo(id); return false;
+    }
+  }
+
   // Re-send a message agent-deck reported failed (nothing was typed, so a
   // resend cannot double-deliver). The failed bubble is replaced by the new one.
   function retrySend(id, entry) {
@@ -2685,6 +2772,7 @@
       delete ta.dataset.lockDisabled;
     }
     if (slash) slash.disabled = ta.disabled;
+    if (ta.parentElement && ta.parentElement.updateSend) ta.parentElement.updateSend();
   }
 
   // "Bash command" / "git push origin main": the dialog's first two lines, as

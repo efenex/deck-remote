@@ -262,3 +262,8 @@ test('answer progress reads as steps', () => {
   assert.strictEqual(answerProgressLabel({ step: 'verifying', n: 4, total: 4 }), 'Verifying the answers…');
   assert.strictEqual(answerProgressLabel({ step: 'nope' }), '');
 });
+
+test('a failed photo bubble cannot retry as a text-only message', () => {
+  const thread = require('./thread.js');
+  assert.equal(thread.canRetry({ status: 'failed', retryable: true, images: 1 }), false);
+});

@@ -48,8 +48,14 @@ type queuedSend struct {
 // enqueueSend hands text to agent-deck's durable queue and returns its record.
 // A failure here means nothing was typed (agent-deck rejected the send at
 // once, e.g. target not running), so it is safe to retry.
-func (s *server) enqueueSend(ctx context.Context, id, text string) (queuedSend, error) {
+func (s *server) enqueueSend(ctx context.Context, id, text string, images ...string) (queuedSend, error) {
 	flags := append([]string{"--queue"}, s.typedSendFlags(ctx)...)
+	if len(images) > 0 && !s.imageOK {
+		return queuedSend{}, fmt.Errorf("agent-deck lacks session send --image")
+	}
+	for _, path := range images {
+		flags = append(flags, "--image", path)
+	}
 	out, execErr := s.adeckIn(ctx, []byte(text), append(sendArgs(id, flags...), "--json")...)
 	var rec queuedSend
 	decErr := json.NewDecoder(bytes.NewReader(out)).Decode(&rec)
@@ -84,6 +90,7 @@ func (s *server) typedSendFlags(ctx context.Context) []string {
 		// Read the help even on a non-zero exit (flag.ContinueOnError).
 		out, _ := s.adeckIn(pctx, nil, "session", "send", "--help")
 		s.typedOK = strings.Contains(string(out), "-transport")
+		s.imageOK = strings.Contains(string(out), "-image")
 		log.Printf("send: agent-deck session send --transport supported=%v", s.typedOK)
 	})
 	if s.typedOK {
@@ -144,6 +151,7 @@ type trackedSend struct {
 	SessionID string `json:"sessionId"`
 	SendID    string `json:"sendId"`
 	Profile   string `json:"profile,omitempty"`
+	Images    int    `json:"images,omitempty"`
 	Created   int64  `json:"created"`
 
 	state string // last observed ui state (not persisted)
@@ -262,14 +270,14 @@ func (s *server) observeSend(it *trackedSend, rec queuedSend) {
 	}
 	ev := map[string]any{
 		"type": "ask-state", "state": st.State, "requestId": it.RequestID,
-		"sessionId": it.SessionID, "sendId": it.SendID, "ts": time.Now().Unix(),
+		"sessionId": it.SessionID, "sendId": it.SendID, "ts": time.Now().Unix(), "images": it.Images,
 	}
 	if pos > 0 {
 		ev["position"] = pos
 	}
 	if st.State == "failed" {
 		ev["error"] = failReason(rec.Reason)
-		ev["retryable"] = st.Retryable
+		ev["retryable"] = st.Retryable && it.Images == 0
 	}
 	log.Printf("ask: send %s req=%s session=%s -> %s pos=%d %s", it.SendID, it.RequestID, it.SessionID, st.State, pos, rec.Reason)
 	s.hub.publish(ev)

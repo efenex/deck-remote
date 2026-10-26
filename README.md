@@ -66,6 +66,10 @@ and compare `match`.
 - **Ask → reply (async)** — send a prompt; the reply streams back over SSE when
   the turn finishes. Busy Codex sessions queue with `Tab` by default; choose
   **Steer current** to inject with `Enter`.
+- **Photo attachments** — Camera or Photos in local Claude/Gemini composers;
+  preview/remove up to four photos, add an optional caption, then send through
+  agent-deck’s durable `--image` queue. Running Codex sessions do not support images.
+  See [limits and delivery behavior](docs/design/phone-photos.md).
 - **Slash commands** — `/clear`, `/compact`, `/context`, … sent via the CLI's
   slash-registration-gated path; shown as a "sent" confirmation (no phantom reply).
 - **Guarded attention** — approval controls appear only when deck-remote actually
