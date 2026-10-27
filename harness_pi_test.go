@@ -338,3 +338,58 @@ func TestPiLargeTranscriptStillYieldsActivityAndAsk(t *testing.T) {
 		t.Fatalf("torn line not completed: %+v", snap3.Messages)
 	}
 }
+
+// TestPiPaneProgressKeyPinsCurrentHeuristic pins what counts as visible
+// progress today (finding #5, unverified against a real pi pane): only the
+// output above the editor's top border is hashed, so a silent tool call that
+// redraws nothing there reads as a frozen turn, while the spinner in the border
+// and the footer are ignored. If pi is found to redraw elsewhere during silent
+// tool calls, change this test together with the heuristic.
+func TestPiPaneProgressKeyPinsCurrentHeuristic(t *testing.T) {
+	pane := readFixture(t, "pane-working.txt")
+	lines := piPaneLines(pane)
+	top, bottom, ok := piEditorBorders(lines)
+	if !ok || !piPaneWorking(pane) {
+		t.Fatal("fixture should be a working pane")
+	}
+	key := piPaneProgressKey(pane)
+	if key == "" {
+		t.Fatal("empty key for a pane with an editor")
+	}
+	join := func(l []string) string { return strings.Join(l, "\n") }
+
+	spin := append([]string(nil), lines...)
+	spin[top] = strings.Replace(spin[top], "Working", "Working.", 1)
+	if piPaneProgressKey(join(spin)) != key {
+		t.Fatal("the border spinner must not count as progress")
+	}
+	if bottom+1 < len(lines) {
+		foot := append([]string(nil), lines...)
+		foot[len(foot)-1] += " 99%"
+		if piPaneProgressKey(join(foot)) != key {
+			t.Fatal("the footer must not count as progress")
+		}
+	}
+	if top > 0 {
+		out := append([]string(nil), lines...)
+		out[top-1] += " more output"
+		if piPaneProgressKey(join(out)) == key {
+			t.Fatal("new output above the editor must count as progress")
+		}
+	}
+
+	// Unchanged key while working: Stalled at stallThreshold polls, not before.
+	defer func(old int) { stallThreshold = old }(stallThreshold)
+	for _, thr := range []int{2, 4} {
+		stallThreshold = thr
+		var st activityState
+		now := time.Unix(1_800_000_000, 0)
+		for poll := 1; poll <= thr; poll++ {
+			now = now.Add(watchInterval)
+			st = stepStall(st, activityInfo{Working: true, Activity: "Working…", stallKeySet: true, stallKey: key}, now)
+			if want := poll >= thr; st.Stalled != want {
+				t.Fatalf("threshold %d poll %d: Stalled = %v, want %v", thr, poll, st.Stalled, want)
+			}
+		}
+	}
+}

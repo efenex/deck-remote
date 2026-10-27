@@ -35,7 +35,8 @@ func newActivityCache() *activityCache {
 // stallThreshold is the number of consecutive unchanged polls (while working)
 // before we flag the spinner as stalled. With a 6s watch interval, >=2 means a
 // spinner frozen for ~12s+ is surfaced as "stalled" rather than "live working".
-const stallThreshold = 2
+// A var so --stall-polls / DECK_REMOTE_STALL_POLLS can tune it (loadConfig).
+var stallThreshold = 2
 
 // stepStall is the PURE stall-detection state transition: given the previous
 // cached state and a freshly parsed activity, it returns the next state with
