@@ -81,9 +81,9 @@ func TestStallShouldNotify(t *testing.T) {
 		{"pre-existing stall on first sight is baselined", true, true, false, 5 * time.Minute, false, true},
 		{"already notified does not re-push", true, false, true, 5 * time.Minute, false, true},
 		{"short freeze does not push and does not latch", true, false, false, 30 * time.Second, false, false},
-		{"just under threshold stays quiet", true, false, false, stallNotifyAfter - time.Second, false, false},
-		{"at threshold pushes", true, false, false, stallNotifyAfter, true, true},
-		{"long freeze pushes", true, false, false, 5 * time.Minute, true, true},
+		{"4m59s stays quiet", true, false, false, 4*time.Minute + 59*time.Second, false, false},
+		{"5m pushes", true, false, false, 5 * time.Minute, true, true},
+		{"long freeze pushes", true, false, false, 10 * time.Minute, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -331,12 +331,12 @@ func (s *server) watchPermissionPane(se sessionInfo, sw *sessWatch, isNew bool, 
 // ~12s) and still drives the UI; short stalls typically resolve on their own, so
 // we hold the notification back until the freeze has persisted this long to keep
 // the alerts from being noise.
-const stallNotifyAfter = 60 * time.Second
+const stallNotifyAfter = 5 * time.Minute
 
 // stallShouldNotify is the PURE decision for watchStall: given the current stall
 // signal and how long the label has been frozen, it returns whether to push now
 // and the next value of the stallNotified latch. Kept side-effect-free and
-// duration-injected so the 60s gate is unit-testable without a clock or a push.
+// duration-injected so the 5m gate is unit-testable without a clock or a push.
 func stallShouldNotify(stalled, isNew, notified bool, frozen time.Duration) (push, nextNotified bool) {
 	if !stalled {
 		return false, false // run ended (or never stalled) — clear the latch for next time
@@ -385,5 +385,5 @@ func stallBody(st activityState) string {
 		label = "(no spinner label)"
 	}
 	frozen := time.Since(st.lastChangeAt).Round(time.Second)
-	return fmt.Sprintf("Possibly stalled — spinner frozen %s at: %s", frozen, preview(label, 100))
+	return fmt.Sprintf("Stalled for more than 5 minutes — spinner frozen %s at: %s", frozen, preview(label, 100))
 }
