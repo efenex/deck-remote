@@ -250,3 +250,91 @@ func TestPiReplyCorrelatesAfterTreeSwitch(t *testing.T) {
 		})
 	}
 }
+
+func piLine(id, parent, ts, msg string) string {
+	pj := "null"
+	if parent != "" {
+		pj = `"` + parent + `"`
+	}
+	return `{"type":"message","id":"` + id + `","parentId":` + pj + `,"timestamp":"` + ts + `","message":` + msg + "}\n"
+}
+
+// TestPiLargeTranscriptStillYieldsActivityAndAsk: a transcript past
+// maxPiTranscriptBytes (generated here, not committed) is read from its header
+// and tail; history is flagged truncated, but the snapshot is not degraded, so
+// ask stays allowed, and the mid-turn tail still reads as working.
+func TestPiLargeTranscriptStillYieldsActivityAndAsk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".pi", "agent-deck", "inst-big")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "2026-10-26_big.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(`{"type":"session","version":3,"id":"big","timestamp":"2026-10-26T00:00:00Z","cwd":"/x"}` + "\n")
+	// Old history: a user turn followed by ~70 MiB of tool output.
+	f.WriteString(piLine("u0", "", "2026-10-26T00:00:01Z", `{"role":"user","content":"ancient prompt"}`))
+	base := time.Now().Add(-time.Minute)
+	now := func(s int) string { return base.Add(time.Duration(s) * time.Second).UTC().Format(time.RFC3339Nano) }
+	pad := strings.Repeat("x", 1<<20)
+	parent := "u0"
+	for i := 0; i < 70; i++ {
+		id := "t" + strings.Repeat("a", i%5) + string(rune('A'+i%26)) + string(rune('a'+i/26))
+		f.WriteString(piLine(id, parent, "2026-10-26T00:00:02Z", `{"role":"toolResult","toolCallId":"c","content":[{"type":"text","text":"`+pad+`"}]}`))
+		parent = id
+	}
+	f.WriteString(piLine("u1", parent, now(0), `{"role":"user","content":"recent prompt"}`))
+	f.WriteString(piLine("a1", "u1", now(1), `{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":"bash","arguments":{"command":"make test"}}],"stopReason":"toolUse"}`))
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(path); st.Size() <= maxPiTranscriptBytes {
+		t.Fatalf("fixture only %d bytes, want > %d", st.Size(), maxPiTranscriptBytes)
+	}
+
+	s := &server{pi: newPiTranscriptStore(), acts: newActivityCache()}
+	a := piAdapter{s: s, root: ".pi"}
+	se := sessionInfo{ID: "inst-big", Tool: "pi"}
+	snap, err := a.Snapshot(nil, se, "", false)
+	if err != nil || snap.DegradedReason != "" {
+		t.Fatalf("a large transcript must not block ask: err=%v degraded=%q", err, snap.DegradedReason)
+	}
+	if !snap.HistoryTruncated {
+		t.Fatal("expected HistoryTruncated")
+	}
+	if snap.Sequence == 0 || len(snap.Messages) == 0 || snap.Messages[len(snap.Messages)-1].Content != "recent prompt" {
+		t.Fatalf("tail not read: seq=%d msgs=%+v", snap.Sequence, snap.Messages)
+	}
+	if !snap.Activity.Working || snap.Activity.CurrentTool != "bash(make test)" {
+		t.Fatalf("activity from the tail: %+v", snap.Activity)
+	}
+	hist, err := a.History(nil, se)
+	if err != nil || len(hist) == 0 || !strings.Contains(hist[0].Content, "truncated") {
+		t.Fatalf("history must say it is truncated: %v %+v", err, hist)
+	}
+
+	// Growth is parsed from the last offset: the reply lands, working clears.
+	app, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	app.WriteString(piLine("a2", "a1", now(5), `{"role":"toolResult","toolCallId":"c9","content":"ok"}`))
+	app.WriteString(piLine("a3", "a2", now(6), `{"role":"assistant","content":[{"type":"text","text":"all green"}],"stopReason":"stop"}`))
+	// A torn final line is left for the next read.
+	app.WriteString(`{"type":"message","id":"a4","parentId":"a3","timest`)
+	app.Close()
+	before := snap.Sequence
+	snap2, _ := a.Snapshot(nil, se, "", false)
+	if snap2.LastReply != "all green" || snap2.Activity.Working || snap2.Sequence <= before {
+		t.Fatalf("incremental read: %+v", snap2)
+	}
+	off := s.pi.m[path].parser.offset
+	app, _ = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	app.WriteString(`amp":"` + now(60) + `","message":{"role":"user","content":"next"}}` + "\n")
+	app.Close()
+	snap3, _ := a.Snapshot(nil, se, "", false)
+	if snap3.Messages[len(snap3.Messages)-1].Content != "next" || s.pi.m[path].parser.offset <= off {
+		t.Fatalf("torn line not completed: %+v", snap3.Messages)
+	}
+}
