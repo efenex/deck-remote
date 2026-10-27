@@ -42,31 +42,81 @@ var statusFilterLabels = map[string]string{
 }
 
 type viewCacheEntry struct {
-	v  *viewFilter // nil: no filter (unset, or the CLI lacks `view`)
-	at time.Time
+	v     *viewFilter // nil: no filter (unset, or the CLI lacks `view`)
+	until time.Time   // the entry is fresh until then
+	fails int         // consecutive exec failures, for backoff
+}
+
+// viewCall is one in-flight `view --json` exec that concurrent callers share.
+type viewCall struct {
+	done chan struct{}
+	v    *viewFilter
 }
 
 type viewCache struct {
-	mu sync.Mutex
-	m  map[string]viewCacheEntry
+	mu    sync.Mutex // guards m and calls; never held across the exec
+	m     map[string]viewCacheEntry
+	calls map[string]*viewCall
 }
 
-func newViewCache() *viewCache { return &viewCache{m: map[string]viewCacheEntry{}} }
+func newViewCache() *viewCache {
+	return &viewCache{m: map[string]viewCacheEntry{}, calls: map[string]*viewCall{}}
+}
 
-// viewFilterFor returns the context profile's TUI filter, or nil.
+// viewFailMax caps the exponential backoff after failed execs (an old binary
+// without `view` fails every time; it should not cost an exec per TTL).
+const viewFailMax = 5 * time.Minute
+
+// viewExecTimeout bounds the shared exec, which runs detached from any one
+// caller's context so a cancelled request cannot poison the cache.
+const viewExecTimeout = 10 * time.Second
+
+// viewFilterFor returns the context profile's TUI filter, or nil. Concurrent
+// callers for one profile share a single exec and none holds views.mu while
+// it runs.
 func (s *server) viewFilterFor(ctx context.Context) *viewFilter {
 	profile := profileFrom(ctx, s.cfg.profile)
-	s.views.mu.Lock()
-	defer s.views.mu.Unlock()
-	if e, ok := s.views.m[profile]; ok && time.Since(e.at) < viewCacheTTL {
+	vc := s.views
+	vc.mu.Lock()
+	if e, ok := vc.m[profile]; ok && time.Now().Before(e.until) {
+		vc.mu.Unlock()
 		return e.v
 	}
+	if c, ok := vc.calls[profile]; ok {
+		vc.mu.Unlock()
+		select {
+		case <-c.done:
+			return c.v
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	c := &viewCall{done: make(chan struct{})}
+	vc.calls[profile] = c
+	prev := vc.m[profile]
+	vc.mu.Unlock()
+
+	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), viewExecTimeout)
+	defer cancel()
 	var v viewFilter
 	var got *viewFilter
-	if err := s.adeckJSON(ctx, &v, "view", "--json"); err == nil {
+	err := s.adeckJSON(ectx, &v, "view", "--json")
+	ttl, fails := viewCacheTTL, 0
+	if err == nil {
 		got = &v
+	} else {
+		fails = prev.fails + 1
+		ttl = viewCacheTTL << min(fails, 8)
+		if ttl > viewFailMax {
+			ttl = viewFailMax
+		}
 	}
-	s.views.m[profile] = viewCacheEntry{v: got, at: time.Now()}
+	vc.mu.Lock()
+	vc.m[profile] = viewCacheEntry{v: got, until: time.Now().Add(ttl), fails: fails}
+	delete(vc.calls, profile)
+	vc.mu.Unlock()
+	c.v = got
+	close(c.done)
 	return got
 }
 
