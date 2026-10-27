@@ -204,3 +204,49 @@ func TestPiActivityCacheExpiresWithoutPane(t *testing.T) {
 		})
 	}
 }
+
+// TestPiReplyCorrelatesAfterTreeSwitch: after /tree moves the leaf to a shorter
+// branch, a new request's user and reply messages sit at a smaller position on
+// the active branch than the baseline taken from the longer one. Correlation
+// must follow file order, not branch position.
+func TestPiReplyCorrelatesAfterTreeSwitch(t *testing.T) {
+	const head = `{"type":"session","version":3,"id":"s","timestamp":"2026-10-16T00:00:00Z","cwd":"/x"}
+{"type":"message","id":"r","parentId":null,"timestamp":"2026-10-16T00:00:01Z","message":{"role":"user","content":"root"}}
+{"type":"message","id":"a1","parentId":"r","timestamp":"2026-10-16T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"a1"}],"stopReason":"stop"}}
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-10-16T00:00:03Z","message":{"role":"user","content":"deep"}}
+{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-10-16T00:00:04Z","message":{"role":"assistant","content":[{"type":"text","text":"a3"}],"stopReason":"stop"}}
+`
+	// After /tree back to "r": the new turn forks directly off the root.
+	const branch = `{"type":"message","id":"b1","parentId":"r","timestamp":"2026-10-16T00:00:10Z","message":{"role":"user","content":"ask after tree"}}
+{"type":"message","id":"b2","parentId":"b1","timestamp":"2026-10-16T00:00:11Z","message":{"role":"assistant","content":[{"type":"text","text":"answer after tree"}],"stopReason":"stop"}}
+`
+	before, _, err := parsePiTranscript(strings.NewReader(head))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name       string
+		secondFile string // a /new session instead of a branch in the same file
+	}{{"same file", ""}, {"after /new", "new"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := head + branch
+			if tc.secondFile != "" {
+				doc = `{"type":"session","version":3,"id":"s2","timestamp":"2026-10-16T00:00:09Z","cwd":"/x"}` + "\n" +
+					strings.ReplaceAll(branch, `"parentId":"r"`, `"parentId":null`)
+			}
+			after, _, err := parsePiTranscript(strings.NewReader(doc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Sequence <= before.Sequence {
+				t.Fatalf("sequence %d did not advance past baseline %d", after.Sequence, before.Sequence)
+			}
+			tr := newCodexRequestTracker()
+			tr.add("i", codexPendingRequest{RequestID: "req", Text: "ask after tree", Baseline: before.Sequence})
+			got := tr.reconcile("i", after)
+			if len(got) != 1 || got[0].Message.Content != "answer after tree" {
+				t.Fatalf("reply not correlated: %+v", got)
+			}
+		})
+	}
+}

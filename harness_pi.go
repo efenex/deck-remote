@@ -396,7 +396,9 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), maxPiTranscriptBytes)
 	byID := map[string]piEntry{}
+	seqByID := map[string]int64{}
 	var last string
+	var fileSeq int64
 	sawHeader := false
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -416,6 +418,8 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 		}
 		byID[e.ID] = e
 		last = e.ID
+		fileSeq = nextPiSeq(fileSeq, e.Timestamp)
+		seqByID[e.ID] = fileSeq
 	}
 	if err := sc.Err(); err != nil {
 		return harnessSnapshot{}, piTail{}, err
@@ -449,12 +453,12 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 	lastRole, lastStop := "", ""
 	pendingTool := map[string]string{}
 	var toolOrder []string
-	for i, e := range path {
+	for _, e := range path {
 		ts := tsUnix(e.Timestamp)
 		if ts > 0 {
 			snap.LastActivity = ts
 		}
-		seq := int64(i + 1)
+		seq := seqByID[e.ID]
 		if e.Type != "message" || len(e.Message) == 0 {
 			continue
 		}
@@ -506,7 +510,7 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 		}
 		lastRole, lastStop = m.Role, m.StopReason
 	}
-	snap.Sequence = int64(len(path))
+	snap.Sequence = fileSeq
 
 	switch {
 	case lastRole == "user" || lastRole == "toolResult" || (lastRole == "assistant" && lastStop == "toolUse"):
@@ -522,6 +526,19 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 		snap.State = "completed"
 	}
 	return snap, tail, nil
+}
+
+// nextPiSeq is the correlation key of the next entry appended to a file: its
+// timestamp in unix ms, forced strictly above the previous entry's. Entries are
+// only ever appended, so file order is monotonic across /tree branch switches
+// (where the position on the active branch shrinks or jumps), and the
+// timestamp floor keeps it increasing across /new, which starts another file.
+func nextPiSeq(prev int64, timestamp string) int64 {
+	next := prev + 1
+	if t, err := time.Parse(time.RFC3339Nano, timestamp); err == nil && t.UnixMilli() > next {
+		next = t.UnixMilli()
+	}
+	return next
 }
 
 func piBlocks(raw json.RawMessage) []piBlock {
