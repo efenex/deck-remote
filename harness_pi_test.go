@@ -165,3 +165,42 @@ func TestParsePiUserImages(t *testing.T) {
 		t.Fatalf("rows = %+v", snap.Messages)
 	}
 }
+
+// TestPiActivityCacheExpiresWithoutPane: with no pane, the cache is trusted only
+// for 3 intervals after the last real pane observation, even though every
+// watcher sweep replays the cached value through stepStall (which refreshes
+// updatedAt). A dead pi must not read as working forever.
+func TestPiActivityCacheExpiresWithoutPane(t *testing.T) {
+	const id = "inst-expire"
+	for _, tc := range []struct {
+		name    string
+		sweeps  int // watchInterval-spaced sweeps after the last pane read
+		working bool
+	}{
+		{"first sweep after pane loss", 1, true},
+		{"just inside 3 intervals", 2, true},
+		{"at 3 intervals", 3, false},
+		{"long dead", 40, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &server{pi: newPiTranscriptStore(), acts: newActivityCache()}
+			a := piAdapter{s: s, root: ".pi"}
+			se := sessionInfo{ID: id, Tool: "pi"}
+			t0 := time.Unix(1_800_000_000, 0)
+			// The last real observation: a working pane.
+			s.acts.m[id] = stepStall(activityState{}, activityInfo{Working: true, Activity: "Working…", stallKeySet: true, stallKey: "k"}, t0)
+
+			// Transcript tail says idle (nothing to fall back on).
+			var got activityInfo
+			now := t0
+			for i := 0; i < tc.sweeps; i++ {
+				now = now.Add(watchInterval)
+				got = a.activityAt(se, harnessSnapshot{LastActivity: t0.Unix()}, piTail{}, "", false, now)
+				s.acts.m[id] = stepStall(s.acts.m[id], got, now) // the watcher's write-back
+			}
+			if got.Working != tc.working {
+				t.Fatalf("after %d sweeps Working = %v, want %v", tc.sweeps, got.Working, tc.working)
+			}
+		})
+	}
+}

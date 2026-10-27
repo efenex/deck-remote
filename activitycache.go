@@ -19,6 +19,7 @@ type activityState struct {
 	sameCount    int       // consecutive polls with an unchanged activity string while working
 	lastChangeAt time.Time // when the activity string last changed
 	updatedAt    time.Time // when this entry was last refreshed (freshness)
+	observedAt   time.Time // when a real observation (pane read) last fed this entry; replays of the cache do not move it
 }
 
 // activityCache is a concurrency-safe per-session store of parsed activity.
@@ -46,6 +47,10 @@ func stepStall(prev activityState, parsed activityInfo, now time.Time) activityS
 		Activity:    parsed.Activity,
 		CurrentTool: parsed.CurrentTool,
 		updatedAt:   now,
+		observedAt:  now,
+	}
+	if parsed.replayed {
+		next.observedAt = prev.observedAt
 	}
 	if !parsed.Working {
 		// Not working: never stalled; reset the run so a future spinner starts clean.

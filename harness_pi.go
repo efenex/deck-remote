@@ -103,6 +103,10 @@ func (a piAdapter) Snapshot(ctx context.Context, se sessionInfo, pane string, pa
 // read, otherwise the transcript tail with a staleness cutoff so a killed pi
 // does not read as working forever.
 func (a piAdapter) activity(se sessionInfo, snap harnessSnapshot, tail piTail, pane string, paneOK bool) activityInfo {
+	return a.activityAt(se, snap, tail, pane, paneOK, time.Now())
+}
+
+func (a piAdapter) activityAt(se sessionInfo, snap harnessSnapshot, tail piTail, pane string, paneOK bool, now time.Time) activityInfo {
 	info := activityInfo{CurrentTool: tail.CurrentTool}
 	switch {
 	case paneOK:
@@ -110,10 +114,14 @@ func (a piAdapter) activity(se sessionInfo, snap harnessSnapshot, tail piTail, p
 		info.stallKeySet = true
 		info.stallKey = piPaneProgressKey(pane)
 	default:
-		if cached, ok := a.s.acts.get(se.ID); ok && time.Since(cached.updatedAt) < 3*watchInterval {
+		// Trust the cache only while the last real pane observation is recent:
+		// updatedAt moves on every watcher sweep (including sweeps that replay
+		// this very cache), so it cannot be the freshness clock.
+		if cached, ok := a.s.acts.get(se.ID); ok && now.Sub(cached.observedAt) < 3*watchInterval {
 			info.Working, info.Stalled = cached.Working, cached.Stalled
+			info.replayed = true
 		} else {
-			info.Working = tail.Working && time.Since(time.Unix(snap.LastActivity, 0)) < 10*time.Minute
+			info.Working = tail.Working && now.Sub(time.Unix(snap.LastActivity, 0)) < 10*time.Minute
 		}
 	}
 	if !info.Working {
