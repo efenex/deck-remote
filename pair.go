@@ -193,10 +193,6 @@ func (s *server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 		s.towerLog(entry)
 		httpError(w, code, reason)
 	}
-	if !s.passkeys.allow("pair-redeem") {
-		refuse(http.StatusTooManyRequests, "too many pairing attempts; wait a minute")
-		return
-	}
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -219,6 +215,15 @@ func (s *server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 		s.pairs.offers = append(s.pairs.offers, o)
 		s.pairs.mu.Unlock()
 		refuse(http.StatusForbidden, why)
+		return
+	}
+	// Only a valid code presented by an eligible caller may spend the budget.
+	// Unauthenticated junk and identity refusals must not lock out the real phone.
+	if !s.passkeys.allow("pair-redeem") {
+		s.pairs.mu.Lock()
+		s.pairs.offers = append(s.pairs.offers, o)
+		s.pairs.mu.Unlock()
+		refuse(http.StatusTooManyRequests, "too many pairing attempts; wait a minute")
 		return
 	}
 	dt, raw, err := s.tokens.mint(o.name, o.caps...)

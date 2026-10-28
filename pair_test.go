@@ -160,7 +160,34 @@ func TestPairRedeemIdentity(t *testing.T) {
 func TestPairRedeemRateLimited(t *testing.T) {
 	e := pkServer(t)
 	for i := 0; i < passkeyRateMax; i++ {
-		e.redeem("guess")
+		code, _ := e.offerPair()
+		redeemed(t, e.redeem(code))
 	}
-	expectCode(t, "rate", e.redeem("guess"), 429, "too many")
+	code, _ := e.offerPair()
+	expectCode(t, "rate", e.redeem(code), 429, "too many")
+	e.clock = e.clock.Add(time.Minute)
+	redeemed(t, e.redeem(code)) // throttling must leave the unspent offer usable
+}
+
+func TestPairRedeemRejectedTrafficCannotExhaustOperatorBudget(t *testing.T) {
+	for _, scenario := range []string{"junk", "wrong-identity", "direct-peer"} {
+		t.Run(scenario, func(t *testing.T) {
+			e := pkServer(t)
+			code, _ := e.offerPair("act")
+			for i := 0; i <= passkeyRateMax; i++ {
+				switch scenario {
+				case "junk":
+					e.redeem("not-a-code")
+				case "wrong-identity":
+					e.redeem(code, func(r *http.Request) { r.Header.Set("Tailscale-User-Login", "other@example.com") })
+				case "direct-peer":
+					e.redeem(code, local, func(r *http.Request) { r.RemoteAddr = "192.168.1.20:5000" })
+				}
+			}
+			if len(e.s.tokens.list()) != 0 {
+				t.Fatal("refused traffic minted a token")
+			}
+			redeemed(t, e.redeem(code))
+		})
+	}
 }
