@@ -52,6 +52,19 @@ function makeEnv(notifs, seenAt, routes) {
   return { ctx, store, listeners, els, mkEl, docLs };
 }
 
+test('Terminal fallback navigates without exposing the stored bearer', async () => {
+  const env = makeEnv([], null);
+  const token = 'terminal-fallback-fixture-secret';
+  env.store.set('deck_remote_token', token);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx);
+  await new Promise((resolve) => setImmediate(resolve));
+  let prevented = false;
+  env.listeners.get('#escapeTerm').click({ preventDefault() { prevented = true; } });
+  assert.strictEqual(prevented, true);
+  assert.strictEqual(env.ctx.location.href, '/');
+  assert.strictEqual(env.store.get('deck_remote_token'), token, 'authentication remains in localStorage');
+});
+
 test('Mark all read moves the cursor to the newest notification and clears the badge', async () => {
   const notifs = [{ id: 'c', at: 3000, kind: 'reply' }, { id: 'b', at: 2000, kind: 'approval' }, { id: 'a', at: 1000, kind: 'reply' }];
   const env = makeEnv(notifs, 1500);

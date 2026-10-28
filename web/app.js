@@ -3574,7 +3574,7 @@
       return;
     }
     const id = state.openSheetId || (Array.from(state.sessions.keys())[0]);
-    const url = id ? '/terminal.html?id=' + encodeURIComponent(id) : tokenURL('/');
+    const url = id ? '/terminal.html?id=' + encodeURIComponent(id) : '/';
     location.href = url; // same window: see sheetHeadHTML
   });
 
