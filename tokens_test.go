@@ -99,6 +99,55 @@ func TestTokenMintVerifyRevoke(t *testing.T) {
 	}
 }
 
+func TestTokenStoreUsesPrivateAtomicWrites(t *testing.T) {
+	for _, scenario := range []string{"fresh-directory", "stale-permissive-temp", "symlink-temp"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			if scenario == "fresh-directory" {
+				dir = filepath.Join(dir, "new", "state")
+			}
+			ts := newTokenStore(dir)
+			target := filepath.Join(dir, "unrelated-fixture")
+			switch scenario {
+			case "stale-permissive-temp":
+				if err := os.WriteFile(ts.path+".tmp", []byte("stale"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(ts.path+".tmp", 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink-temp":
+				if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, ts.path+".tmp"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, raw, err := ts.mint("fixture-phone")
+			if err != nil {
+				t.Fatalf("mint: %v", err)
+			}
+			st, err := os.Lstat(ts.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !st.Mode().IsRegular() || st.Mode().Perm() != 0o600 {
+				t.Errorf("token store mode = %v; want regular 0600", st.Mode())
+			}
+			if !newTokenStore(dir).verify(raw) {
+				t.Error("mint did not persist")
+			}
+			if scenario == "symlink-temp" {
+				b, err := os.ReadFile(target)
+				if err != nil || string(b) != "untouched" {
+					t.Error("writer followed a pre-existing temp symlink")
+				}
+			}
+		})
+	}
+}
+
 // TestHashTokenStableAndDistinct guards the pure hash helper used by both store
 // and verify (they must never drift).
 func TestHashTokenStableAndDistinct(t *testing.T) {

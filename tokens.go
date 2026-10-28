@@ -138,18 +138,14 @@ func newTokenStore(dir string) *tokenStore {
 	return ts
 }
 
-// saveLocked writes the store atomically-ish (write temp, rename) with 0600.
+// saveLocked writes the store atomically through a fresh 0600 temporary file.
 // Caller holds the write lock.
 func (ts *tokenStore) saveLocked() error {
 	b, err := json.MarshalIndent(ts.tokens, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := ts.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, ts.path)
+	return writeFile0600(ts.path, b)
 }
 
 // hashToken returns the hex SHA-256 of a raw token. Pure; used for both store
