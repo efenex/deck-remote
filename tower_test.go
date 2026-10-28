@@ -357,6 +357,43 @@ func TestTowerActPickAndDismissUseTUIArgv(t *testing.T) {
 	}
 }
 
+func TestTowerActPickSurvivesClientDisconnect(t *testing.T) {
+	s, _, _ := towerActServer(t)
+	tok := mintTok(t, s, "disconnect-phone", "act")
+	ctx, disconnect := context.WithCancel(context.Background())
+	defer disconnect()
+	var completed [][]string
+	s.towerExec = func(stepCtx context.Context, argv []string) (int, string) {
+		if err := stepCtx.Err(); err != nil {
+			return -1, err.Error()
+		}
+		deadline, ok := stepCtx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > towerExecTimeout {
+			t.Error("action step must retain its execution timeout")
+		}
+		completed = append(completed, argv)
+		if len(completed) == 1 {
+			disconnect()
+		} // phone leaves after the request record
+		return 0, ""
+	}
+	r := httptest.NewRequest("POST", "/api/rc/tower/act", strings.NewReader(`{"op":"pick","id":"sg_Next.Thing"}`)).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	r.Header.Set("Tailscale-User-Login", "ruben@example.com")
+	r.RemoteAddr = "127.0.0.1:5555"
+	w := httptest.NewRecorder()
+	s.authAct(http.HandlerFunc(s.handleTowerAct)).ServeHTTP(w, r)
+	if ctx.Err() != context.Canceled {
+		t.Fatal("test did not disconnect the client")
+	}
+	if w.Code != 200 || len(completed) != 3 {
+		t.Fatalf("disconnect interrupted pick: status=%d completed=%d", w.Code, len(completed))
+	}
+	if argvFlag(completed[1], "--to") != "picked" || completed[2][0] != s.cfg.bin {
+		t.Fatal("pick did not finish journal transition and wake")
+	}
+}
+
 func TestTowerActFoldCloseArgvAndValidation(t *testing.T) {
 	_, do, ran := towerActServer(t)
 	j := "/tower/scripts/journal.py"

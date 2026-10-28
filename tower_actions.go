@@ -201,13 +201,14 @@ func (s *server) argvDismiss(id string) []string {
 	return s.journalArgv("--kind", "suggest", "--id", id, "--to", "dismissed", "--by", "operator")
 }
 
-// towerRun runs one argv in the tower root (injectable for tests).
-func (s *server) towerRun(ctx context.Context, argv []string) (int, string) {
-	if s.towerExec != nil {
-		return s.towerExec(ctx, argv)
-	}
-	cctx, cancel := context.WithTimeout(ctx, towerExecTimeout)
+// towerRun finishes an accepted action step even if the phone disconnects. Each
+// subprocess keeps its own timeout; injection sees the same context as production.
+func (s *server) towerRun(argv []string) (int, string) {
+	cctx, cancel := context.WithTimeout(context.Background(), towerExecTimeout)
 	defer cancel()
+	if s.towerExec != nil {
+		return s.towerExec(cctx, argv)
+	}
 	cmd := exec.CommandContext(cctx, argv[0], argv[1:]...)
 	cmd.Dir = s.cfg.towerRootDir()
 	out, err := cmd.CombinedOutput()
@@ -299,7 +300,7 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 	device, _ := s.towerActionOK(r)
 	msg := "ok"
 	for i, argv := range steps {
-		rc, out := s.towerRun(r.Context(), argv)
+		rc, out := s.towerRun(argv)
 		last := i == len(steps)-1
 		if rc != 0 && wake && last {
 			msg = "queued in the journal; waking tower failed: " + oneLineGo(out, 120)
