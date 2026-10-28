@@ -414,8 +414,9 @@ func (s *server) handleTowerRunStream(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	for {
 		if st := fileStamp(journal); st != stamp {
-			stamp = st
 			if v, err := s.runVerify(ask); err == nil {
+				// A failed verify leaves this stamp pending for the next poll.
+				stamp = st
 				if it := v.item(item); it != nil && it.Run != nil && it.Run["id"] == id {
 					if state, _ := it.Run["state"].(string); state == "done" || state == "refused" {
 						emit(true)

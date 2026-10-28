@@ -382,6 +382,67 @@ func TestRunStreamEndsWithDone(t *testing.T) {
 	}
 }
 
+func TestRunStreamRetriesFailedVerifyWithoutJournalChange(t *testing.T) {
+	for _, failure := range []string{"nonzero", "timeout", "malformed"} {
+		t.Run(failure, func(t *testing.T) {
+			s, _ := runServer(t)
+			tok := mintTok(t, s, "phone", "act", "run:ro")
+			journal := filepath.Join(s.cfg.towerRoot, "journal.jsonl")
+			if err := os.WriteFile(journal, []byte("running\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*runStreamPoll)
+			defer cancel()
+			verifies, logs, doneStamp := 0, 0, ""
+			s.towerExec = func(_ context.Context, argv []string) (int, string) {
+				switch argv[3] {
+				case "verify":
+					verifies++
+					if verifies == 1 {
+						return 0, verifyFixture(map[string]any{"state": "running", "id": "ask1:0:aaaaaaaa"})
+					}
+					if verifies == 2 {
+						switch failure {
+						case "nonzero":
+							return 1, "transient failure"
+						case "timeout":
+							return -1, context.DeadlineExceeded.Error()
+						default:
+							return 0, "incomplete json {"
+						}
+					}
+					return 0, verifyFixture(map[string]any{"state": "done", "rc": 0, "id": "ask1:0:aaaaaaaa"})
+				case "log":
+					logs++
+					if logs == 1 {
+						if err := os.WriteFile(journal, []byte("running\ndone\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						doneStamp = fileStamp(journal)
+					}
+					if logs == 4 {
+						cancel()
+					} // bound a broken stream without a long timeout
+					return 0, "first\nlast\n"
+				}
+				return 1, "unexpected command"
+			}
+			r := httptest.NewRequest("GET", "/?ask=ask1&item=0&id=ask1:0:aaaaaaaa", nil).WithContext(ctx)
+			r.Header.Set("Authorization", "Bearer "+tok)
+			r.Header.Set("Tailscale-User-Login", "ruben@example.com")
+			r.RemoteAddr = "127.0.0.1:5555"
+			w := httptest.NewRecorder()
+			s.authAct(http.HandlerFunc(s.handleTowerRunStream)).ServeHTTP(w, r)
+			if verifies != 3 || !strings.Contains(w.Body.String(), "event: done\n") || !strings.Contains(w.Body.String(), `data: "last"`) {
+				t.Fatalf("stream did not retry/finish: verifies=%d events=%s", verifies, w.Body.String())
+			}
+			if doneStamp == "" || fileStamp(journal) != doneStamp {
+				t.Fatal("test unexpectedly changed the terminal journal stamp")
+			}
+		})
+	}
+}
+
 // D3: unfold goes through `run_bang.py log` (never --raw) and is one action-log line.
 func TestRunLogUnfold(t *testing.T) {
 	s, st := runServer(t)
