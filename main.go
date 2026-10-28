@@ -131,6 +131,9 @@ func main() {
 	}
 
 	srv := newServer(cfg, up)
+	if err := srv.tokens.loadErr; err != nil && !os.IsNotExist(err) {
+		log.Printf("tokens: load failed: %v; refusing writes until repaired and restarted", err)
+	}
 	srv.passkeys.startup(srv.tokens)
 
 	// deck-remote-native push + the event watcher that drives it.

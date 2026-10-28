@@ -36,6 +36,64 @@ var (
 	shaLaptop = strings.Repeat("e", 64) // item 2: mut, laptop only
 )
 
+func TestCorruptTokenStoreRefusesWritesAndPreservesPasskeys(t *testing.T) {
+	for _, damaged := range []string{"[", `[{"id":"fixture-device","hash":"fixture","caps":"act"}]`} {
+		t.Run(damaged, func(t *testing.T) {
+			dir := t.TempDir()
+			h := newPasskeyHub(dir)
+			h.recs = []passkeyRecord{{Device: "fixture-device", Created: 123}}
+			if err := h.saveLocked(); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "deck-remote-tokens.json")
+			if err := os.WriteFile(path, []byte(damaged), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ts := newTokenStore(dir)
+			if ts.loadErr == nil {
+				t.Fatal("damaged fixture did not cause a load error")
+			}
+			h.startup(ts)
+			if dt, raw, err := ts.mint("new-phone", "act"); err == nil || raw != "" || dt.ID != "" {
+				t.Error("mint must refuse without returning a credential after a load error")
+			}
+			if len(ts.list()) != 0 {
+				t.Error("failed mint added an in-memory token")
+			}
+			ts.mu.Lock()
+			err := ts.saveLocked()
+			ts.mu.Unlock()
+			if err == nil {
+				t.Error("direct save must refuse after a load error")
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || string(b) != damaged {
+				t.Error("a write replaced the damaged token file")
+			}
+			// The delayed failure occurs on the next startup, after a successful overwrite.
+			h = newPasskeyHub(dir)
+			h.startup(newTokenStore(dir))
+			if len(h.recs) != 1 || len(newPasskeyHub(dir).recs) != 1 {
+				t.Error("restart after refused writes erased passkeys")
+			}
+			if err := os.WriteFile(path, []byte(`[{"id":"fixture-device","hash":"fixture"}]`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := ts.mint("still-blocked"); err == nil {
+				t.Error("repair without reload must not unblock the empty in-memory store")
+			}
+			reloaded := newTokenStore(dir)
+			if _, _, err := reloaded.mint("recovered-phone"); err != nil {
+				t.Fatalf("repaired and reloaded store must allow mint: %v", err)
+			}
+			h.startup(reloaded)
+			if len(h.recs) != 1 || len(newPasskeyHub(dir).recs) != 1 {
+				t.Error("repair and reload lost the existing device's passkey")
+			}
+		})
+	}
+}
+
 func TestPasskeyStartupPreservesCredentialsOnTokenLoadFailure(t *testing.T) {
 	for _, failure := range []string{"missing", "malformed", "wrong-field-type", "unreadable"} {
 		t.Run(failure, func(t *testing.T) {

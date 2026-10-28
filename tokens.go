@@ -117,7 +117,8 @@ type tokenStore struct {
 
 // newTokenStore loads (or initializes) the device-token store at
 // dir/deck-remote-tokens.json. A missing/unreadable/corrupt file yields an empty
-// store with loadErr set; the shared token still works, but credentials must not be pruned.
+// store with loadErr set; credentials must not be pruned, and non-missing errors
+// block writes until the file is repaired and the store reloaded. The shared token still works.
 func newTokenStore(dir string) *tokenStore {
 	ts := &tokenStore{path: filepath.Join(dir, "deck-remote-tokens.json")}
 	b, err := os.ReadFile(ts.path)
@@ -141,6 +142,9 @@ func newTokenStore(dir string) *tokenStore {
 // saveLocked writes the store atomically through a fresh 0600 temporary file.
 // Caller holds the write lock.
 func (ts *tokenStore) saveLocked() error {
+	if ts.loadErr != nil && !os.IsNotExist(ts.loadErr) {
+		return fmt.Errorf("token store load failed; repair the file and restart before writing: %w", ts.loadErr)
+	}
 	b, err := json.MarshalIndent(ts.tokens, "", "  ")
 	if err != nil {
 		return err
