@@ -2703,7 +2703,9 @@
   }
 
   // ----- attention: guarded approvals + request_user_input forms -----
-  async function checkAttention(s, userInitiated) {
+  // refreshSnapshot (after a refused send) re-reads a kept question card's menu snapshot; returns
+  // true when it did.
+  async function checkAttention(s, userInitiated, refreshSnapshot) {
     const mount = $('#approveMount');
     if (!mount || state.openSheetId !== s.id) return;
 
@@ -2718,8 +2720,14 @@
         s.attentionKind = r.kind;
         s.attentionN = (r.questions || []).length;
         // The same request is already docked: keep the form (a half-filled answer, a send in progress).
+        // An explicit check or a refused send takes the pane's current menu snapshot, so a stale-card
+        // refusal is answered by sending again, not by closing and reopening the sheet.
         const docked = mount.querySelector('.approve-card');
-        if (docked && docked.dataset.attnId === r.id) { renderDeck(); return; }
+        if (docked && docked.dataset.attnId === r.id) {
+          const fresh = (userInitiated || refreshSnapshot) && docked.attnInfo;
+          if (fresh) docked.attnInfo.menuState = r.menuState;
+          renderDeck(); return !!fresh;
+        }
         if (r.kind === 'question') renderQuestionPanel(s, r);
         else renderApprovePanel(s, r);
       } else if (r && r.unavailable) {
@@ -2836,6 +2844,7 @@
     const wrap = el('div', 'approve-card question-card');
     wrap.dataset.attnId = info.id || '';
     if (info.readOnly) { renderQuestionReadOnly(s, info, wrap, mount); return; }
+    wrap.attnInfo = info; // checkAttention refreshes info.menuState on the kept form
     wrap.innerHTML = '<div class="approve-head"><span class="dot"></span> ' + esc(s.tool === 'codex' ? 'Codex' : s.tool === 'claude' ? 'Claude' : 'Agent') + ' needs input' + ((info.questions || []).length > 1 ? ' · ' + info.questions.length + ' questions' : '') + '</div><div class="approve-body"><form id="questionForm"></form><div class="approve-foot" id="approveFoot">Answers are sent only while this exact request is still live.</div></div>';
     mount.innerHTML = '';
     mount.appendChild(wrap);
@@ -2994,8 +3003,10 @@
         ensureConvo(s.id).push({ role: 'error', content: 'Answer ' + msg.charAt(0).toLowerCase() + msg.slice(1), ts: Date.now() / 1000 });
         renderConvo(s.id);
       }
-      await checkAttention(s, false);
-      if (state.openSheetId === s.id && $('#approveMount .approve-card')) attnFoot(msg, true);
+      const refreshed = await checkAttention(s, false, true);
+      if (state.openSheetId === s.id && $('#approveMount .approve-card')) {
+        attnFoot(msg + (refreshed && info.menuState ? ' The menu was re-read; check your choices and send again.' : ''), true);
+      }
     } finally {
       clearInterval(attnSend.timer);
       attnSend.timer = null;

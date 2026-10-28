@@ -34,7 +34,7 @@ function setup(questions) {
   };
   vm.runInNewContext(renderer + '\nthis.render = renderQuestionPanel;', ctx);
   ctx.render({ id: 's1', tool: 'claude' }, info);
-  return { form, sent, inputs: form.all().filter(e => e.tag === 'input'), submit: form.all().find(e => e.tag === 'button') };
+  return { form, sent, card: mount.children[0], inputs: form.all().filter(e => e.tag === 'input'), submit: form.all().find(e => e.tag === 'button') };
 }
 const question = (multiSelect = true, id = 'q0') => ({ id, header: 'Multi', question: 'Pick several?', multiSelect, options: [{ label: 'One' }, { label: 'Two' }, { label: 'Three' }] });
 
@@ -81,4 +81,54 @@ test('mixed questions retain single-select radio answers', () => {
 test('response transport includes the menu snapshot for server-side stale refusal', () => {
   const transport = source.slice(source.indexOf('  async function respondAttention('), source.indexOf('  async function respondAttention(') + 1800);
   assert.match(transport, /menuState: info\.menuState/);
+});
+
+// F1: a refused send re-reads the kept card's menu snapshot, so the next Submit is not refused as
+// stale forever (the docked form is kept for the same request id, a half-filled answer included).
+function between(start, end) {
+  const i = source.indexOf(start), j = source.indexOf(end, i);
+  assert.ok(i >= 0 && j > i, start);
+  return source.slice(i, j);
+}
+const attention = between('  async function checkAttention(', '  function approveNote(') +
+  between('  const attnSend = {', '  function attnSendTick(') +
+  between('  async function respondAttention(', '  // SSE streams');
+function refreshEnv(serverState, postError) {
+  const env = setup([question()]);
+  const card = env.card;
+  const foot = { textContent: '', style: {} }, posts = [];
+  const mount = { innerHTML: '', querySelector: sel => (sel === '.approve-card' ? card : null), appendChild() {} };
+  const ctx = {
+    state: { openSheetId: 's1' }, CURRENT_PROFILE: 'default',
+    $: sel => ({ '#approveMount': mount, '#approveMount .approve-card': card, '#approveFoot': foot })[sel] || null,
+    api: async (method, url, body) => {
+      if (method === 'POST') { posts.push(body); if (postError) throw postError; return { responded: true }; }
+      return { pending: true, kind: 'question', id: 'ask1', menuState: serverState, questions: [question()] };
+    },
+    renderDeck() {}, syncComposerLock() {}, toast() {}, renderConvo() {}, ensureConvo: () => [],
+    renderQuestionPanel() { throw new Error('kept card must not be re-rendered'); }, renderApprovePanel() {},
+    attnLock() {}, attnSendTick() {}, setInterval: () => 1, clearInterval() {}, Date,
+  };
+  vm.runInNewContext(attention + '\nthis.check = checkAttention; this.respond = respondAttention;', ctx);
+  return { ...env, foot, posts, ctx };
+}
+
+test('a refused send refreshes the kept card snapshot and the next Submit sends it', async () => {
+  const env = refreshEnv('snapshot2', Object.assign(new Error('question menu changed or cleared: stale card'), { status: 409 }));
+  assert.equal(env.card.attnInfo.menuState, 'snapshot1');
+  await env.ctx.respond({ id: 's1' }, env.card.attnInfo, 'answer', [{ id: 'q0', options: [1], answer: '' }]);
+  assert.equal(env.posts[0].menuState, 'snapshot1');
+  assert.equal(env.card.attnInfo.menuState, 'snapshot2');
+  assert.match(env.foot.textContent, /stale card.*re-read; check your choices and send again/);
+  env.inputs[0].checked = true;
+  env.form.fire('submit');
+  assert.equal(env.sent[0][1].menuState, 'snapshot2'); // the form's own Submit uses the fresh snapshot
+});
+
+test('a passive re-check keeps the snapshot; the check button refreshes it', async () => {
+  const env = refreshEnv('snapshot2');
+  assert.equal(await env.ctx.check({ id: 's1' }, false), false);
+  assert.equal(env.card.attnInfo.menuState, 'snapshot1');
+  assert.equal(await env.ctx.check({ id: 's1' }, true), true);
+  assert.equal(env.card.attnInfo.menuState, 'snapshot2');
 });
