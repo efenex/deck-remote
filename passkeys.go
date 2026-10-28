@@ -19,7 +19,7 @@ package main
 //   GET  /api/rc/passkey/list              authAct: this device token's credentials (id8, created)
 //   POST /api/rc/tower/run/challenge       authAct + run:mut + {ask, item, sha256[, cred]} → request
 //        options; the 60 s single-use challenge is bound to (ask, item, sha, class, signature
-//        fingerprint, device-token id, credential id)
+//        fingerprint, device-token id, allowed credential ids)
 //   verifyRunAssertion                     the run handler (tower_run.go) calls it: spends the challenge, checks
 //        origin, rpIdHash, UV, signature, sign count (clone semantics), that the credential belongs
 //        to the presenting device token, and that the line's signature did not change since.
@@ -96,7 +96,7 @@ type pendingReg struct {
 }
 
 // runChallenge is what one assertion may authorise: exactly this line, as signed when issued,
-// for this device token and credential.
+// for this device token and the credentials allowed when issued.
 type runChallenge struct {
 	id      string // challenge id8 (sha256 of the challenge), for logs and the journal's auth field
 	ask     string
@@ -107,7 +107,6 @@ type runChallenge struct {
 	cwd     string
 	timeout int
 	device  string // device-token id
-	cred    []byte
 	session webauthn.SessionData
 	exp     time.Time
 }
@@ -755,23 +754,25 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	creds := h.credsLocked(dt.ID)
 	h.mu.Unlock()
-	var pick *webauthn.Credential
-	for i := range creds {
-		if req.Cred == "" && len(creds) == 1 || req.Cred != "" && base64.RawURLEncoding.EncodeToString(creds[i].ID) == req.Cred {
-			pick = &creds[i]
+	var allowed []protocol.CredentialDescriptor
+	for _, cred := range creds {
+		if req.Cred == "" || base64.RawURLEncoding.EncodeToString(cred.ID) == req.Cred {
+			allowed = append(allowed, cred.Descriptor())
 		}
 	}
-	if pick == nil {
+	if len(allowed) == 0 {
 		if len(creds) == 0 {
 			refuse(http.StatusForbidden, "no passkey enrolled for this device: enrol in Settings with a code from the laptop")
 		} else {
-			refuse(http.StatusBadRequest, "name the passkey (cred) to use")
+			refuse(http.StatusBadRequest, "unknown passkey (cred) for this device")
 		}
 		return
 	}
-	entry["cred"] = credID8(pick.ID)
+	if len(allowed) == 1 {
+		entry["cred"] = credID8(allowed[0].CredentialID)
+	}
 	assertion, session, err := wa.BeginLogin(passkeyUser{dt: dt, creds: creds},
-		webauthn.WithAllowedCredentials([]protocol.CredentialDescriptor{pick.Descriptor()}),
+		webauthn.WithAllowedCredentials(allowed),
 		webauthn.WithUserVerification(protocol.VerificationRequired),
 	)
 	if err != nil {
@@ -781,7 +782,7 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 	ch := runChallenge{
 		id: challengeID8(session.Challenge), ask: req.Ask, item: *req.Item, sha: req.SHA256, class: it.Class,
 		fp: runSigFingerprint(req.Ask, it, v.SigTS), cwd: it.Cwd, timeout: it.Timeout,
-		device: dt.ID, cred: pick.ID, session: *session, exp: h.now().Add(passkeyChallengeTTL),
+		device: dt.ID, session: *session, exp: h.now().Add(passkeyChallengeTTL),
 	}
 	h.mu.Lock()
 	now := h.now()
@@ -849,7 +850,13 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if ch.ask != ask || ch.item != item || ch.sha != sha {
 		return refuse(http.StatusForbidden, "the challenge is for another line")
 	}
-	if !bytes.Equal(parsed.RawID, ch.cred) {
+	allowed := false
+	for _, id := range ch.session.AllowedCredentialIDs {
+		if bytes.Equal(parsed.RawID, id) {
+			allowed = true
+		}
+	}
+	if !allowed {
 		return refuse(http.StatusForbidden, "the assertion's credential is not the one the challenge named")
 	}
 	if cur, ok := s.tokens.byID(dt.ID); !ok || !cur.hasCap("run:mut") {

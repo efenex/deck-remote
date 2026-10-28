@@ -77,6 +77,75 @@ func TestRunMutWithAssertion(t *testing.T) {
 	}
 }
 
+func TestRunMutWithMultiplePasskeys(t *testing.T) {
+	for _, selected := range []int{0, 1} {
+		t.Run([]string{"original", "reenrolled"}[selected], func(t *testing.T) {
+			e := pkServer(t)
+			tok := mintTok(t, e.s, "phone", "act", "run:mut")
+			auths := []*softAuth{newSoftAuth(t), newSoftAuth(t)}
+			for _, a := range auths {
+				e.enrol(a, tok)
+			}
+			opts := e.options(e.challenge(tok, 1, shaPhone)) // browser sends no cred
+			var out struct {
+				PublicKey struct{ AllowCredentials []struct{ ID string } }
+			}
+			if err := json.Unmarshal(opts, &out); err != nil {
+				t.Fatal(err)
+			}
+			if len(out.PublicKey.AllowCredentials) != 2 {
+				t.Fatalf("expected both enrolled credentials: %s", opts)
+			}
+			for i, c := range out.PublicKey.AllowCredentials {
+				if c.ID != b64u(auths[i].id) {
+					t.Fatal("challenge includes the wrong credential")
+				}
+			}
+			w := e.postRunMut(tok, 1, shaPhone, auths[selected].get(t, opts))
+			expectCode(t, "mut with selected passkey", w, 202, `"id":"ask1:1:bbbbbbbb"`)
+			if len(e.run.runs) != 1 {
+				t.Fatal("mut run did not reach runner once")
+			}
+			var auth passkeyReceipt
+			if err := json.Unmarshal([]byte(argvFlag(e.run.runs[0], "--auth")), &auth); err != nil {
+				t.Fatal(err)
+			}
+			if auth.Cred != credID8(auths[selected].id) {
+				t.Fatal("receipt did not identify signing credential")
+			}
+		})
+	}
+}
+
+func TestPasskeyChallengeCredentialAllowList(t *testing.T) {
+	for _, scenario := range []string{"other-device", "enrolled-later", "explicit-selection"} {
+		t.Run(scenario, func(t *testing.T) {
+			e := pkServer(t)
+			tok := mintTok(t, e.s, "phone", "act", "run:mut")
+			a, b := newSoftAuth(t), newSoftAuth(t)
+			e.enrol(a, tok)
+			var opts json.RawMessage
+			switch scenario {
+			case "other-device":
+				e.enrol(b, mintTok(t, e.s, "other", "act", "run:mut"))
+				opts = e.options(e.challenge(tok, 1, shaPhone))
+			case "enrolled-later":
+				opts = e.options(e.challenge(tok, 1, shaPhone))
+				e.enrol(b, tok)
+			case "explicit-selection":
+				e.enrol(b, tok)
+				opts = e.options(e.req("POST", "/api/rc/tower/run/challenge", tok, map[string]any{"ask": "ask1", "item": 1, "sha256": shaPhone, "cred": b64u(a.id)}))
+			}
+			if _, code, why := e.assert(tok, 1, shaPhone, b.get(t, opts)); code != 403 || why == "" {
+				t.Fatalf("unlisted credential accepted: %d %s", code, why)
+			}
+			if _, code, why := e.assert(tok, 1, shaPhone, a.get(t, opts)); code != 403 || !strings.Contains(why, "already used") {
+				t.Fatalf("refused assertion did not spend challenge: %d %s", code, why)
+			}
+		})
+	}
+}
+
 // cap × class for the run endpoint with passkeys in play, and every mut refusal comes before
 // the runner and before the dup mark.
 func TestRunMutRefusals(t *testing.T) {
