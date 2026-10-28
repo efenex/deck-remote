@@ -193,7 +193,7 @@ func (s *server) pickArgvs(it map[string]any) [][]string {
 	return [][]string{
 		s.journalArgv("--kind", "request", "--id", "pick-"+towerSlug(id), "--to", "open", "--by", "operator", "--data", jsonStr(d)),
 		s.journalArgv("--kind", "suggest", "--id", id, "--to", "picked", "--by", "operator"),
-		{s.cfg.bin, "session", "send", "--no-wait", s.cfg.towerSession, "[tui] picked suggestion " + id},
+		append([]string{s.cfg.bin}, adeckArgs(s.cfg.profile, "session", "send", "--no-wait", s.cfg.towerSession, "[tui] picked suggestion "+id)...),
 	}
 }
 

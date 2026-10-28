@@ -334,7 +334,7 @@ func towerActServer(t *testing.T) (*server, func(body string) *httptest.Response
 }
 
 func TestTowerActPickAndDismissUseTUIArgv(t *testing.T) {
-	_, do, ran := towerActServer(t)
+	s, do, ran := towerActServer(t)
 	if w := do(`{"op":"pick","id":"sg_Next.Thing"}`); w.Code != 200 || !strings.Contains(w.Body.String(), "queued") {
 		t.Fatalf("pick: %d %s", w.Code, w.Body.String())
 	}
@@ -343,7 +343,7 @@ func TestTowerActPickAndDismissUseTUIArgv(t *testing.T) {
 		{"python3", "-I", j, "add", "--kind", "request", "--id", "pick-sg-next-thing", "--to", "open", "--by", "operator",
 			"--data", `{"text":"operator picked suggestion sg_Next.Thing: Do the thing","suggestion":"sg_Next.Thing","task":"t-1","from":"tui"}`},
 		{"python3", "-I", j, "add", "--kind", "suggest", "--id", "sg_Next.Thing", "--to", "picked", "--by", "operator"},
-		{"agent-deck", "session", "send", "--no-wait", "tower", "[tui] picked suggestion sg_Next.Thing"},
+		{"agent-deck", "-p", s.cfg.profile, "session", "send", "--no-wait", "tower", "[tui] picked suggestion sg_Next.Thing"},
 	}
 	if !reflect.DeepEqual(*ran, want) {
 		t.Fatalf("pick argv:\n got %q\nwant %q", *ran, want)
@@ -391,6 +391,20 @@ func TestTowerActPickSurvivesClientDisconnect(t *testing.T) {
 	}
 	if argvFlag(completed[1], "--to") != "picked" || completed[2][0] != s.cfg.bin {
 		t.Fatal("pick did not finish journal transition and wake")
+	}
+}
+
+func TestTowerActPickWakeUsesConfiguredProfile(t *testing.T) {
+	s, do, ran := towerActServer(t)
+	s.cfg.profile = "work"
+	t.Setenv("AGENTDECK_PROFILE", "default")
+	w := do(`{"op":"pick","id":"sg_Next.Thing"}`)
+	if w.Code != 200 || len(*ran) != 3 {
+		t.Fatalf("pick: %d steps=%d", w.Code, len(*ran))
+	}
+	want := []string{"agent-deck", "-p", "work", "session", "send", "--no-wait", "tower", "[tui] picked suggestion sg_Next.Thing"}
+	if !reflect.DeepEqual((*ran)[2], want) {
+		t.Fatalf("wake argv = %q, want %q", (*ran)[2], want)
 	}
 }
 
