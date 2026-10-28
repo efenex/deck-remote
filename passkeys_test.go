@@ -720,6 +720,50 @@ func TestRunChallengeRateLimit(t *testing.T) {
 
 // Revoking the device token removes its passkeys (on disk) and voids its open challenges; the
 // other phone's passkey stays. A restart prunes credentials of a token revoked elsewhere.
+func TestDeviceRevokeSaveFailureIsRetryable(t *testing.T) {
+	for _, by := range []string{"id", "name"} {
+		t.Run(by, func(t *testing.T) {
+			e := pkServer(t)
+			first := mintTok(t, e.s, "first", "act")
+			tok := mintTok(t, e.s, "target", "act", "run:mut")
+			last := mintTok(t, e.s, "last", "act")
+			e.enrol(newSoftAuth(t), tok)
+			dt, _ := e.s.tokens.find(tok)
+			key := dt.ID
+			if by == "name" {
+				key = dt.Name
+			}
+			path := e.s.tokens.path
+			// Force rename to fail without depending on file modes or the temp writer.
+			e.s.tokens.path = t.TempDir()
+			w := e.req("POST", "/api/rc/devices/revoke", e.shrd, map[string]any{by: key}, local)
+			expectCode(t, "failed revoke", w, 500, "revoke failed")
+			e.s.tokens.path = path
+			for _, raw := range []string{first, tok, last} {
+				if !e.s.tokens.verify(raw) {
+					t.Error("failed revoke changed in-memory tokens")
+				}
+				if !newTokenStore(e.state).verify(raw) {
+					t.Error("failed revoke changed persisted tokens")
+				}
+			}
+			if len(e.s.passkeys.recs) != 1 || len(newPasskeyHub(e.state).recs) != 1 {
+				t.Error("failed token revoke removed passkeys")
+			}
+			expectCode(t, "retry", e.req("POST", "/api/rc/devices/revoke", e.shrd, map[string]any{by: key}, local), 200, `"ok":true`)
+			if e.s.tokens.verify(tok) || newTokenStore(e.state).verify(tok) {
+				t.Error("revoked token survived retry/restart")
+			}
+			if len(e.s.passkeys.recs) != 0 || len(newPasskeyHub(e.state).recs) != 0 {
+				t.Error("successful retry kept passkeys")
+			}
+			if !e.s.tokens.verify(first) || !e.s.tokens.verify(last) {
+				t.Error("retry removed another token")
+			}
+		})
+	}
+}
+
 func TestPasskeyRevokeCascade(t *testing.T) {
 	e := pkServer(t)
 	mut := mintTok(t, e.s, "phone", "act", "run:mut")
