@@ -20,7 +20,7 @@ package main
 // A single-question single-select menu (rb-forks F12) has no tab row and no review screen: a header line
 // "☐ Header", the question, the numbered rows and the footer. Verified on a throwaway session: a digit
 // selects AND submits at once; the row after the options takes len(options)+1, then the text, then Enter.
-// (A single multiSelect question is drawn as a tabbed menu with "[ ]" rows and stays read-only.)
+// Multi-select semantics and captured transitions: testdata/claude/askq-multi-semantics.md.
 //
 // Nothing is typed unless the live pane still matches the transcript question for question, and
 // the review screen must show exactly the answers about to be submitted.
@@ -28,6 +28,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -170,14 +171,18 @@ type askTab struct {
 
 // askPane is what the live pane shows of a tabbed menu.
 type askPane struct {
-	Tabs     []askTab // the question tabs, without Submit
-	Single   bool     // a lone question without tab row or review screen: a digit submits it
-	Review   bool     // the Submit tab ("Review your answers")
-	Editing  bool     // the inline free-text field has the cursor
-	Question string   // the displayed question text (question pages)
-	Options  []string // numbered rows as displayed, trailing " ✔" removed (question pages)
-	Cursor   int      // index in Options of the row with the ❯ cursor, -1 when none
-	Answers  []string // "→ answer" lines (review)
+	MultiSelect     bool
+	Checked         []bool // options and Other, excluding Chat about this
+	Continue        string // unnumbered Next/Submit row
+	ContinueFocused bool
+	Tabs            []askTab // the question tabs, without Submit
+	Single          bool     // a lone question without tab row or review screen: a digit submits it
+	Review          bool     // the Submit tab ("Review your answers")
+	Editing         bool     // the inline free-text field has the cursor
+	Question        string   // the displayed question text (question pages)
+	Options         []string // numbered rows as displayed, trailing " ✔" removed (question pages)
+	Cursor          int      // index in Options of the row with the ❯ cursor, -1 when none
+	Answers         []string // "→ answer" lines (review)
 }
 
 // alnumKey folds text to lowercase letters and digits, so markdown the TUI renders (backticks,
@@ -311,10 +316,27 @@ func parseAskPane(pane string) (askPane, bool) {
 			continue
 		}
 		if m := claudeMenuOption.FindStringSubmatch(l); m != nil {
+			if m[1] != fmt.Sprint(len(ap.Options)+1) {
+				return askPane{}, false
+			}
 			if strings.Contains(strings.SplitN(l, m[1]+".", 2)[0], "❯") {
 				ap.Cursor = len(ap.Options)
 			}
-			ap.Options = append(ap.Options, strings.TrimSpace(strings.TrimSuffix(m[2], "✔")))
+			label := strings.TrimSpace(strings.TrimSuffix(m[2], "✔"))
+			if strings.HasPrefix(label, "[ ] ") || strings.HasPrefix(label, "[✔] ") {
+				ap.MultiSelect = true
+				ap.Checked = append(ap.Checked, strings.HasPrefix(label, "[✔] "))
+				label = strings.TrimSpace(strings.SplitN(label, "]", 2)[1])
+			}
+			ap.Options = append(ap.Options, label)
+			continue
+		}
+		control := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(l), "❯"))
+		if ap.MultiSelect && (control == "Next" || control == "Submit") {
+			ap.Continue = control
+			if strings.Contains(l, "❯") {
+				ap.Cursor, ap.ContinueFocused = len(ap.Options), true
+			}
 			continue
 		}
 		clean := strings.TrimSpace(strings.Trim(strings.TrimSpace(l), "│"))
@@ -323,7 +345,15 @@ func parseAskPane(pane string) (askPane, bool) {
 		}
 	}
 	ap.Question = strings.Join(text, " ")
+	if ap.MultiSelect {
+		ap.Editing = ap.Cursor == len(ap.Checked)-1
+	}
 	return ap, len(ap.Options) >= 2
+}
+
+func (ap askPane) state() string {
+	b, _ := json.Marshal(ap)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
 
 func lastRowsInclude(body []string, s string) bool {
@@ -373,6 +403,9 @@ func (ap askPane) focus(ask pendingAsk) int {
 // optionsMatch: the displayed rows are the transcript's options, then the TUI's own rows
 // ("Type something." — or the typed text — and "Chat about this").
 func (ap askPane) optionsMatch(q askQuestion) bool {
+	if ap.MultiSelect != q.MultiSelect || (q.MultiSelect && (ap.Single || len(ap.Checked) != len(q.Options)+1 || ap.Continue == "")) {
+		return false
+	}
 	if len(ap.Options) < len(q.Options)+1 {
 		return false
 	}
@@ -398,14 +431,15 @@ func askMenuInfo(pane string, ask pendingAsk) (attentionInfo, bool) {
 	var text []string
 	for i, q := range ask.Questions {
 		switch {
-		case q.MultiSelect:
-			answerable, reason = false, "This question allows several choices; answer it in the terminal."
 		case len(q.Options) < 1 || len(q.Options)+1 > 9:
 			answerable, reason = false, "This menu has too many rows for a key press; answer it in the terminal." // key semantics unverified
 		}
 		info.Questions = append(info.Questions, attentionQuestion{
-			Header: q.Header, ID: fmt.Sprintf("q%d", i), Question: q.Question, Options: q.Options,
+			Header: q.Header, ID: fmt.Sprintf("q%d", i), Question: q.Question, Options: q.Options, MultiSelect: q.MultiSelect,
 		})
+		if q.MultiSelect {
+			info.MenuState = ap.state()
+		}
 		text = append(text, q.Header+": "+q.Question)
 	}
 	info.Text = strings.Join(text, "\n")
@@ -421,8 +455,9 @@ func askMenuInfo(pane string, ask pendingAsk) (attentionInfo, bool) {
 
 // askPick is one question's answer: Option is the 1-based row to press, or 0 for free text.
 type askPick struct {
-	Option int
-	Text   string
+	Option  int
+	Text    string
+	Options []int
 }
 
 func (p askPick) key(q askQuestion) string {
@@ -444,6 +479,16 @@ func askPicks(ask pendingAsk, answers []attentionAnswer) ([]askPick, error) {
 		}
 		seen[i] = true
 		ans := strings.TrimSpace(a.Answer)
+		if ask.Questions[i].MultiSelect {
+			picks[i] = askPick{Options: a.Options, Text: strings.Join(strings.Fields(ans), " ")}
+			if err := validateMultiPick(ask.Questions[i], picks[i]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if len(a.Options) > 0 {
+			return nil, fmt.Errorf("question %d allows only one answer", i+1)
+		}
 		if ans == "" {
 			return nil, fmt.Errorf("empty answer for question %d", i+1)
 		}
@@ -465,10 +510,11 @@ func askPicks(ask pendingAsk, answers []attentionAnswer) ([]askPick, error) {
 
 // askIO is the pane and key access the answer run needs; tests fake it.
 type askIO struct {
-	pane  func(ctx context.Context) (string, error)
-	text  func(ctx context.Context, s string) error
-	named func(ctx context.Context, key string) error
-	enter func(ctx context.Context) error
+	initialState string // the phone's parsed menu snapshot, checked again before any keys
+	pane         func(ctx context.Context) (string, error)
+	text         func(ctx context.Context, s string) error
+	named        func(ctx context.Context, key string) error
+	enter        func(ctx context.Context) error
 	// wait/polls bound how long a key may take to show on screen.
 	wait  time.Duration
 	polls int
@@ -531,6 +577,9 @@ func (io askIO) until(ctx context.Context, ask pendingAsk, goneOK bool, cond fun
 			}
 			continue
 		}
+		if !ap.headersMatch(ask) {
+			return false, askChanged("tabs changed while waiting for a key")
+		}
 		if cond(ap) {
 			return true, nil
 		}
@@ -547,10 +596,16 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 		return 0, false, fmt.Errorf("need %d answers", n)
 	}
 	for i, q := range ask.Questions {
-		if q.MultiSelect || len(q.Options)+1 > 9 {
+		if len(q.Options) < 1 || len(q.Options)+1 > 9 {
 			return 0, false, fmt.Errorf("question %q cannot be answered from here; use the terminal", q.Header)
 		}
-		if picks[i].Option > len(q.Options) || (picks[i].Option == 0 && picks[i].Text == "") {
+		if q.MultiSelect {
+			if err := validateMultiPick(q, picks[i]); err != nil {
+				return 0, false, err
+			}
+			continue
+		}
+		if picks[i].Option < 0 || picks[i].Option > len(q.Options) || (picks[i].Option == 0 && picks[i].Text == "") {
 			return 0, false, fmt.Errorf("invalid answer for %q", q.Header)
 		}
 	}
@@ -558,6 +613,9 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 	ap, err := io.read(ctx, ask)
 	if err != nil {
 		return 0, false, err
+	}
+	if io.initialState != "" && ap.state() != io.initialState {
+		return 0, false, askChanged("stale card; refresh the question before answering")
 	}
 	if ap.Editing {
 		return 0, false, askChanged("a free-text answer is being typed in the terminal")
@@ -570,27 +628,48 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 		return 0, false, askChanged("the single question on screen is not the pending one")
 	}
 	if f != 0 {
-		for i := 0; i < f; i++ {
+		for target := f - 1; target >= 0; target-- {
+			live, err := io.read(ctx, ask)
+			if err != nil {
+				return 0, false, err
+			}
+			if live.state() != ap.state() {
+				return 0, false, askChanged("menu changed before tab navigation")
+			}
 			if err := io.named(ctx, "Left"); err != nil {
 				return 0, false, err
 			}
-		}
-		ok, err := io.until(ctx, ask, false, func(p askPane) bool { return !p.Review && !p.Editing && p.focus(ask) == 0 })
-		if err != nil || !ok {
-			return 0, false, orChanged(err, "could not return to the first question")
+			ok, err := io.until(ctx, ask, false, func(p askPane) bool {
+				if !p.Review && !p.Editing && p.focus(ask) == target {
+					ap = p
+					return true
+				}
+				return false
+			})
+			if err != nil || !ok {
+				return 0, false, orChanged(err, "could not return to the first question")
+			}
 		}
 	}
+	expectedState := ap.state()
 	for i, q := range ask.Questions {
 		ap, err := io.read(ctx, ask)
 		if err != nil {
 			return done, false, err
+		}
+		if ap.state() != expectedState {
+			return done, false, askChanged("menu changed before answering; refresh the question")
 		}
 		if ap.Editing || ap.focus(ask) != i || !ap.optionsMatch(q) {
 			return done, false, askChanged(fmt.Sprintf("question %d is not the one showing", i+1))
 		}
 		io.report("answering", i+1, n)
 		pk := picks[i]
-		if pk.Option > 0 {
+		if q.MultiSelect {
+			if err := io.multiSelect(ctx, ask, i, ap, pk); err != nil {
+				return done, false, err
+			}
+		} else if pk.Option > 0 {
 			if err := io.text(ctx, fmt.Sprint(pk.Option)); err != nil {
 				return done, false, err
 			}
@@ -603,7 +682,13 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 			cleared, err = io.until(ctx, ask, true, func(askPane) bool { return false })
 			return done, cleared, err
 		}
-		ok, err := io.until(ctx, ask, false, func(p askPane) bool { return !p.Editing && p.focus(ask) == i+1 })
+		ok, err := io.until(ctx, ask, false, func(p askPane) bool {
+			if !p.Editing && p.focus(ask) == i+1 {
+				expectedState = p.state()
+				return true
+			}
+			return false
+		})
 		if err != nil || !ok {
 			return done, false, orChanged(err, "the menu did not advance")
 		}
@@ -613,11 +698,18 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 	if err != nil {
 		return done, false, err
 	}
+	if ap.state() != expectedState {
+		return done, false, askChanged("review changed before submitting")
+	}
 	if !ap.Review || len(ap.Answers) != n {
 		return done, false, askChanged("the review screen is not showing")
 	}
 	for i, q := range ask.Questions {
-		if alnumKey(ap.Answers[i]) != picks[i].key(q) {
+		matches := alnumKey(ap.Answers[i]) == picks[i].key(q)
+		if q.MultiSelect {
+			matches = multiReviewMatches(ap.Answers[i], q, picks[i])
+		}
+		if !matches {
 			return done, false, askChanged(fmt.Sprintf("review shows %q for question %d, not the answer sent; not submitted", ap.Answers[i], i+1))
 		}
 	}

@@ -166,6 +166,9 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 	if info.ReadOnly || len(info.Actions) == 0 {
 		return attentionResponseResult{}, fmt.Errorf("this menu cannot be answered from here; use the terminal")
 	}
+	if info.MenuState != "" && req.MenuState != info.MenuState {
+		return attentionResponseResult{}, askChanged("stale card; refresh the question before answering")
+	}
 	ask, ok := a.pendingAsk(se)
 	if !ok || "claude-askq-"+ask.ToolUseID != req.AttentionID {
 		return attentionResponseResult{}, fmt.Errorf("question menu changed or cleared")
@@ -181,10 +184,11 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 	var panes, keys int
 	t0 := time.Now()
 	io := askIO{
-		pane:  func(ctx context.Context) (string, error) { panes++; return a.s.sessionPane(ctx, se.ID) },
-		text:  func(ctx context.Context, t string) error { keys++; return a.s.sendKeyText(ctx, se.ID, t) },
-		named: func(ctx context.Context, k string) error { keys++; return a.s.sendNamedKey(ctx, se.ID, k) },
-		enter: func(ctx context.Context) error { keys++; return a.s.sendKeyEnter(ctx, se.ID) },
+		initialState: req.MenuState,
+		pane:         func(ctx context.Context) (string, error) { panes++; return a.s.sessionPane(ctx, se.ID) },
+		text:         func(ctx context.Context, t string) error { keys++; return a.s.sendKeyText(ctx, se.ID, t) },
+		named:        func(ctx context.Context, k string) error { keys++; return a.s.sendNamedKey(ctx, se.ID, k) },
+		enter:        func(ctx context.Context) error { keys++; return a.s.sendKeyEnter(ctx, se.ID) },
 		// 100 ms polls on the operator lane: a key shows on screen within a frame or two
 		wait: 100 * time.Millisecond, polls: 40,
 		progress: func(p askProgress) {

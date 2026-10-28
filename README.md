@@ -82,7 +82,8 @@ and compare `match`.
   `attention` event, activity probe), the Deck row says `question` / `N questions`,
   and sending shows each step (`attention-progress`). Answer walks and card loads
   use their own tmux lane (one exec per 40 ms) outside the sweep's 2/s budget; a
-  multi-select question is shown read-only with the reason.
+  multi-select question offers checkboxes and Other text. Each toggle and the final
+  review are verified against the pane; changed menu snapshots require a refresh.
 - **Interrupt** — hold to send Codex `Esc`; success is reported only after the
   rollout records an abort/idle transition.
 - **Live activity** — when an agent is working, see its thinking line

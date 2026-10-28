@@ -17,13 +17,15 @@ type attentionOption struct {
 }
 
 type attentionQuestion struct {
-	Header   string            `json:"header"`
-	ID       string            `json:"id"`
-	Question string            `json:"question"`
-	Options  []attentionOption `json:"options,omitempty"`
+	MultiSelect bool              `json:"multiSelect,omitempty"`
+	Header      string            `json:"header"`
+	ID          string            `json:"id"`
+	Question    string            `json:"question"`
+	Options     []attentionOption `json:"options,omitempty"`
 }
 
 type attentionInfo struct {
+	MenuState   string              `json:"menuState,omitempty"`
 	Pending     bool                `json:"pending"`
 	Kind        string              `json:"kind,omitempty"` // approval | question
 	ID          string              `json:"id,omitempty"`
@@ -39,11 +41,13 @@ type attentionInfo struct {
 }
 
 type attentionAnswer struct {
-	ID     string `json:"id"`
-	Answer string `json:"answer"`
+	ID      string `json:"id"`
+	Answer  string `json:"answer"`
+	Options []int  `json:"options,omitempty"` // multi-select: 1-based rows; Answer is optional Other text
 }
 
 type attentionResponseRequest struct {
+	MenuState   string            `json:"menuState,omitempty"`
 	SessionID   string            `json:"sessionId"`
 	Profile     string            `json:"profile"`
 	AttentionID string            `json:"attentionId"`

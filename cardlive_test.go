@@ -57,13 +57,13 @@ func TestSingleQuestionCardIsAnswerable(t *testing.T) {
 	}
 }
 
-func TestMultiSelectIsReadOnlyAtOnceWithReason(t *testing.T) {
+func TestMultiSelectIsAnswerableWithState(t *testing.T) {
 	ask := pendingAsk{ToolUseID: "toolu_m", Questions: []askQuestion{{
 		Header: "Multi", Question: "Pick several?", MultiSelect: true,
 		Options: []attentionOption{{Label: "One"}, {Label: "Two"}, {Label: "Three"}},
 	}}}
 	info, ok := askMenuInfo(claudeFixture(t, "askq-multi-single-pane.txt"), ask)
-	if !ok || !info.ReadOnly || len(info.Actions) != 0 || !strings.Contains(info.ReadOnlyReason, "several choices") {
+	if !ok || info.ReadOnly || len(info.Actions) != 1 || info.MenuState == "" || !info.Questions[0].MultiSelect {
 		t.Fatalf("card = %+v ok=%v", info, ok)
 	}
 }

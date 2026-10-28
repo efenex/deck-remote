@@ -2841,15 +2841,19 @@
     mount.appendChild(wrap);
     syncComposerLock();
     const form = $('#questionForm', wrap);
+    const fields = [];
     (info.questions || []).forEach((q) => {
       const field = el('fieldset', 'question-field');
       const legend = el('legend', null, q.header || 'Question');
       field.appendChild(legend);
       field.appendChild(el('div', 'question-text', q.question || ''));
+      if (q.multiSelect) field.appendChild(el('div', 'approve-foot', 'Select one or more choices.'));
+      const inputs = [];
       (q.options || []).forEach((opt, i) => {
         const label = el('label', 'question-option' + (/\((rec\.?|recommended)\)/i.test(opt.label) ? ' rec' : ''));
         const input = document.createElement('input');
-        input.type = 'radio'; input.name = q.id; input.value = opt.label; input.required = true;
+        input.type = q.multiSelect ? 'checkbox' : 'radio'; input.name = q.id; input.value = opt.label; input.required = !q.multiSelect;
+        inputs.push(input);
         label.appendChild(input);
         const copy = el('span');
         copy.innerHTML = '<b>' + esc(opt.label) + '</b>' + (opt.description ? '<small>' + esc(opt.description) + '</small>' : '');
@@ -2857,19 +2861,36 @@
       });
       const custom = el('label', 'question-option');
       const radio = document.createElement('input');
-      radio.type = 'radio'; radio.name = q.id; radio.value = '__other__'; radio.required = true;
+      radio.type = q.multiSelect ? 'checkbox' : 'radio'; radio.name = q.id; radio.value = '__other__'; radio.required = !q.multiSelect;
       const text = document.createElement('input');
       text.type = 'text'; text.className = 'question-freeform'; text.placeholder = 'Other answer';
       text.addEventListener('focus', () => { radio.checked = true; });
+      const clearValidity = () => { if (inputs[0]) inputs[0].setCustomValidity(''); text.setCustomValidity(''); };
+      [...inputs, radio, text].forEach((input) => input.addEventListener('input', clearValidity));
+      text.addEventListener('focus', clearValidity);
       custom.appendChild(radio); custom.appendChild(text); field.appendChild(custom);
       form.appendChild(field);
+      fields.push({ q, inputs, radio, text });
     });
     const submit = el('button', 'question-submit', 'Submit answers');
     submit.type = 'submit'; form.appendChild(submit);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const answers = [];
-      for (const q of (info.questions || [])) {
+      for (const { q, inputs, radio, text } of fields) {
+        if (q.multiSelect) {
+          const options = inputs.flatMap((input, i) => input.checked ? [i + 1] : []);
+          const answer = radio.checked ? text.value.trim() : '';
+          if (radio.checked && !answer) {
+            text.setCustomValidity('Enter your other answer.'); text.reportValidity(); return;
+          }
+          if (!options.length && !answer) {
+            if (inputs[0]) { inputs[0].setCustomValidity('Select at least one choice.'); inputs[0].reportValidity(); }
+            return;
+          }
+          answers.push({ id: q.id, options, answer });
+          continue;
+        }
         const checked = form.querySelector('input[type=radio][name="' + CSS.escape(q.id) + '"]:checked');
         if (!checked) return;
         let answer = checked.value;
@@ -2954,7 +2975,7 @@
     attnSendTick();
     try {
       const r = await api('POST', '/api/rc/attention/respond', {
-        sessionId: s.id, profile: CURRENT_PROFILE, attentionId: info.id, action, answers: answers || [],
+        sessionId: s.id, profile: CURRENT_PROFILE, attentionId: info.id, menuState: info.menuState, action, answers: answers || [],
       });
       if (r && r.responded) {
         s.needsAttention = false;

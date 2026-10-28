@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,7 @@ func TestAttentionUsesTranscript(t *testing.T) {
 // --- a fake TUI built from the real formats observed on a throwaway claude session ---------
 
 type askSim struct {
+	multi   [][]int // selected rows in toggle order (as observed in Claude's review)
 	ask     pendingAsk
 	focus   int // 0..N-1 questions, N review, N+1 gone
 	answers []string
@@ -140,7 +142,7 @@ type askSim struct {
 }
 
 func newAskSim(ask pendingAsk) *askSim {
-	return &askSim{ask: ask, answers: make([]string, len(ask.Questions)), freeText: map[int]string{}}
+	return &askSim{ask: ask, multi: make([][]int, len(ask.Questions)), answers: make([]string, len(ask.Questions)), freeText: map[int]string{}}
 }
 
 func (s *askSim) gone() bool { return s.focus > len(s.ask.Questions) }
@@ -184,20 +186,24 @@ func (s *askSim) render() string {
 	q := s.ask.Questions[s.focus]
 	b.WriteString("│ " + q.Question + "\n\n")
 	for i, o := range q.Options {
+		label := o.Label
+		if q.MultiSelect {
+			label = s.multiBox(i+1) + label
+		}
 		mark := ""
-		if s.answers[s.focus] == o.Label {
+		if !q.MultiSelect && s.answers[s.focus] == o.Label {
 			mark = " ✔"
 		}
 		cur := "  "
 		if i == s.cursor {
 			cur = "❯ "
 		}
-		fmt.Fprintf(&b, "%s%d. %s%s\n     %s\n", cur, i+1, o.Label, mark, o.Description)
+		fmt.Fprintf(&b, "%s%d. %s%s\n     %s\n", cur, i+1, label, mark, o.Description)
 	}
 	free := "Type something."
 	if t := s.freeText[s.focus]; t != "" {
 		free = t
-		if s.answers[s.focus] == t {
+		if !q.MultiSelect && s.answers[s.focus] == t {
 			free += " ✔"
 		}
 	}
@@ -208,7 +214,24 @@ func (s *askSim) render() string {
 	if s.cursor == len(q.Options) {
 		fcur = "❯ "
 	}
-	fmt.Fprintf(&b, "%s%d. %s\n──────────────────────────────────────────\n  %d. Chat about this\n\n", fcur, len(q.Options)+1, free, len(q.Options)+2)
+	if q.MultiSelect {
+		if free == "Type something." {
+			free = "Type something"
+		}
+		free = s.multiBox(len(q.Options)+1) + free
+	}
+	fmt.Fprintf(&b, "%s%d. %s\n", fcur, len(q.Options)+1, free)
+	if q.MultiSelect {
+		cur, label := "     ", "Next"
+		if s.cursor == len(q.Options)+1 {
+			cur = "❯    "
+		}
+		if s.focus == n-1 {
+			label = "Submit"
+		}
+		fmt.Fprintf(&b, "%s%s\n", cur, label)
+	}
+	fmt.Fprintf(&b, "──────────────────────────────────────────\n  %d. Chat about this\n\n", len(q.Options)+2)
 	if s.editing {
 		b.WriteString("Enter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Vim · Esc to cancel\n")
 	} else {
@@ -234,6 +257,9 @@ func (s *askSim) sendText(text string) {
 	case s.gone():
 	case s.editing:
 		s.typed += text
+		if s.ask.Questions[s.focus].MultiSelect {
+			s.multiText()
+		}
 	case s.focus == n:
 		if text == "1" {
 			s.focus = n + 1
@@ -243,6 +269,8 @@ func (s *askSim) sendText(text string) {
 		var d int
 		fmt.Sscanf(text, "%d", &d)
 		switch {
+		case q.MultiSelect && d >= 1 && d <= len(q.Options)+1:
+			s.toggleMulti(d)
 		case d >= 1 && d <= len(q.Options):
 			s.answers[s.focus] = q.Options[d-1].Label
 			s.advance()
@@ -285,15 +313,65 @@ func (s *askSim) sendNamed(k string) {
 	case k == "Left" && s.focus > 0 && !s.editing:
 		s.focus--
 		s.cursor = 0
+	case k == "Right" && !s.editing:
+		s.advance()
+	case k == "Up" && s.cursor > 0:
+		s.cursor--
+		s.editing = s.cursor == len(s.ask.Questions[s.focus].Options)
 	case k == "Down" && s.cursor <= len(s.ask.Questions[s.focus].Options):
 		s.cursor++
 		if s.cursor == len(s.ask.Questions[s.focus].Options) {
 			s.editing, s.typed = true, s.freeText[s.focus]
+		} else {
+			s.editing = false
 		}
 	case k == "BSpace" && s.editing && s.typed != "":
 		r := []rune(s.typed)
 		s.typed = string(r[:len(r)-1])
+		if s.ask.Questions[s.focus].MultiSelect {
+			s.multiText()
+		}
 	}
+}
+
+func (s *askSim) multiBox(row int) string {
+	if slices.Contains(s.multi[s.focus], row) {
+		return "[✔] "
+	}
+	return "[ ] "
+}
+
+func (s *askSim) toggleMulti(row int) {
+	rows := s.multi[s.focus]
+	if i := slices.Index(rows, row); i >= 0 {
+		rows = slices.Delete(rows, i, i+1)
+	} else {
+		rows = append(rows, row)
+	}
+	s.multi[s.focus] = rows
+	s.multiAnswer()
+}
+
+func (s *askSim) multiText() {
+	s.freeText[s.focus] = s.typed
+	row := len(s.ask.Questions[s.focus].Options) + 1
+	if slices.Contains(s.multi[s.focus], row) != (s.typed != "") {
+		s.toggleMulti(row)
+	}
+	s.multiAnswer()
+}
+
+func (s *askSim) multiAnswer() {
+	var labels []string
+	q := s.ask.Questions[s.focus]
+	for _, row := range s.multi[s.focus] {
+		if row <= len(q.Options) {
+			labels = append(labels, q.Options[row-1].Label)
+		} else if s.freeText[s.focus] != "" {
+			labels = append(labels, s.freeText[s.focus])
+		}
+	}
+	s.answers[s.focus] = strings.Join(labels, ", ")
 }
 
 func (s *askSim) io() askIO {
@@ -425,7 +503,7 @@ func TestChangedMenuRefused(t *testing.T) {
 			t.Errorf("err=%v keys=%q", err, s.keys)
 		}
 	})
-	t.Run("multiSelect is refused up front", func(t *testing.T) {
+	t.Run("multiSelect requires multiple-choice payload", func(t *testing.T) {
 		m := ask
 		m.Questions = append([]askQuestion(nil), ask.Questions...)
 		m.Questions[1].MultiSelect = true
@@ -433,8 +511,8 @@ func TestChangedMenuRefused(t *testing.T) {
 		if _, _, err := answerAsk(context.Background(), s.io(), m, picks); err == nil || len(s.keys) != 0 {
 			t.Errorf("err=%v keys=%q", err, s.keys)
 		}
-		if info, ok := askMenuInfo(askFixturePane(t), m); !ok || !info.ReadOnly || len(info.Actions) != 0 {
-			t.Errorf("a multiSelect menu must be a read-only card: %+v", info)
+		if info, ok := askMenuInfo(askFixturePane(t), m); !ok || info.ReadOnly || len(info.Actions) != 1 {
+			t.Errorf("a multiSelect menu must be answerable: %+v", info)
 		}
 	})
 }

@@ -1,0 +1,27 @@
+
+ ▐▛███▛█   Claude Code v2.1.312
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp · /rc
+
+
+❯ Call AskUserQuestion now with exactly these two questions. First header Multi, question Pick several?, multiSelect
+  true, options One (First), Two (Second), Three (Third). Second header Solo, question Pick one?, multiSelect false,
+  options Yes (Proceed), No (Stop). This is a UI test; use the tool, do not ask in prose. After receiving answers just
+  echo them.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Multi  ☐ Solo  ✔ Submit  →
+
+Pick several?
+
+❯ 1. [✔] One (First)
+         First option
+  2. [ ] Two (Second)
+         Second option
+  3. [ ] Three (Third)
+         Third option
+  4. [ ] Type something
+     Next
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
