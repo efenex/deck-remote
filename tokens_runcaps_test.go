@@ -58,7 +58,7 @@ func TestRunCapMintLocalOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DECK_REMOTE_STATE_DIR", state)
-	s := newServer(config{token: "shared", homeDir: home, profile: "default", towerOperator: "op@example.com", bin: "/nonexistent/agent-deck"}, &url.URL{Scheme: "http", Host: "127.0.0.1:1"})
+	s := newServer(config{token: "shared", homeDir: home, profile: "default", publicURL: pkOrigin, towerOperator: "op@example.com", bin: "/nonexistent/agent-deck"}, &url.URL{Scheme: "http", Host: "127.0.0.1:1"})
 	h := s.routes()
 	mint := func(caps []string, remote string, hdr map[string]string) *httptest.ResponseRecorder {
 		b, _ := json.Marshal(map[string]any{"name": "p", "caps": caps})

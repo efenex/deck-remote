@@ -114,23 +114,10 @@ func (p *pairHub) take(code string) (pairOffer, string) {
 	return o, ""
 }
 
-// originURL is the PWA origin a phone should use: --public-url when set, else the request's
-// forwarded host/proto (tailscale serve sets these), else Host.
-func (s *server) originURL(r *http.Request) string {
-	if base := strings.TrimRight(s.cfg.publicURL, "/"); base != "" {
-		return base
-	}
-	scheme := "https"
-	if xf := r.Header.Get("X-Forwarded-Proto"); xf != "" {
-		scheme = xf
-	} else if r.TLS == nil && r.Header.Get("X-Forwarded-For") == "" {
-		scheme = "http"
-	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	return scheme + "://" + host
+// originURL is the configured PWA origin. Laptop requests reach a different listener
+// (often loopback or a private TLS port), so their Host cannot identify the phone's origin.
+func (s *server) originURL() string {
+	return strings.TrimRight(strings.TrimSpace(s.cfg.publicURL), "/")
 }
 
 // POST /api/rc/devices/pair {name, caps}. Behind authShared; laptop only for every offer, since
@@ -146,6 +133,10 @@ func (s *server) handlePairOffer(w http.ResponseWriter, r *http.Request) {
 		entry["reason"] = why
 		s.towerLog(entry)
 		httpError(w, http.StatusForbidden, "pairing QRs are made on the laptop only: "+why)
+		return
+	}
+	if s.originURL() == "" {
+		httpError(w, http.StatusConflict, "pairing requires --public-url (DECK_REMOTE_PUBLIC_URL) set to the phone's PWA origin")
 		return
 	}
 	caps, err := normCaps(body.Caps)
@@ -168,7 +159,7 @@ func (s *server) handlePairOffer(w http.ResponseWriter, r *http.Request) {
 	s.towerLog(entry)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "caps": caps, "code": code,
-		"url":       s.originURL(r) + "/#pair=" + code,
+		"url":       s.originURL() + "/#pair=" + code,
 		"expiresIn": int(pairTTL / time.Second),
 	})
 }

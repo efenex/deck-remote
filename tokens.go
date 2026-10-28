@@ -399,6 +399,10 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 		}
 		break
 	}
+	if s.originURL() == "" {
+		httpError(w, http.StatusConflict, "device enrollment requires --public-url (DECK_REMOTE_PUBLIC_URL) set to the phone's PWA origin")
+		return
+	}
 	dt, raw, err := s.tokens.mint(body.Name, body.Caps...)
 	if err != nil {
 		if strings.Contains(err.Error(), "capabilit") {
@@ -410,7 +414,7 @@ func (s *server) handleDeviceMint(w http.ResponseWriter, r *http.Request) {
 	}
 	// Phone URL embeds the token so the device can self-enroll by opening it;
 	// the PWA strips the token from the address bar on load (see app.js).
-	phoneURL := s.phoneURL(r, raw)
+	phoneURL := s.phoneURL(raw)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":       dt.ID,
 		"name":     dt.Name,
@@ -471,10 +475,7 @@ func (s *server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// phoneURL builds an enrollment URL (origin + ?token=). A configured public base
-// (--public-url / DECK_REMOTE_PUBLIC_URL, e.g. the fixed tailscale hostname; also the passkey rpId) is preferred and
-// trusted; otherwise it derives the origin from the request's forwarded
-// host/proto (tailscale serve sets these), falling back to Host.
-func (s *server) phoneURL(r *http.Request, raw string) string {
-	return s.originURL(r) + "/?token=" + raw
+// phoneURL builds an enrollment URL from the required public origin.
+func (s *server) phoneURL(raw string) string {
+	return s.originURL() + "/?token=" + raw
 }

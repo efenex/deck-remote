@@ -82,7 +82,7 @@ func loadConfig() config {
 	flag.StringVar(&c.pushSubject, "push-subject", def("DECK_REMOTE_PUSH_SUBJECT", defaultPushSubject), "VAPID 'sub' contact URI (mailto: or https:); Apple rejects non-routable subjects")
 	flag.StringVar(&c.tlsCert, "tls-cert", def("DECK_REMOTE_TLS_CERT", ""), "PEM cert to terminate TLS with (a `tailscale cert` fullchain); empty = plain HTTP behind tailscale serve")
 	flag.StringVar(&c.tlsKey, "tls-key", def("DECK_REMOTE_TLS_KEY", ""), "PEM key matching --tls-cert")
-	flag.StringVar(&c.publicURL, "public-url", def("DECK_REMOTE_PUBLIC_URL", ""), "fixed tailnet origin, e.g. https://host.tailnet.ts.net: the passkey rpId and the only origin a passkey ceremony accepts; empty = passkeys off")
+	flag.StringVar(&c.publicURL, "public-url", def("DECK_REMOTE_PUBLIC_URL", ""), "phone PWA origin, e.g. https://host.tailnet.ts.net: required for pairing, device enrollment and passkeys; empty disables all three")
 	flag.StringVar(&c.towerOverview, "tower-overview", def("DECK_REMOTE_TOWER_OVERVIEW", ""), "path to tower's overview.json; empty = no tower tab")
 	flag.StringVar(&c.towerOperator, "tower-operator", def("DECK_REMOTE_TOWER_OPERATOR", ""), "Tailscale login allowed to perform tower actions (reply-to-ask); empty = actions refused")
 	flag.StringVar(&c.towerSession, "tower-session", def("DECK_REMOTE_TOWER_SESSION", "tower"), "agent-deck session that receives tower replies")

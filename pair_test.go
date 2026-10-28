@@ -57,6 +57,28 @@ func TestPairOfferIsLaptopOnly(t *testing.T) {
 	expectCode(t, "bad cap", e.req("POST", "/api/rc/devices/pair", e.shrd, map[string]any{"caps": []string{"run:mut"}}, local), 400, "needs act")
 }
 
+func TestPhoneEnrollmentRequiresPublicURL(t *testing.T) {
+	for _, endpoint := range []string{"pair", "mint"} {
+		t.Run(endpoint, func(t *testing.T) {
+			e := pkServer(t)
+			e.s.cfg.publicURL = ""
+			body := map[string]any{"name": "phone", "caps": []string{"act", "run:mut"}}
+			loopback := func(r *http.Request) { local(r); r.Host = "127.0.0.1:8765" }
+			w := e.req("POST", "/api/rc/devices/"+endpoint, e.shrd, body, loopback)
+			expectCode(t, "missing public origin", w, 409, "--public-url")
+			if len(e.s.tokens.list()) != 0 || len(e.s.pairs.offers) != 0 {
+				t.Error("missing origin created a token or offer")
+			}
+			e.s.cfg.publicURL = pkOrigin + "/"
+			w = e.req("POST", "/api/rc/devices/"+endpoint, e.shrd, body, loopback)
+			expectCode(t, "configured public origin", w, 200, pkOrigin+"/")
+			if strings.Contains(w.Body.String(), "127.0.0.1") {
+				t.Error("enrollment URL used listener origin")
+			}
+		})
+	}
+}
+
 func TestPairRedeemMintsOnceAndEnrolsWithoutCode(t *testing.T) {
 	e := pkServer(t)
 	code, _ := e.offerPair("act", "run:ro", "run:mut")
