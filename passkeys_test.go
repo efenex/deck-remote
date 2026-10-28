@@ -36,6 +36,58 @@ var (
 	shaLaptop = strings.Repeat("e", 64) // item 2: mut, laptop only
 )
 
+func TestPasskeyStartupPreservesCredentialsOnTokenLoadFailure(t *testing.T) {
+	for _, failure := range []string{"missing", "malformed", "wrong-field-type", "unreadable"} {
+		t.Run(failure, func(t *testing.T) {
+			dir := t.TempDir()
+			h := newPasskeyHub(dir)
+			h.recs = []passkeyRecord{{Device: "fixture-device", Created: 123}}
+			if err := h.saveLocked(); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "deck-remote-tokens.json")
+			switch failure {
+			case "malformed":
+				if err := os.WriteFile(path, []byte("["), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "wrong-field-type":
+				if err := os.WriteFile(path, []byte(`[{"id":"fixture-device","hash":"fixture","caps":"act"}]`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				// Reading a directory fails even when tests run with elevated privileges.
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.startup(newTokenStore(dir))
+			if len(h.recs) != 1 || len(newPasskeyHub(dir).recs) != 1 {
+				t.Fatal("startup erased credentials after token load failure")
+			}
+			if failure == "unreadable" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(path, []byte(`[{"id":"fixture-device","hash":"fixture"}]`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h.startup(newTokenStore(dir))
+			if len(h.recs) != 1 {
+				t.Fatal("credential lost after token file repair")
+			}
+			if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h.startup(newTokenStore(dir))
+			if len(h.recs) != 0 || len(newPasskeyHub(dir).recs) != 0 {
+				t.Fatal("valid empty token store did not prune credentials")
+			}
+		})
+	}
+}
+
 // softAuth is a platform authenticator in software. Per call the test controls what a real one
 // would not let it: the origin in clientData, the UV bit and the sign counter.
 type softAuth struct {

@@ -208,6 +208,9 @@ func (h *passkeyHub) credsLocked(device string) []webauthn.Credential {
 // prune drops credentials whose device token no longer exists (a revoke by an older binary, or
 // a hand-edited token file).
 func (h *passkeyHub) prune(ts *tokenStore) {
+	if ts.loadErr != nil {
+		return // unavailable token state is not evidence of revocation
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	kept := h.recs[:0]

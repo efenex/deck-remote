@@ -109,24 +109,30 @@ func runCapFor(cls string) string {
 // tokenStore persists named device tokens to a 0600 JSON file. All methods are
 // safe for concurrent use; the auth path (verify) is the hot one.
 type tokenStore struct {
-	mu     sync.RWMutex
-	path   string
-	tokens []deviceToken
+	mu      sync.RWMutex
+	path    string
+	tokens  []deviceToken
+	loadErr error // startup snapshot was not readable/parseable; never authoritative for pruning
 }
 
 // newTokenStore loads (or initializes) the device-token store at
-// dir/deck-remote-tokens.json. A missing/corrupt file yields an empty store
-// (never an error that would block startup) — the shared token still works.
+// dir/deck-remote-tokens.json. A missing/unreadable/corrupt file yields an empty
+// store with loadErr set; the shared token still works, but credentials must not be pruned.
 func newTokenStore(dir string) *tokenStore {
 	ts := &tokenStore{path: filepath.Join(dir, "deck-remote-tokens.json")}
-	if b, err := os.ReadFile(ts.path); err == nil {
-		var arr []deviceToken
-		if json.Unmarshal(b, &arr) == nil {
-			for _, t := range arr {
-				if t.Hash != "" {
-					ts.tokens = append(ts.tokens, t)
-				}
-			}
+	b, err := os.ReadFile(ts.path)
+	if err != nil {
+		ts.loadErr = err
+		return ts
+	}
+	var arr []deviceToken
+	if err := json.Unmarshal(b, &arr); err != nil {
+		ts.loadErr = err
+		return ts
+	}
+	for _, t := range arr {
+		if t.Hash != "" {
+			ts.tokens = append(ts.tokens, t)
 		}
 	}
 	return ts
