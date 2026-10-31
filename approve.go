@@ -41,25 +41,45 @@ var claudeDialogSelector = regexp.MustCompile(`(?m)^[\s│]*❯\s*\d+\.`)
 
 // claudeCountdownRE matches Claude's unattended-session timer, e.g.
 // "⚠ Claude Code will automatically block this request in 0:16, to avoid holding up an
-// unattended session". The text may wrap on a narrow terminal, so \s spans newlines between
-// the words; the match runs to the end of the line holding the M:SS.
-var claudeCountdownRE = regexp.MustCompile(`(?i)[│ \t⚠]*(?:\bClaude Code will\s+)?\bautomatically\s+(?:block|deny|reject|cancel)[^:]{0,120}?\bin\s+(\d+):(\d{2})\b[^\n]*`)
+// unattended session". Anchored to a line that STARTS (past box borders) with the ⚠ and the
+// full "Claude Code will automatically" lead-in, so a command or transcript text that merely
+// mentions the words is never touched. A narrow terminal wraps the sentence: a bounded
+// "\n + border/indent" continuation is allowed before the M:SS, never a colon or a longer run.
+// The match ends at the end of the line holding the M:SS.
+var claudeCountdownRE = regexp.MustCompile(`(?m)^[│ \t]*⚠[ \t]*Claude Code will[ \t]+automatically[ \t]+(?:block|deny|reject|cancel)(?:[^:\n]|\n[│ \t]*){0,160}?\bin(?:[ \t]+|\n[│ \t]*)(\d+):(\d{2})\b[^\n]*`)
 
 // claudeNow is the clock behind a countdown's deadline (a test seam).
 var claudeNow = time.Now
 
-// stripClaudeCountdown removes the ticking auto-block line from a pane capture and returns
-// how long Claude says is left (-1 when there is no countdown).
+// stripClaudeCountdown removes the ticking auto-block line from the dialog at the bottom of a
+// pane capture (the last claudeDialogWindow non-blank lines; the scrollback is left alone, so
+// old text quoting the phrase can neither change the output nor set a deadline) and returns how
+// long Claude says is left (-1 when there is no countdown).
 func stripClaudeCountdown(pane string) (string, time.Duration) {
+	lines := strings.Split(stripANSI(pane), "\n")
+	start, seen := 0, 0
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		if seen++; seen == claudeDialogWindow {
+			start = i
+			break
+		}
+	}
+	head, tail := strings.Join(lines[:start], "\n"), strings.Join(lines[start:], "\n")
 	remaining := time.Duration(-1)
-	out := claudeCountdownRE.ReplaceAllStringFunc(stripANSI(pane), func(m string) string {
+	tail = claudeCountdownRE.ReplaceAllStringFunc(tail, func(m string) string {
 		sub := claudeCountdownRE.FindStringSubmatch(m)
 		min, _ := strconv.Atoi(sub[1])
 		sec, _ := strconv.Atoi(sub[2])
 		remaining = time.Duration(min*60+sec) * time.Second
-		return "\n"
+		return ""
 	})
-	return out, remaining
+	if start == 0 {
+		return tail, remaining
+	}
+	return head + "\n" + tail, remaining
 }
 
 // isClaudePermissionPrompt reports whether a permission dialog is live at the
