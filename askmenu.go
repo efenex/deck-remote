@@ -518,6 +518,9 @@ type askIO struct {
 	// wait/polls bound how long a key may take to show on screen.
 	wait  time.Duration
 	polls int
+	// stepTimeout, when set, extends that bound to a wall-clock budget: on a loaded host one
+	// pane capture can take seconds, so a poll count alone gives up on a key that is still landing.
+	stepTimeout time.Duration
 	// progress, when set, is told each step of the walk (for the operator's card).
 	progress func(askProgress)
 }
@@ -558,7 +561,8 @@ func (io askIO) read(ctx context.Context, ask pendingAsk) (askPane, error) {
 
 // until polls until cond holds on the parsed pane (or the menu is gone, when goneOK).
 func (io askIO) until(ctx context.Context, ask pendingAsk, goneOK bool, cond func(askPane) bool) (bool, error) {
-	for i := 0; i < io.polls; i++ {
+	start := time.Now()
+	for i := 0; i < io.polls || (io.stepTimeout > 0 && time.Since(start) < io.stepTimeout); i++ {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
@@ -627,7 +631,15 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 	if ap.Single && (n != 1 || f != 0) {
 		return 0, false, askChanged("the single question on screen is not the pending one")
 	}
-	if f != 0 {
+	// Resume: an earlier walk (cut off by a dropped connection or a slow host) already entered the
+	// tabs before the one showing. Never answer a tab twice: pick up at the focused, still
+	// unanswered tab, or go straight to the review when every tab is answered. The review check
+	// below still compares every answer, including the earlier ones, with the picks.
+	start := 0
+	if f > 0 && !ap.Single && answeredBefore(ap, f) && (f == n || !ap.Tabs[f].Answered) {
+		start = f
+	}
+	if start == 0 && f != 0 {
 		for target := f - 1; target >= 0; target-- {
 			live, err := io.read(ctx, ask)
 			if err != nil {
@@ -652,7 +664,11 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 		}
 	}
 	expectedState := ap.state()
+	done = start
 	for i, q := range ask.Questions {
+		if i < start {
+			continue
+		}
 		ap, err := io.read(ctx, ask)
 		if err != nil {
 			return done, false, err
@@ -719,6 +735,33 @@ func answerAsk(ctx context.Context, io askIO, ask pendingAsk, picks []askPick) (
 	}
 	cleared, err = io.until(ctx, ask, true, func(askPane) bool { return false })
 	return done, cleared, err
+}
+
+// askPartialError says how far a walk got: Done of Total answers are in the menu and a retry
+// finishes from where the menu stands (answerAsk resumes at the first unanswered tab). The phone
+// shows it as "3 of 4 sent", not "Not sent".
+type askPartialError struct {
+	Done, Total int
+	Err         error
+}
+
+func (e *askPartialError) Error() string {
+	return fmt.Sprintf("%d of %d answers are entered: %v", e.Done, e.Total, e.Err)
+}
+
+func (e *askPartialError) Unwrap() error { return e.Err }
+
+// answeredBefore: tabs 0..f-1 all show as answered.
+func answeredBefore(ap askPane, f int) bool {
+	if f > len(ap.Tabs) {
+		f = len(ap.Tabs)
+	}
+	for _, t := range ap.Tabs[:f] {
+		if !t.Answered {
+			return false
+		}
+	}
+	return true
 }
 
 func orChanged(err error, why string) error {

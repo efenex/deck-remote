@@ -281,7 +281,7 @@ test('a phone send the target filed as a peer message is one row, delivered', ()
   assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · delivered');
 });
 
-const { attentionChipLabel, answerProgressLabel } = require('./thread.js');
+const { attentionChipLabel, answerProgressLabel, answerFailureLabel } = require('./thread.js');
 
 test('the Deck row badge says what is waiting', () => {
   assert.strictEqual(attentionChipLabel({ needsAttention: false, attentionKind: 'question' }), '');
@@ -301,4 +301,15 @@ test('answer progress reads as steps', () => {
 test('a failed photo bubble cannot retry as a text-only message', () => {
   const thread = require('./thread.js');
   assert.equal(thread.canRetry({ status: 'failed', retryable: true, images: 1 }), false);
+});
+
+test('answerFailureLabel says how far a multi-question submit got, never "Not sent" for a partial one', () => {
+  const partial = answerFailureLabel({ status: 409, message: '3 of 4 answers are entered: x', data: { done: 3, total: 4 } });
+  assert.strictEqual(partial, '3 of 4 answers sent; tap Submit answers to finish.');
+  assert.match(answerFailureLabel({ status: 409, message: 'x', data: { done: 4, total: 4 } }), /All 4 answers are entered but not submitted/);
+  const timeout = answerFailureLabel(new Error('Host did not respond within 12 s'));
+  assert.doesNotMatch(timeout, /^Not sent/);
+  assert.match(timeout, /may still be going in/);
+  assert.match(answerFailureLabel({ status: 409, message: 'an answer for this session is already being sent' }), /Still sending/);
+  assert.strictEqual(answerFailureLabel({ status: 409, message: 'stale card', data: { error: 'stale card' } }), 'Not sent: stale card');
 });

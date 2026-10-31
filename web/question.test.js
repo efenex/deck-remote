@@ -108,6 +108,7 @@ function refreshEnv(serverState, postError) {
     renderDeck() {}, syncComposerLock() {}, toast() {}, renderConvo() {}, ensureConvo: () => [],
     renderQuestionPanel() { throw new Error('kept card must not be re-rendered'); }, renderApprovePanel() {},
     attnLock() {}, attnSendTick() {}, setInterval: () => 1, clearInterval() {}, Date,
+    DeckThread: require('./thread.js'), DeckNetwork: require('./network.js'),
   };
   vm.runInNewContext(attention + '\nthis.check = checkAttention; this.respond = respondAttention;', ctx);
   return { ...env, foot, posts, ctx };
@@ -131,4 +132,19 @@ test('a passive re-check keeps the snapshot; the check button refreshes it', asy
   assert.equal(env.card.attnInfo.menuState, 'snapshot1');
   assert.equal(await env.ctx.check({ id: 's1' }, true), true);
   assert.equal(env.card.attnInfo.menuState, 'snapshot2');
+});
+
+// 2026-10-31: a 4-question Submit that the host did not finish said "Not sent: Host did not respond
+// within 12 s" although 3 answers were in the menu. A reply carrying {done,total} says how far it got,
+// and the answer POST gets a budget scaled to the question count, not the default 12 s.
+test('a partly entered walk says "3 of 4 answers sent", and the answer POST gets a scaled budget', async () => {
+  const err = Object.assign(new Error('3 of 4 answers are entered: question menu changed or cleared'), { status: 409, data: { done: 3, total: 4 } });
+  const env = refreshEnv('snapshot1', err);
+  let budget;
+  const origApi = env.ctx.api;
+  env.ctx.api = async (method, url, body, raw, timeout) => { if (method === 'POST') budget = timeout; return origApi(method, url, body); };
+  await env.ctx.respond({ id: 's1' }, env.card.attnInfo, 'answer', [{ id: 'q0', options: [1], answer: '' }]);
+  assert.match(env.foot.textContent, /^3 of 4 answers sent; tap Submit answers to finish\./);
+  assert.doesNotMatch(env.foot.textContent, /Not sent/);
+  assert.ok(budget > 12000, 'answer budget ' + budget);
 });

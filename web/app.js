@@ -81,7 +81,7 @@
     return path + (path.includes('?') ? '&' : '?') + 'profile=' + encodeURIComponent(CURRENT_PROFILE);
   }
 
-  async function api(method, path, body, raw = false) {
+  async function api(method, path, body, raw = false, timeoutMs) {
     const opts = { method, headers: authHeaders() };
     const multipart = typeof FormData !== 'undefined' && body instanceof FormData;
     if (multipart) opts.body = body;
@@ -108,7 +108,7 @@
           throw e;
         }
         return data;
-      }, multipart ? 60000 : 12000);
+      }, timeoutMs || (multipart ? 60000 : 12000));
     } catch (e) {
       if (!e.status && e.message !== 'unauthorized') {
         connection.error = e.message || 'Network request failed';
@@ -3027,7 +3027,7 @@
     try {
       const r = await api('POST', '/api/rc/attention/respond', {
         sessionId: s.id, profile: CURRENT_PROFILE, attentionId: info.id, menuState: info.menuState, action, answers: answers || [],
-      });
+      }, false, action === 'answer' ? DeckNetwork.answerBudget((info.questions || []).length) : undefined);
       if (r && r.responded) {
         s.needsAttention = false;
         const mount = $('#approveMount'); if (mount) mount.innerHTML = '';
@@ -3037,12 +3037,12 @@
         renderConvo(s.id); renderDeck();
       }
     } catch (e) {
-      const msg = e.status === 403 ? e.message : 'Not sent: ' + e.message;
+      const msg = e.status === 403 ? e.message : DeckThread.answerFailureLabel(e);
       attnLock(false);
       attnFoot(msg, true);
       if (e.status === 403) toast('Not sent', e.message);
       else {
-        ensureConvo(s.id).push({ role: 'error', content: 'Answer ' + msg.charAt(0).toLowerCase() + msg.slice(1), ts: Date.now() / 1000 });
+        ensureConvo(s.id).push({ role: 'error', content: /^Not sent/.test(msg) ? 'Answer ' + msg.charAt(0).toLowerCase() + msg.slice(1) : msg, ts: Date.now() / 1000 });
         renderConvo(s.id);
       }
       const refreshed = await checkAttention(s, false, true);
@@ -3229,6 +3229,14 @@
         if (state.openSheetId === id) checkAttention(s, false);
       }
     } else if (ev.type === 'attention-result') {
+      // A walk that failed after the phone stopped waiting (the host kept going): say how far it got.
+      if (id && state.openSheetId === id && ev.error && !attnSend.key) {
+        const s = state.sessions.get(id);
+        if (s) {
+          checkAttention(s, false, true);
+          attnFoot(DeckThread.answerFailureLabel({ message: ev.error, status: 409, data: { done: ev.done, total: ev.total } }), true);
+        }
+      }
       if (id && state.openSheetId === id && ev.responded) {
         const s = state.sessions.get(id);
         if (s) { s.needsAttention = false; checkAttention(s, false); }

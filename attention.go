@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -149,10 +150,15 @@ func (s *server) handleAttentionRespond(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	timeout := 25 * time.Second
+	parent := r.Context()
 	if req.Action == "answer" {
-		timeout = 90 * time.Second // a key batch per question, each re-verified against a paced pane capture
+		timeout = 150 * time.Second // a key batch per question, each re-verified against a paced pane capture
+		// The walk outlives the HTTP request: a phone that gives up (slow host, network blip) must not
+		// cancel it between two tabs and leave the menu half answered (2026-10-31: 3 of 4). Its
+		// outcome reaches the phone as an attention-result event as well.
+		parent = context.WithoutCancel(parent)
 	}
-	ctx, cancel := cliCtx(withOperatorLane(withProfile(r.Context(), req.Profile)), timeout)
+	ctx, cancel := cliCtx(withOperatorLane(withProfile(parent, req.Profile)), timeout)
 	defer cancel()
 	se, err := s.findSession(ctx, req.SessionID)
 	if err != nil {
@@ -161,7 +167,22 @@ func (s *server) handleAttentionRespond(w http.ResponseWriter, r *http.Request) 
 	}
 	result, err := s.adapterFor(se).RespondAttention(ctx, se, req)
 	if err != nil {
-		httpError(w, http.StatusConflict, err.Error())
+		body := map[string]any{"error": err.Error()}
+		var partial *askPartialError
+		if errors.As(err, &partial) {
+			body["done"], body["total"] = partial.Done, partial.Total
+		}
+		if req.Action == "answer" {
+			ev := map[string]any{
+				"type": "attention-result", "sessionId": se.ID, "attentionId": req.AttentionID,
+				"responded": false, "error": err.Error(), "ts": time.Now().Unix(),
+			}
+			if partial != nil {
+				ev["done"], ev["total"] = partial.Done, partial.Total
+			}
+			s.hub.publish(ev)
+		}
+		writeJSON(w, http.StatusConflict, body)
 		return
 	}
 	s.hub.publish(map[string]any{

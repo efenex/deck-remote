@@ -16,6 +16,11 @@
       ]);
     } finally { clearTimeout(timer); }
   }
+  // An answer walk presses one key per question and checks the live menu after each; on a loaded
+  // host that is seconds per question, not a 12 s request. The budget grows with the question count.
+  function answerBudget(questions) {
+    return Math.min(120000, 20000 + 15000 * Math.max(1, questions | 0));
+  }
   function retryDelay(failures) { return Math.min(30000, 1000 * Math.pow(2, Math.min(failures, 5))); }
   function feedback(s, now = Date.now()) {
     const contact = s.lastContact ? new Date(s.lastContact).toISOString() : 'never';
@@ -24,7 +29,7 @@
       ' · last error: ' + (s.error || 'connection lost') + ' · last contact: ' + contact +
       ' · cached data may be stale' + (s.failures >= 3 ? ' · Host may be asleep.' : '');
   }
-  const api = { request, retryDelay, feedback };
+  const api = { request, answerBudget, retryDelay, feedback };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckNetwork = api;
 })(typeof window !== 'undefined' ? window : globalThis);

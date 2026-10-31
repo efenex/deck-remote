@@ -23,3 +23,10 @@ test('reconnect feedback includes count, countdown, error, contact and sleep hin
   assert.equal(N.retryDelay(50), 30000);
   assert.ok(!N.feedback({ attempt: 1, failures: 1 }, 0).includes('asleep'));
 });
+
+test('answerBudget scales with the question count and is capped', () => {
+  assert.ok(N.answerBudget(4) > 12000 * 4);
+  assert.ok(N.answerBudget(4) > N.answerBudget(1));
+  assert.strictEqual(N.answerBudget(0), N.answerBudget(1));
+  assert.ok(N.answerBudget(50) <= 120000);
+});

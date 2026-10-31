@@ -260,7 +260,27 @@
     }
   }
 
-  const api = { attentionChipLabel, answerProgressLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  // What the card says when an answer walk did not finish. The host reports how many answers are
+  // already in the menu ({done,total}); a sending tap again finishes the rest. A request that got no
+  // reply at all may still be landing on the host, so it is not called "Not sent".
+  function answerFailureLabel(err) {
+    const e = err || {};
+    const d = e.data || {};
+    if (d.total > 0 && d.done > 0) {
+      return d.done >= d.total
+        ? 'All ' + d.total + ' answers are entered but not submitted yet; tap Submit answers to finish.'
+        : d.done + ' of ' + d.total + ' answers sent; tap Submit answers to finish.';
+    }
+    if (!e.status && /did not respond/.test(e.message || '')) {
+      return 'No reply from the host yet: your answers may still be going in. Re-checking the menu; if it is partly answered, tap Submit answers to finish.';
+    }
+    if (e.status === 409 && /already being sent/.test(e.message || '')) {
+      return 'Still sending the earlier tap; the host is working through your answers.';
+    }
+    return 'Not sent: ' + (e.message || 'unknown error');
+  }
+
+  const api = { attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

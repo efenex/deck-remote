@@ -139,6 +139,43 @@ type askSim struct {
 	review map[int]string
 	// single draws a lone question without tab row or review screen; any selection submits it.
 	single bool
+	// lag models a slow host: a key's effect shows on screen only after this many more captures.
+	lag   int
+	queue []laggedKey
+	// capDelay is how long each capture takes (a loaded host).
+	capDelay time.Duration
+	// failKey, when set, is asked before a key is delivered; true drops it with an error (the
+	// send-keys process was killed with the request).
+	failKey func(n int) error
+	sent    int
+}
+
+type laggedKey struct {
+	due   int
+	apply func()
+}
+
+// deliver applies a key now, or after lag captures. A dropped key never reaches the screen.
+func (s *askSim) deliver(apply func()) error {
+	s.sent++
+	if s.failKey != nil {
+		if err := s.failKey(s.sent); err != nil {
+			return err
+		}
+	}
+	if s.lag == 0 {
+		apply()
+		return nil
+	}
+	s.queue = append(s.queue, laggedKey{due: s.captures + s.lag, apply: apply})
+	return nil
+}
+
+func (s *askSim) flush() {
+	for len(s.queue) > 0 && s.queue[0].due <= s.captures {
+		s.queue[0].apply()
+		s.queue = s.queue[1:]
+	}
 }
 
 func newAskSim(ask pendingAsk) *askSim {
@@ -378,14 +415,18 @@ func (s *askSim) io() askIO {
 	return askIO{
 		pane: func(context.Context) (string, error) {
 			s.captures++
+			if s.capDelay > 0 {
+				time.Sleep(s.capDelay)
+			}
+			s.flush()
 			if s.paneHook != nil {
 				s.paneHook(s, s.captures)
 			}
 			return s.render(), nil
 		},
-		text:  func(_ context.Context, t string) error { s.sendText(t); return nil },
-		named: func(_ context.Context, k string) error { s.sendNamed(k); return nil },
-		enter: func(context.Context) error { s.sendEnter(); return nil },
+		text:  func(_ context.Context, t string) error { return s.deliver(func() { s.sendText(t) }) },
+		named: func(_ context.Context, k string) error { return s.deliver(func() { s.sendNamed(k) }) },
+		enter: func(context.Context) error { return s.deliver(s.sendEnter) },
 		wait:  time.Millisecond, polls: 3,
 		progress: func(p askProgress) { s.steps = append(s.steps, p) },
 	}
@@ -431,12 +472,12 @@ func TestAnswersMapToExactKeys(t *testing.T) {
 	}
 }
 
-// From a later tab (the operator flipped around in the terminal) the run first goes back to tab 0.
+// From a later tab the run first goes back to tab 0 when the tabs before it are not all answered
+// (the operator only flipped around in the terminal).
 func TestAnswerFromAnotherTab(t *testing.T) {
 	ask := askFixtureAsk(t)
 	s := newAskSim(ask)
-	s.pressDigit(2).pressDigit(2) // operator answered the first two in the terminal; Other gates showing
-	s.keys = nil
+	s.focus = 2 // Other gates showing, nothing answered yet
 	picks := []askPick{{Option: 1}, {Option: 1}, {Option: 1}}
 	if _, _, err := answerAsk(context.Background(), s.io(), ask, picks); err != nil {
 		t.Fatal(err)

@@ -199,6 +199,8 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 		enter:        func(ctx context.Context) error { keys++; return a.s.sendKeyEnter(ctx, se.ID) },
 		// 100 ms polls on the operator lane: a key shows on screen within a frame or two
 		wait: 100 * time.Millisecond, polls: 40,
+		// a loaded host (load avg 44 on 2026-10-31) can take seconds per capture: wait on the clock too
+		stepTimeout: 12 * time.Second,
 		progress: func(p askProgress) {
 			a.s.hub.publish(map[string]any{
 				"type": "attention-progress", "sessionId": se.ID, "attentionId": req.AttentionID,
@@ -210,7 +212,8 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 	log.Printf("answer walk %s: %d question(s), %d pane read(s), %d key send(s), %s, err=%v", se.ID, len(ask.Questions), panes, keys, time.Since(t0).Round(time.Millisecond), err)
 	if err != nil {
 		if done > 0 {
-			err = fmt.Errorf("%w (%d of %d answers were already entered; check the terminal)", err, done, len(ask.Questions))
+			// Not a plain failure: those answers are in the menu, and sending again finishes the rest.
+			err = &askPartialError{Done: done, Total: len(ask.Questions), Err: err}
 		}
 		return attentionResponseResult{}, err
 	}
