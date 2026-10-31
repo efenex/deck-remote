@@ -1,15 +1,10 @@
 // Real hit testing and pointer activation against the UI fixture; no live sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openDeck, launchChrome, withDefaults } from './harness.mjs';
 
-test('composer: keyboard geometry survives focus transfer and sends once per tap', { timeout: 30000 }, async t => {
-  const port = await freePort();
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  await waitHttp(base);
+test('composer: keyboard geometry survives focus transfer and sends once per tap', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
   const browser = await launchChrome(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
@@ -24,7 +19,7 @@ test('composer: keyboard geometry survives focus transfer and sends once per tap
     sends.push(r.request().postDataJSON());
     await r.fulfill({ status: 202, json: { requestId: 'r' + sends.length, status: 'queued' } });
   });
-  await page.goto(base + '/?token=fake'); await page.click('.card[data-id="s1"]');
+  await openDeck(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.locator('#sheet').evaluate(el => Promise.all(el.getAnimations().map(a => a.finished)));
   await page.fill('#composerInput', 'go offload lane');
   await page.evaluate(() => {

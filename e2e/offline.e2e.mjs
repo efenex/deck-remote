@@ -1,15 +1,10 @@
 // Uses the existing UI fixture server; no real sessions or sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openDeck, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone: offline refresh feedback, transcript failure and resume layout recovery', { timeout: 60000 }, async t => {
-  const port = await freePort();
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  await waitHttp(base);
+  const base = await startMockApi(t);
   const browser = await launchChrome();
   t.after(() => browser.close());
   const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
@@ -21,8 +16,7 @@ test('phone: offline refresh feedback, transcript failure and resume layout reco
       path.endsWith('/whoami') ? {} : { enabled: true, overview: { generated_at: '2026-10-25T15:02:00Z', counts: {} } };
     return route.fulfill({ json: data });
   });
-  await page.goto(base + '/?token=fake');
-  await page.locator('.card[data-id="s1"]').waitFor();
+  await openDeck(page, base + '/?token=fake');
   // A black-holed response must have a finite spinner, including on the session shield.
   await page.route('**/api/rc/**', route => new Promise(resolve => {
     setTimeout(() => route.abort().catch(() => {}).finally(resolve), 13500);

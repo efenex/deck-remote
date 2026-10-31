@@ -20,8 +20,6 @@ const repo = path.dirname(here);
 const OPERATOR = 'op@example.com';
 const SHARED = 'shared-e2e-token';
 
-
-
 test('scan a pairing QR inside the app: token, Face ID without a code, app opens', { timeout: 120e3 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-pair-e2e-'));
   const home = path.join(dir, 'home');

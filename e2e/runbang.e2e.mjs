@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
+import { freePort, waitHttp, launchChrome, withDefaults, openDeck } from './harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(here);
@@ -29,7 +29,6 @@ const LINES = {
   bidi: '! ls /tmp/a‮b',
   zw: '! git pu​ll',
 };
-
 
 function writeFixture(dir) {
   const root = path.join(dir, 'tower');
@@ -80,7 +79,6 @@ else:
   return { root, cwd };
 }
 
-
 test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID run', { timeout: 180e3 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-remote-e2e-'));
   const home = path.join(dir, 'home');
@@ -118,12 +116,11 @@ test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID
   await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
 
   // CSP header present, and the app loads under it with no violation.
-  const resp = await page.goto(origin + '/');
+  const resp = await openDeck(page, origin + '/', '#tabTower', 'visible');
   const csp = resp.headers()['content-security-policy'] || '';
   assert.match(csp, /script-src 'self';/);
   assert.match(csp, /connect-src 'self'/);
   assert.match(csp, /frame-ancestors 'none'/);
-  await page.locator('#tabTower').waitFor({ state: 'visible', timeout: 15e3 });
 
   // Settings → Passkey: code from the laptop's file, Face ID (virtual), enrolled.
   await page.click('.tab[data-tab="settings"]');

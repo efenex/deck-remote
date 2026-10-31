@@ -1,14 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openDeck, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone photos: pick, preview, remove, failed upload, queued send and unsupported harness', { timeout: 60000 }, async t => {
-  const port = await freePort();
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  await waitHttp(base);
+  const base = await startMockApi(t);
   const browser = await launchChrome(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
@@ -19,7 +14,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
     const req = route.request(); requests.push({ headers: req.headers(), body: req.postDataBuffer(), url: req.url() });
     await route.fulfill(reject ? { status: 400, json: { error: 'fixture refusal' } } : { status: 202, json: { requestId: 'photo1', sendId: 'queued1', status: 'queued', images: 1 } });
   });
-  await page.goto(base + '/?token=fake'); await page.click('.card[data-id="s1"]');
+  await openDeck(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.waitForFunction(() => !document.getElementById('composerInput').disabled);
   assert.equal(await page.locator('#photoCamera').getAttribute('capture'), 'environment');
   assert.equal(await page.locator('#photoLibrary').getAttribute('multiple'), '');
@@ -58,8 +53,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
   await page.screenshot({ path: '/tmp/deckremote-photo-composer.png' });
   await page.click('#sheetBack'); await page.click('.card[data-id="s2"]');
   assert.equal(await page.locator('#photoLibrary').count(), 0, 'running Codex has no attachment control');
-  await page.goto(base + '/?session=s6');
-  await page.locator('#photoCamera').waitFor({ state: 'attached' });
+  await openDeck(page, base + '/?session=s6', '#photoCamera');
   assert.equal(await page.locator('#composerInput').isDisabled(), false, 'Gemini supports photo captions');
   await page.locator('#photoCamera').setInputFiles(file);
   await page.waitForFunction(() => document.querySelectorAll('.photo-preview').length === 1);
