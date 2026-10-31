@@ -77,11 +77,19 @@ func (a claudeAdapter) Attention(_ context.Context, se sessionInfo, pane string,
 		}
 		return attentionInfo{}, nil
 	}
-	text := dialogExcerpt(pane)
-	return attentionInfo{
+	// The "will automatically block this request in M:SS" line ticks every second; it is
+	// not part of the dialog's identity (the fingerprint must survive the tick) and goes to
+	// the card as a deadline instead of text.
+	stable, remaining := stripClaudeCountdown(pane)
+	text := dialogExcerpt(stable)
+	info := attentionInfo{
 		Pending: true, Kind: "approval", ID: fmt.Sprintf("claude-approval-%x", hashStr(text)),
 		Text: text, Actions: []string{"approve-once"},
-	}, nil
+	}
+	if remaining >= 0 {
+		info.ExpiresAt = claudeNow().Add(remaining).Unix()
+	}
+	return info, nil
 }
 
 func (a claudeAdapter) Deliver(context.Context, sessionInfo, string, string, string, bool) (deliveryResult, error) {

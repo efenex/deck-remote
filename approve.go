@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +38,29 @@ const claudeDialogWindow = 20
 // claudeDialogSelector matches the highlighted numbered option of a live
 // dialog ("❯ 1. Yes"); an idle composer never draws one.
 var claudeDialogSelector = regexp.MustCompile(`(?m)^[\s│]*❯\s*\d+\.`)
+
+// claudeCountdownRE matches Claude's unattended-session timer, e.g.
+// "⚠ Claude Code will automatically block this request in 0:16, to avoid holding up an
+// unattended session". The text may wrap on a narrow terminal, so \s spans newlines between
+// the words; the match runs to the end of the line holding the M:SS.
+var claudeCountdownRE = regexp.MustCompile(`(?i)[│ \t⚠]*(?:\bClaude Code will\s+)?\bautomatically\s+(?:block|deny|reject|cancel)[^:]{0,120}?\bin\s+(\d+):(\d{2})\b[^\n]*`)
+
+// claudeNow is the clock behind a countdown's deadline (a test seam).
+var claudeNow = time.Now
+
+// stripClaudeCountdown removes the ticking auto-block line from a pane capture and returns
+// how long Claude says is left (-1 when there is no countdown).
+func stripClaudeCountdown(pane string) (string, time.Duration) {
+	remaining := time.Duration(-1)
+	out := claudeCountdownRE.ReplaceAllStringFunc(stripANSI(pane), func(m string) string {
+		sub := claudeCountdownRE.FindStringSubmatch(m)
+		min, _ := strconv.Atoi(sub[1])
+		sec, _ := strconv.Atoi(sub[2])
+		remaining = time.Duration(min*60+sec) * time.Second
+		return "\n"
+	})
+	return out, remaining
+}
 
 // isClaudePermissionPrompt reports whether a permission dialog is live at the
 // bottom of the pane. The capture carries 2000 lines of scrollback, so matching

@@ -25,14 +25,17 @@ type attentionQuestion struct {
 }
 
 type attentionInfo struct {
-	MenuState   string              `json:"menuState,omitempty"`
-	Pending     bool                `json:"pending"`
-	Kind        string              `json:"kind,omitempty"` // approval | question
-	ID          string              `json:"id,omitempty"`
-	Text        string              `json:"text,omitempty"`
-	Questions   []attentionQuestion `json:"questions,omitempty"`
-	Actions     []string            `json:"actions,omitempty"`
-	Unavailable bool                `json:"unavailable,omitempty"`
+	MenuState string              `json:"menuState,omitempty"`
+	Pending   bool                `json:"pending"`
+	Kind      string              `json:"kind,omitempty"` // approval | question
+	ID        string              `json:"id,omitempty"`
+	Text      string              `json:"text,omitempty"`
+	Questions []attentionQuestion `json:"questions,omitempty"`
+	Actions   []string            `json:"actions,omitempty"`
+	// ExpiresAt (unix seconds) is when the harness will auto-block the request itself
+	// (Claude's "will automatically block this request in M:SS" unattended-session timer).
+	ExpiresAt   int64 `json:"expiresAt,omitempty"`
+	Unavailable bool  `json:"unavailable,omitempty"`
 	// ReadOnly: shown to the operator but not answerable from here (Claude's
 	// AskUserQuestion menu is answered in the terminal).
 	ReadOnly bool `json:"readOnly,omitempty"`

@@ -1195,15 +1195,23 @@
   // something.
   function markAllRead() { markInboxSeen(); renderInbox(); }
 
-  // A tapped notification: show its inbox entry, expanded and highlighted.
-  function openNotification(id) {
+  // A tapped notification. Kinds that need an answer (approval/question/stall) go to the
+  // session, where the card with the buttons lives; the rest show their inbox entry. Either way
+  // an open sheet is closed or replaced first: the sheet overlays every tab, so switching tabs
+  // alone left the operator on whichever session they already had open (the tower's), not the
+  // one that rang.
+  async function openNotification(id, sessionId, kind) {
+    if (sessionId && NEEDS_KINDS.has(kind)) {
+      if (await openSession(sessionId)) return;
+    }
+    if ($('#sheet')) closeSheet();
     inbox.focusId = id || null;
     showTab('inbox');
   }
   // Open a session's sheet, loading the session list first when the app was
   // cold-started from a notification (openSheet is a no-op for unknown ids).
   async function openSession(id) {
-    if (!id) return;
+    if (!id) return false;
     if (!state.sessions.has(id)) {
       try { await loadSessions(false); } catch (_) {}
     }
@@ -1217,10 +1225,11 @@
     }
     if (!state.sessions.has(id)) {
       toast('Session not found', 'It may have been removed, or it belongs to another profile.');
-      return;
+      return false;
     }
     showTab('deck');
-    if (state.openSheetId !== id) openSheet(id);
+    if (state.openSheetId !== id || !$('#sheet')) openSheet(id);
+    return true;
   }
   $('#inboxRefresh').addEventListener('click', () => refreshButton($('#inboxRefresh'), 'Inbox refresh', () => loadInbox(true)));
   $('#inboxMarkRead').addEventListener('click', () => markAllRead());
@@ -2804,6 +2813,14 @@
     return { kind: lines[0] || 'Permission request', what: lines[1] || '' };
   }
 
+  // Claude blocks an unattended request itself when its timer (info.expiresAt, unix seconds)
+  // runs out; the card shows the time left, counted down locally.
+  function approveDeadline(expiresAt, nowMs) {
+    const left = Math.round(expiresAt - nowMs / 1000);
+    if (left <= 0) return { expired: true, text: 'Claude’s timer ran out; it has most likely blocked this request.' };
+    return { expired: false, text: 'Claude auto-blocks this request in ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + '.' };
+  }
+
   // Render the Approve dock with the ACTUAL permission text the server read.
   function renderApprovePanel(s, info) {
     const mount = $('#approveMount');
@@ -2817,6 +2834,7 @@
         (sum.what ? '<div class="approve-cmd">' + esc(sum.what) + '</div>' : '') +
       '</div></div>' +
       '<div class="approve-body"><pre class="perm-text" id="permText"></pre></div>' +
+      (info.expiresAt ? '<div class="approve-deadline" id="approveDeadline"></div>' : '') +
       '<div class="approval-actions" id="approvalActions"></div>' +
       '<div class="approve-foot" id="approveFoot">The live dialog is re-checked before any key is sent.</div>';
     mount.innerHTML = '';
@@ -2824,6 +2842,18 @@
     // Set the real text as textContent so line breaks/monospace are preserved
     // verbatim and nothing is interpreted as HTML.
     $('#permText', wrap).textContent = info.text || '(no request text returned)';
+    const dl = info.expiresAt ? $('#approveDeadline', wrap) : null;
+    if (dl) {
+      const paint = () => {
+        const d = approveDeadline(info.expiresAt, Date.now());
+        dl.textContent = d.text;
+        dl.classList.toggle('expired', d.expired);
+        return d.expired;
+      };
+      if (!paint()) {
+        const t = setInterval(() => { if (!wrap.isConnected || paint()) clearInterval(t); }, 1000);
+      }
+    }
     const actions = $('#approvalActions', wrap);
     const labels = { 'approve-once': 'Hold to approve', 'approve-prefix': 'Hold: approve and don\'t ask again', decline: 'Decline' };
     const button = (action) => {
@@ -3628,7 +3658,7 @@
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (e) => {
       if (e.data && e.data.type === 'open-notification' && e.data.id) {
-        openNotification(e.data.id);
+        openNotification(e.data.id, e.data.sessionId, e.data.kind);
       } else if (e.data && e.data.type === 'open-session' && e.data.sessionId) {
         openSession(e.data.sessionId);
       }
@@ -3801,9 +3831,9 @@
     const params = new URL(location.href).searchParams;
     if (params.has('notif')) {
       const u = new URL(location.href);
-      u.searchParams.delete('notif');
+      ['notif', 'session', 'kind'].forEach((k) => u.searchParams.delete(k));
       history.replaceState(null, '', u.pathname + u.search + u.hash);
-      openNotification(params.get('notif'));
+      openNotification(params.get('notif'), params.get('session'), params.get('kind'));
     } else if (params.has('session')) {
       openSession(params.get('session'));
     }

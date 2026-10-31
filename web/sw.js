@@ -10,7 +10,7 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v43';
+const CACHE = 'deck-remote-v44';
 const SHELL_NET_TIMEOUT = 1500; // ms before the shell is served from cache
 const SHELL = [
   '/',
@@ -26,7 +26,7 @@ const SHELL = [
   '/gestures.js?v=37',
   '/network.js?v=41',
   '/photos.js?v=42',
-  '/app.js?v=43',
+  '/app.js?v=44',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.
@@ -135,10 +135,14 @@ self.addEventListener('notificationclick', (event) => {
   const d = event.notification.data || {};
   const sessionId = d.sessionId || '';
   const notifId = d.id || '';
+  const kind = d.kind || '';
+  // The cold-start URL and the message to an already-open window carry the same three facts:
+  // which inbox entry, which session, which kind. The app decides where that lands (an
+  // approval/question opens its session; it must not just show the inbox behind an open sheet).
   const target = notifId
-    ? '/?notif=' + encodeURIComponent(notifId)
+    ? '/?notif=' + encodeURIComponent(notifId) + (sessionId ? '&session=' + encodeURIComponent(sessionId) : '') + (kind ? '&kind=' + encodeURIComponent(kind) : '')
     : sessionId ? '/?session=' + encodeURIComponent(sessionId) : '/';
-  const msg = notifId ? { type: 'open-notification', id: notifId, sessionId } : { type: 'open-session', sessionId };
+  const msg = notifId ? { type: 'open-notification', id: notifId, sessionId, kind } : { type: 'open-session', sessionId };
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
