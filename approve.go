@@ -39,14 +39,13 @@ const claudeDialogWindow = 20
 // dialog ("❯ 1. Yes"); an idle composer never draws one.
 var claudeDialogSelector = regexp.MustCompile(`(?m)^[\s│]*❯\s*\d+\.`)
 
-// claudeCountdownRE matches Claude's unattended-session timer, e.g.
+// claudeCountdownRE matches ONLY Claude's literal unattended-session sentence (observed
+// wording; only "block this request" has been seen), e.g.
 // "⚠ Claude Code will automatically block this request in 0:16, to avoid holding up an
-// unattended session". Anchored to a line that STARTS (past box borders) with the ⚠ and the
-// full "Claude Code will automatically" lead-in, so a command or transcript text that merely
-// mentions the words is never touched. A narrow terminal wraps the sentence: a bounded
-// "\n + border/indent" continuation is allowed before the M:SS, never a colon or a longer run.
-// The match ends at the end of the line holding the M:SS.
-var claudeCountdownRE = regexp.MustCompile(`(?m)^[│ \t]*⚠[ \t]*Claude Code will[ \t]+automatically[ \t]+(?:block|deny|reject|cancel)(?:[^:\n]|\n[│ \t]*){0,160}?\bin(?:[ \t]+|\n[│ \t]*)(\d+):(\d{2})\b[^\n]*`)
+// unattended session". No free-text run and no line-tail wildcard: a command can never be
+// partly swallowed, only a verbatim copy of the sentence itself. [\s│]+ between words lets a
+// narrow terminal wrap it, also inside a box (Go's \s excludes │).
+var claudeCountdownRE = regexp.MustCompile(`(?m)^[│ \t]*⚠[\s│]*Claude[\s│]+Code[\s│]+will[\s│]+automatically[\s│]+block[\s│]+this[\s│]+request[\s│]+in[\s│]+(\d+):(\d{2})(?:,[\s│]*to[\s│]+avoid[\s│]+holding[\s│]+up[\s│]+an[\s│]+unattended[\s│]+session\.?)?`)
 
 // claudeNow is the clock behind a countdown's deadline (a test seam).
 var claudeNow = time.Now
