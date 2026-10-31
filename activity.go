@@ -24,6 +24,9 @@ type activityInfo struct {
 	// Optional harness-specific progress identity used only by stepStall.
 	stallKey    string
 	stallKeySet bool
+	// replayed marks an info built from the cache rather than a fresh pane or
+	// transcript read; stepStall must not count it as a new observation.
+	replayed bool
 }
 
 // activityWithAttention is the claude /api/rc/activity reply.

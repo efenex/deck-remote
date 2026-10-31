@@ -56,6 +56,9 @@ type harnessSnapshot struct {
 	Attention      attentionInfo
 	Sequence       int64
 	DegradedReason string
+	// HistoryTruncated: only the tail of a very large transcript was read. The
+	// snapshot is still usable (activity, ask); older messages are missing.
+	HistoryTruncated bool
 }
 
 type deliveryResult struct {

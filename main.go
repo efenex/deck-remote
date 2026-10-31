@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,8 @@ type config struct {
 	towerRoot        string // tower checkout (journal.py, tower_tui.py); default derived from towerOverview
 	towerModelScript string // scripts/tower_model.py; default next to the binary
 
+	stallPolls int // consecutive unchanged polls before a working session is flagged stalled
+
 	docExts  string // comma-separated extensions the doc viewer may read; empty = defaultDocExts
 	docRoots string // comma-separated roots the doc viewer may read (doc.go); empty = defaultDocRoots
 }
@@ -71,6 +74,8 @@ func loadConfig() config {
 		return fallback
 	}
 	c := config{}
+	defStall, _ := strconv.Atoi(def("DECK_REMOTE_STALL_POLLS", "2"))
+	flag.IntVar(&c.stallPolls, "stall-polls", defStall, "consecutive unchanged 6s polls before a working session is flagged stalled (>=1; default 2)")
 	flag.StringVar(&c.listen, "listen", def("DECK_REMOTE_LISTEN", "127.0.0.1:8765"), "address to bind (loopback; front with tailscale serve)")
 	flag.StringVar(&c.agentdeckURL, "agentdeck-url", def("DECK_REMOTE_AGENTDECK_URL", "http://127.0.0.1:8420"), "upstream agent-deck web base URL")
 	flag.StringVar(&c.token, "token", "", "shared bearer token (default: read DECK_REMOTE_TOKEN or ~/.agent-deck/web-token)")
@@ -92,6 +97,10 @@ func loadConfig() config {
 	flag.StringVar(&c.docExts, "doc-exts", def("DECK_REMOTE_DOC_EXTS", ""), "comma-separated file extensions the doc viewer may read; default "+defaultDocExts+" (add .log knowingly: logs carry tokens and env dumps)")
 	flag.Parse()
 
+	if c.stallPolls < 1 {
+		c.stallPolls = 2
+	}
+	stallThreshold = c.stallPolls
 	if c.token == "" {
 		c.token = os.Getenv("DECK_REMOTE_TOKEN")
 	}

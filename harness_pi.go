@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +105,10 @@ func (a piAdapter) Snapshot(ctx context.Context, se sessionInfo, pane string, pa
 // read, otherwise the transcript tail with a staleness cutoff so a killed pi
 // does not read as working forever.
 func (a piAdapter) activity(se sessionInfo, snap harnessSnapshot, tail piTail, pane string, paneOK bool) activityInfo {
+	return a.activityAt(se, snap, tail, pane, paneOK, time.Now())
+}
+
+func (a piAdapter) activityAt(se sessionInfo, snap harnessSnapshot, tail piTail, pane string, paneOK bool, now time.Time) activityInfo {
 	info := activityInfo{CurrentTool: tail.CurrentTool}
 	switch {
 	case paneOK:
@@ -110,10 +116,14 @@ func (a piAdapter) activity(se sessionInfo, snap harnessSnapshot, tail piTail, p
 		info.stallKeySet = true
 		info.stallKey = piPaneProgressKey(pane)
 	default:
-		if cached, ok := a.s.acts.get(se.ID); ok && time.Since(cached.updatedAt) < 3*watchInterval {
+		// Trust the cache only while the last real pane observation is recent:
+		// updatedAt moves on every watcher sweep (including sweeps that replay
+		// this very cache), so it cannot be the freshness clock.
+		if cached, ok := a.s.acts.get(se.ID); ok && now.Sub(cached.observedAt) < 3*watchInterval {
 			info.Working, info.Stalled = cached.Working, cached.Stalled
+			info.replayed = true
 		} else {
-			info.Working = tail.Working && time.Since(time.Unix(snap.LastActivity, 0)) < 10*time.Minute
+			info.Working = tail.Working && now.Sub(time.Unix(snap.LastActivity, 0)) < 10*time.Minute
 		}
 	}
 	if !info.Working {
@@ -128,6 +138,9 @@ func (a piAdapter) History(ctx context.Context, se sessionInfo) ([]histMsg, erro
 	snap, _, err := a.load(se)
 	if err != nil {
 		return nil, err
+	}
+	if snap.HistoryTruncated {
+		return append([]histMsg{{Role: "commentary", Content: "Earlier history truncated: this pi session is too large to load whole."}}, snap.Messages...), nil
 	}
 	return snap.Messages, nil
 }
@@ -310,10 +323,11 @@ type piTail struct {
 }
 
 type piCacheEntry struct {
-	size  int64
-	mtime time.Time
-	snap  harnessSnapshot
-	tail  piTail
+	size   int64
+	mtime  time.Time
+	parser *piParser
+	snap   harnessSnapshot
+	tail   piTail
 }
 
 type piTranscriptStore struct {
@@ -325,9 +339,15 @@ func newPiTranscriptStore() *piTranscriptStore {
 	return &piTranscriptStore{m: map[string]piCacheEntry{}}
 }
 
-// maxPiTranscriptBytes bounds a single parse; pi transcripts carry tool output
-// and images, but a session past this is far beyond what a phone renders.
-const maxPiTranscriptBytes = 64 << 20
+// maxPiTranscriptBytes bounds what a first read parses. A larger file is read
+// from its header plus the last piTailBytes only, and the snapshot is flagged
+// HistoryTruncated; growth after that is parsed incrementally from the last
+// offset, so a long session never blocks ask and never re-parses from zero.
+const (
+	maxPiTranscriptBytes = 64 << 20
+	piTailBytes          = 16 << 20
+	maxPiLineBytes       = 32 << 20 // one entry (an image-laden tool result); longer lines are skipped
+)
 
 func (st *piTranscriptStore) load(path string) (harnessSnapshot, piTail, error) {
 	info, err := os.Stat(path)
@@ -336,25 +356,43 @@ func (st *piTranscriptStore) load(path string) (harnessSnapshot, piTail, error) 
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if e, ok := st.m[path]; ok && e.size == info.Size() && e.mtime.Equal(info.ModTime()) {
-		return cloneHarnessSnapshot(e.snap), e.tail, nil
-	}
-	if info.Size() > maxPiTranscriptBytes {
-		return harnessSnapshot{}, piTail{}, fmt.Errorf("pi transcript too large (%d bytes)", info.Size())
+	prev, cached := st.m[path]
+	if cached && prev.size == info.Size() && prev.mtime.Equal(info.ModTime()) {
+		return cloneHarnessSnapshot(prev.snap), prev.tail, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return harnessSnapshot{}, piTail{}, err
 	}
 	defer f.Close()
-	snap, tail, err := parsePiTranscript(f)
+
+	var p *piParser
+	if cached && prev.parser.offset <= info.Size() {
+		p = prev.parser // append-only growth: parse only the new bytes
+		if _, err := f.Seek(p.offset, io.SeekStart); err != nil {
+			return harnessSnapshot{}, piTail{}, err
+		}
+		if err := p.feed(f); err != nil {
+			return harnessSnapshot{}, piTail{}, err
+		}
+	} else {
+		p = newPiParser()
+		if info.Size() > maxPiTranscriptBytes {
+			if err := p.feedTail(f, info.Size()); err != nil {
+				return harnessSnapshot{}, piTail{}, err
+			}
+		} else if err := p.feed(f); err != nil {
+			return harnessSnapshot{}, piTail{}, err
+		}
+	}
+	snap, tail, err := p.build()
 	if err != nil {
 		return harnessSnapshot{}, piTail{}, err
 	}
 	if len(st.m) > 64 {
 		st.m = map[string]piCacheEntry{}
 	}
-	st.m[path] = piCacheEntry{size: info.Size(), mtime: info.ModTime(), snap: snap, tail: tail}
+	st.m[path] = piCacheEntry{size: info.Size(), mtime: info.ModTime(), parser: p, snap: snap, tail: tail}
 	return cloneHarnessSnapshot(snap), tail, nil
 }
 
@@ -384,121 +422,249 @@ type piBlock struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
-func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapshot, piTail, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 1<<20), maxPiTranscriptBytes)
-	byID := map[string]piEntry{}
-	var last string
-	sawHeader := false
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var e piEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			continue // a torn final line while pi is writing
-		}
-		if e.Type == "session" {
-			sawHeader = true
-			continue
-		}
-		if e.ID == "" {
-			continue
-		}
-		byID[e.ID] = e
-		last = e.ID
-	}
-	if err := sc.Err(); err != nil {
+// piNode is what the parser keeps per entry: the tree links plus the few
+// message facts the snapshot needs. Tool output and image data are dropped at
+// ingest, so a parser that outlives a read holds text, not the transcript.
+type piNode struct {
+	id, parent string // parent "" at a root
+	rootless   bool   // parentId was an explicit null
+	ts         int64  // entry timestamp, unix s
+	seq        int64
+	isMessage  bool
+
+	role, stop, errMsg, toolCallID string
+	msgTs                          int64 // message timestamp, unix s
+	text                           string
+	images                         int
+	calls                          []piToolCall
+}
+
+type piToolCall struct{ id, label string }
+
+// piParser accumulates a pi transcript across reads. offset is the number of
+// bytes consumed, always ending on a line boundary, so the next read resumes
+// there.
+type piParser struct {
+	nodes     map[string]*piNode
+	last      string
+	fileSeq   int64
+	sawHeader bool
+	truncated bool
+	offset    int64
+}
+
+func newPiParser() *piParser { return &piParser{nodes: map[string]*piNode{}} }
+
+func parsePiTranscript(r io.Reader) (harnessSnapshot, piTail, error) {
+	p := newPiParser()
+	if err := p.feed(r); err != nil {
 		return harnessSnapshot{}, piTail{}, err
 	}
-	if !sawHeader {
+	return p.build()
+}
+
+// feedTail reads the header line, then only the final piTailBytes of a file too
+// large to parse whole, starting at a line boundary.
+func (p *piParser) feedTail(f *os.File, size int64) error {
+	hdr := bufio.NewReader(f)
+	line, _, _, err := readPiLine(hdr)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	p.ingest(line)
+	start := size - piTailBytes
+	if _, err := f.Seek(start-1, io.SeekStart); err != nil {
+		return err
+	}
+	br := bufio.NewReaderSize(f, 1<<20)
+	_, skipped, _, err := readPiLine(br) // the remainder of the line start-1 falls in (or a lone "\n")
+	if err != nil && err != io.EOF {
+		return err
+	}
+	p.truncated = true
+	p.offset = start - 1 + int64(skipped)
+	return p.feedReader(br)
+}
+
+func (p *piParser) feed(r io.Reader) error {
+	return p.feedReader(bufio.NewReaderSize(r, 1<<20))
+}
+
+func (p *piParser) feedReader(br *bufio.Reader) error {
+	for {
+		line, n, terminated, err := readPiLine(br)
+		if n > 0 {
+			// A complete line is consumed even when it is not JSON; an
+			// unterminated one only once it parses (else pi is mid-write).
+			if p.ingest(line) || terminated {
+				p.offset += int64(n)
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// readPiLine returns one line without its '\n', the number of bytes consumed
+// from the reader, and whether the line ended in '\n'. A line over
+// maxPiLineBytes is consumed but returned empty.
+func readPiLine(br *bufio.Reader) (line []byte, consumed int, terminated bool, err error) {
+	var buf []byte
+	over := false
+	for {
+		chunk, e := br.ReadSlice('\n')
+		consumed += len(chunk)
+		if !over {
+			if len(buf)+len(chunk) > maxPiLineBytes {
+				over, buf = true, nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		if e == bufio.ErrBufferFull {
+			continue
+		}
+		err = e
+		break
+	}
+	terminated = consumed > 0 && err == nil
+	if over {
+		return nil, consumed, terminated, err
+	}
+	return bytes.TrimSuffix(buf, []byte("\n")), consumed, terminated, err
+}
+
+// ingest parses one line; it reports whether the line was a complete JSON
+// value (a torn final line while pi is writing is not, and is not consumed).
+func (p *piParser) ingest(line []byte) bool {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return true
+	}
+	var e piEntry
+	if err := json.Unmarshal(line, &e); err != nil {
+		return false
+	}
+	if e.Type == "session" {
+		p.sawHeader = true
+		return true
+	}
+	if e.ID == "" {
+		return true
+	}
+	p.fileSeq = nextPiSeq(p.fileSeq, e.Timestamp)
+	n := &piNode{id: e.ID, ts: tsUnix(e.Timestamp), seq: p.fileSeq}
+	if e.ParentID != nil {
+		n.parent = *e.ParentID
+	} else {
+		n.rootless = true
+	}
+	if e.Type == "message" && len(e.Message) > 0 {
+		var m piMessage
+		if json.Unmarshal(e.Message, &m) == nil {
+			n.isMessage = true
+			n.role, n.stop, n.errMsg, n.toolCallID = m.Role, m.StopReason, m.ErrorMessage, m.ToolCallID
+			if m.Timestamp > 0 {
+				n.msgTs = m.Timestamp / 1000
+			}
+			if m.Role == "user" || m.Role == "assistant" {
+				n.text = piText(m.Content)
+				for _, b := range piBlocks(m.Content) {
+					switch b.Type {
+					case "image":
+						n.images++
+					case "toolCall":
+						n.calls = append(n.calls, piToolCall{b.ID, piToolLabel(b)})
+					}
+				}
+			}
+		}
+	}
+	p.nodes[e.ID] = n
+	p.last = e.ID
+	return true
+}
+
+// build derives the snapshot from the accumulated nodes.
+func (p *piParser) build() (harnessSnapshot, piTail, error) {
+	if !p.sawHeader {
 		return harnessSnapshot{}, piTail{}, fmt.Errorf("not a pi session transcript (no session header)")
 	}
-
-	// Active branch: leaf → root, then reversed.
-	var path []piEntry
+	// Active branch: leaf → root, then reversed. A parent cut off by tail
+	// truncation ends the walk early.
+	var path []*piNode
 	seen := map[string]bool{}
-	for id := last; id != "" && !seen[id]; {
-		e, ok := byID[id]
+	for id := p.last; id != "" && !seen[id]; {
+		n, ok := p.nodes[id]
 		if !ok {
 			break
 		}
 		seen[id] = true
-		path = append(path, e)
-		if e.ParentID == nil {
+		path = append(path, n)
+		if n.rootless {
 			break
 		}
-		id = *e.ParentID
+		id = n.parent
 	}
 	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
 		path[i], path[j] = path[j], path[i]
 	}
 
-	snap := harnessSnapshot{State: "idle"}
+	snap := harnessSnapshot{State: "idle", HistoryTruncated: p.truncated}
 	var tail piTail
 	turnID := ""
 	lastRole, lastStop := "", ""
 	pendingTool := map[string]string{}
 	var toolOrder []string
-	for i, e := range path {
-		ts := tsUnix(e.Timestamp)
-		if ts > 0 {
-			snap.LastActivity = ts
+	for _, e := range path {
+		if e.ts > 0 {
+			snap.LastActivity = e.ts
 		}
-		seq := int64(i + 1)
-		if e.Type != "message" || len(e.Message) == 0 {
+		if !e.isMessage {
 			continue
 		}
-		var m piMessage
-		if json.Unmarshal(e.Message, &m) != nil {
-			continue
+		ts := e.ts
+		if e.msgTs > 0 {
+			ts = e.msgTs
 		}
-		if m.Timestamp > 0 {
-			ts = m.Timestamp / 1000
-		}
-		switch m.Role {
+		seq := e.seq
+		switch e.role {
 		case "user":
-			turnID = e.ID
+			turnID = e.id
 			pendingTool, toolOrder = map[string]string{}, nil
-			images := 0
-			for _, b := range piBlocks(m.Content) {
-				if b.Type == "image" {
-					images++
-				}
-			}
-			if text := piText(m.Content); text != "" || images > 0 {
-				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID, Images: images})
+			if e.text != "" || e.images > 0 {
+				snap.Messages = append(snap.Messages, histMsg{Role: "user", Content: e.text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.id, Images: e.images})
 			}
 		case "assistant":
-			text := piText(m.Content)
-			for _, b := range piBlocks(m.Content) {
-				if b.Type == "toolCall" {
-					pendingTool[b.ID] = piToolLabel(b)
-					toolOrder = append(toolOrder, b.ID)
-				}
+			text := e.text
+			for _, c := range e.calls {
+				pendingTool[c.id] = c.label
+				toolOrder = append(toolOrder, c.id)
 			}
-			if m.StopReason == "error" && m.ErrorMessage != "" && text == "" {
-				text = "⚠ " + m.ErrorMessage
+			if e.stop == "error" && e.errMsg != "" && text == "" {
+				text = "⚠ " + e.errMsg
 			}
 			if text != "" {
 				role := "reply"
-				if m.StopReason == "toolUse" {
+				if e.stop == "toolUse" {
 					role = "commentary"
 				}
-				snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.ID})
+				snap.Messages = append(snap.Messages, histMsg{Role: role, Content: text, Ts: ts, TurnID: turnID, Seq: seq, ID: e.id})
 				if role == "reply" {
 					snap.LastReply = text
 				}
 			}
 		case "toolResult":
-			delete(pendingTool, m.ToolCallID)
+			delete(pendingTool, e.toolCallID)
 		default:
 			continue
 		}
-		lastRole, lastStop = m.Role, m.StopReason
+		lastRole, lastStop = e.role, e.stop
 	}
-	snap.Sequence = int64(len(path))
+	snap.Sequence = p.fileSeq
 
 	switch {
 	case lastRole == "user" || lastRole == "toolResult" || (lastRole == "assistant" && lastStop == "toolUse"):
@@ -514,6 +680,19 @@ func parsePiTranscript(r interface{ Read([]byte) (int, error) }) (harnessSnapsho
 		snap.State = "completed"
 	}
 	return snap, tail, nil
+}
+
+// nextPiSeq is the correlation key of the next entry appended to a file: its
+// timestamp in unix ms, forced strictly above the previous entry's. Entries are
+// only ever appended, so file order is monotonic across /tree branch switches
+// (where the position on the active branch shrinks or jumps), and the
+// timestamp floor keeps it increasing across /new, which starts another file.
+func nextPiSeq(prev int64, timestamp string) int64 {
+	next := prev + 1
+	if t, err := time.Parse(time.RFC3339Nano, timestamp); err == nil && t.UnixMilli() > next {
+		next = t.UnixMilli()
+	}
+	return next
 }
 
 func piBlocks(raw json.RawMessage) []piBlock {
