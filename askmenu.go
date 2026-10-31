@@ -518,8 +518,9 @@ type askIO struct {
 	// wait/polls bound how long a key may take to show on screen.
 	wait  time.Duration
 	polls int
-	// stepTimeout, when set, extends that bound to a wall-clock budget: on a loaded host one
-	// pane capture can take seconds, so a poll count alone gives up on a key that is still landing.
+	// stepTimeout, when set, replaces the poll count with a wall-clock budget (at least one check):
+	// on a loaded host one pane capture can take seconds, so a poll count alone gives up on a key
+	// that is still landing.
 	stepTimeout time.Duration
 	// progress, when set, is told each step of the walk (for the operator's card).
 	progress func(askProgress)
@@ -562,7 +563,7 @@ func (io askIO) read(ctx context.Context, ask pendingAsk) (askPane, error) {
 // until polls until cond holds on the parsed pane (or the menu is gone, when goneOK).
 func (io askIO) until(ctx context.Context, ask pendingAsk, goneOK bool, cond func(askPane) bool) (bool, error) {
 	start := time.Now()
-	for i := 0; i < io.polls || (io.stepTimeout > 0 && time.Since(start) < io.stepTimeout); i++ {
+	for i := 0; i == 0 || (io.stepTimeout > 0 && time.Since(start) < io.stepTimeout) || (io.stepTimeout <= 0 && i < io.polls); i++ {
 		if i > 0 {
 			select {
 			case <-ctx.Done():

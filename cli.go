@@ -76,6 +76,9 @@ func (s *server) adeckIn(ctx context.Context, stdin []byte, args ...string) ([]b
 	s.execAdeck.Add(1)
 	full := adeckArgs(profileFrom(ctx, s.cfg.profile), args...)
 	cmd := exec.CommandContext(ctx, s.cfg.bin, full...)
+	// A tmux/agent-deck grandchild that inherited stdout must not pin Output() (and with it the
+	// per-session askRunning slot) after the CLI itself was killed or finished.
+	cmd.WaitDelay = 5 * time.Second
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

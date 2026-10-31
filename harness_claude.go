@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -159,6 +160,10 @@ func (a claudeAdapter) pendingAsk(se sessionInfo) (pendingAsk, bool) {
 // askRunning keeps two phones from walking the same menu at once.
 var askRunning sync.Map
 
+// errAskBusy: another tap's walk owns the menu. It is that tap's outcome that matters, so this
+// refusal is only the second tapper's HTTP reply, not an event for every listener.
+var errAskBusy = errors.New("an answer for this session is already being sent")
+
 // answerQuestion answers a tabbed multi-question menu through the gated send-keys path
 // (typed.go: act token + operator identity guard the endpoint). The card, the transcript and
 // the live pane are re-checked here and again before every key batch (answerAsk).
@@ -186,7 +191,7 @@ func (a claudeAdapter) answerQuestion(ctx context.Context, se sessionInfo, req a
 		return attentionResponseResult{}, err
 	}
 	if _, busy := askRunning.LoadOrStore(se.ID, true); busy {
-		return attentionResponseResult{}, fmt.Errorf("an answer for this session is already being sent")
+		return attentionResponseResult{}, errAskBusy
 	}
 	defer askRunning.Delete(se.ID)
 	var panes, keys int

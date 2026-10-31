@@ -166,3 +166,22 @@ func TestPartialErrorCarriesProgress(t *testing.T) {
 		t.Errorf("message %q", err.Error())
 	}
 }
+
+// With a clock budget the poll count no longer applies: the wait is bounded by time alone.
+func TestStepBudgetIsTimeOnly(t *testing.T) {
+	ask := fourQuestionAsk()
+	s := newAskSim(ask)
+	io := s.io()
+	io.polls, io.wait, io.stepTimeout = 1000000, time.Millisecond, 40*time.Millisecond
+	t0 := time.Now()
+	ok, err := io.until(context.Background(), ask, false, func(askPane) bool { return false })
+	if ok || err != nil || time.Since(t0) > 2*time.Second {
+		t.Fatalf("ok=%v err=%v after %s", ok, err, time.Since(t0))
+	}
+	io.polls = 2 // fewer polls than the budget allows: the clock still decides
+	n := s.captures
+	io.until(context.Background(), ask, false, func(askPane) bool { return false })
+	if s.captures-n <= 2 {
+		t.Errorf("only %d captures within the budget", s.captures-n)
+	}
+}

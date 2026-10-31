@@ -172,7 +172,7 @@ func (s *server) handleAttentionRespond(w http.ResponseWriter, r *http.Request) 
 		if errors.As(err, &partial) {
 			body["done"], body["total"] = partial.Done, partial.Total
 		}
-		if req.Action == "answer" {
+		if req.Action == "answer" && !errors.Is(err, errAskBusy) {
 			ev := map[string]any{
 				"type": "attention-result", "sessionId": se.ID, "attentionId": req.AttentionID,
 				"responded": false, "error": err.Error(), "ts": time.Now().Unix(),
