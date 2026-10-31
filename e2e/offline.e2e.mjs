@@ -1,28 +1,13 @@
 // Uses the existing UI fixture server; no real sessions or sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import net from 'node:net';
-import { chromium } from 'playwright-core';
-
-async function freePort() {
-  const s = net.createServer(); s.listen(0, '127.0.0.1'); await once(s, 'listening');
-  const port = s.address().port; await new Promise(r => s.close(r)); return port;
-}
+import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone: offline refresh feedback, transcript failure and resume layout recovery', { timeout: 60000 }, async t => {
-  const port = await freePort();
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(base)).ok) break; } catch {}
-    await new Promise(r => setTimeout(r, 100));
-  }
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const base = await startMockApi(t);
+  const browser = await launchChrome();
   t.after(() => browser.close());
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
+  const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
   const page = await ctx.newPage(); const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.route('**/api/rc/tower**', route => {
@@ -31,8 +16,7 @@ test('phone: offline refresh feedback, transcript failure and resume layout reco
       path.endsWith('/whoami') ? {} : { enabled: true, overview: { generated_at: '2026-10-25T15:02:00Z', counts: {} } };
     return route.fulfill({ json: data });
   });
-  await page.goto(base + '/?token=fake');
-  await page.locator('.card[data-id="s1"]').waitFor();
+  await openApp(page, base + '/?token=fake');
   // A black-holed response must have a finite spinner, including on the session shield.
   await page.route('**/api/rc/**', route => new Promise(resolve => {
     setTimeout(() => route.abort().catch(() => {}).finally(resolve), 13500);

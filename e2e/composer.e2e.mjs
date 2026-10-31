@@ -1,20 +1,13 @@
 // Real hit testing and pointer activation against the UI fixture; no live sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import net from 'node:net';
-import { chromium } from 'playwright-core';
+import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
-test('composer: keyboard geometry survives focus transfer and sends once per tap', { timeout: 30000 }, async t => {
-  const listener = net.createServer(); listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
-  const port = listener.address().port; await new Promise(r => listener.close(r));
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  for (let i = 0; i < 50; i++) { try { if ((await fetch(base)).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
-  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+test('composer: keyboard geometry survives focus transfer and sends once per tap', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
+  const browser = await launchChrome(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
+  withDefaults(page.context());
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(() => {
     const vv = new EventTarget(); Object.assign(vv, { height: innerHeight, offsetTop: 0, scale: 1 });
@@ -26,7 +19,7 @@ test('composer: keyboard geometry survives focus transfer and sends once per tap
     sends.push(r.request().postDataJSON());
     await r.fulfill({ status: 202, json: { requestId: 'r' + sends.length, status: 'queued' } });
   });
-  await page.goto(base + '/?token=fake'); await page.click('.card[data-id="s1"]');
+  await openApp(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.locator('#sheet').evaluate(el => Promise.all(el.getAnimations().map(a => a.finished)));
   await page.fill('#composerInput', 'go offload lane');
   await page.evaluate(() => {

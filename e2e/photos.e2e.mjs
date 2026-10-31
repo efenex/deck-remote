@@ -1,19 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import net from 'node:net';
-import { chromium } from 'playwright-core';
+import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone photos: pick, preview, remove, failed upload, queued send and unsupported harness', { timeout: 60000 }, async t => {
-  const listener = net.createServer(); listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
-  const port = listener.address().port; await new Promise(r => listener.close(r));
-  const server = spawn('python3', ['-I', '../scripts/ui/mock-api.py', '../web', String(port)], { stdio: 'ignore' });
-  t.after(() => server.kill());
-  const base = 'http://127.0.0.1:' + port;
-  for (let i = 0; i < 50; i++) { try { if ((await fetch(base)).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
-  const browser = await chromium.launch({ channel: 'chrome', headless: true }); t.after(() => browser.close());
+  const base = await startMockApi(t);
+  const browser = await launchChrome(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
+  withDefaults(page.context());
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('**/api/rc/attention?*', r => r.fulfill({ json: { pending: false } }));
   let reject = true; const requests = [];
@@ -21,7 +14,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
     const req = route.request(); requests.push({ headers: req.headers(), body: req.postDataBuffer(), url: req.url() });
     await route.fulfill(reject ? { status: 400, json: { error: 'fixture refusal' } } : { status: 202, json: { requestId: 'photo1', sendId: 'queued1', status: 'queued', images: 1 } });
   });
-  await page.goto(base + '/?token=fake'); await page.click('.card[data-id="s1"]');
+  await openApp(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.waitForFunction(() => !document.getElementById('composerInput').disabled);
   assert.equal(await page.locator('#photoCamera').getAttribute('capture'), 'environment');
   assert.equal(await page.locator('#photoLibrary').getAttribute('multiple'), '');
@@ -60,8 +53,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
   await page.screenshot({ path: '/tmp/deckremote-photo-composer.png' });
   await page.click('#sheetBack'); await page.click('.card[data-id="s2"]');
   assert.equal(await page.locator('#photoLibrary').count(), 0, 'running Codex has no attachment control');
-  await page.goto(base + '/?session=s6');
-  await page.locator('#photoCamera').waitFor({ state: 'attached' });
+  await openApp(page, base + '/?session=s6', '#photoCamera');
   assert.equal(await page.locator('#composerInput').isDisabled(), false, 'Gemini supports photo captions');
   await page.locator('#photoCamera').setInputFiles(file);
   await page.waitForFunction(() => document.querySelectorAll('.photo-preview').length === 1);

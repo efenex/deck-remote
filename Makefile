@@ -12,7 +12,14 @@ build:
 test:
 	go test ./... && node --test web/
 
-# Browser end-to-end (run-bang phase 2 #7): system Chrome via playwright-core; `cd e2e && npm install` once.
-.PHONY: e2e
-e2e:
-	cd e2e && node --test runbang.e2e.mjs pair.e2e.mjs offline.e2e.mjs photos.e2e.mjs composer.e2e.mjs
+# Browser end-to-end (run-bang phase 2 #7): system Chrome via playwright-core.
+# Serial on purpose: in parallel, five Chromes plus two Go builds starve each other on a loaded
+# machine and a different test times out each run. Slow machine: E2E_TIMEOUT_MS=60000 make e2e.
+.PHONY: e2e e2e-deps
+e2e: e2e-deps
+	cd e2e && node --test --test-concurrency=1 runbang.e2e.mjs pair.e2e.mjs offline.e2e.mjs photos.e2e.mjs composer.e2e.mjs
+
+e2e-deps: e2e/node_modules/.package-lock.json
+
+e2e/node_modules/.package-lock.json: e2e/package.json e2e/package-lock.json
+	cd e2e && npm ci
