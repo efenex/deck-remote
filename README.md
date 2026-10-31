@@ -191,6 +191,7 @@ path.
 | `--agentdeck-url` | `DECK_REMOTE_AGENTDECK_URL` | `http://127.0.0.1:8420` (optional web proxy) |
 | `--tls-cert` | `DECK_REMOTE_TLS_CERT` | empty (plain HTTP behind `tailscale serve`) |
 | `--tls-key` | `DECK_REMOTE_TLS_KEY` | empty; must be set with `--tls-cert` |
+| `--stall-polls` | `DECK_REMOTE_STALL_POLLS` | `2`; consecutive unchanged 6 s polls before a working session is flagged stalled (pi keys on the output above its editor, so raise it if silent tool calls read as stalled) |
 | `--bin` | `DECK_REMOTE_BIN` | `agent-deck` |
 | `--tmux-bin` | `DECK_REMOTE_TMUX_BIN` | `tmux` |
 | `--web` | `DECK_REMOTE_WEB` | `web/` next to the binary |

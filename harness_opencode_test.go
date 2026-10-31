@@ -240,6 +240,43 @@ func TestOpencodeAdapterAmbiguousDirectory(t *testing.T) {
 	}
 }
 
+// TestOpencodeSingleCandidateWithSameDirInstance: one candidate session is not
+// enough to bind while another unbound instance shares the directory, unless
+// the session's title or start time ties it to this instance.
+func TestOpencodeSingleCandidateWithSameDirInstance(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name      string
+		title     string // instance title
+		ocTitle   string
+		created   time.Time // opencode session creation
+		wantBound bool
+	}{
+		{"unrelated start and title", "work", "other", start.Add(20 * time.Minute), false},
+		{"no title, late start", "", "", start.Add(20 * time.Minute), false},
+		{"start time matches", "work", "other", start.Add(5 * time.Second), true},
+		{"title matches", "work", "Work", start.Add(20 * time.Minute), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a1 := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, Title: tc.title}
+			a2 := sessionInfo{ID: "b-" + itoa(start.Unix()), Tool: "opencode", Path: dir}
+			oc := mkOcSession("ses_1", dir, tc.created)
+			oc.Title = tc.ocTitle
+			f := &fakeOpencode{sessions: []ocSession{oc}}
+			s := newOpencodeTestServer(t, f, []sessionInfo{a1, a2})
+			snap, _ := opencodeAdapter{s: s}.Snapshot(context.Background(), a1, "", false)
+			if tc.wantBound {
+				if snap.DegradedReason != "" || snap.LastReply != "hi" {
+					t.Fatalf("want bound, got %+v", snap)
+				}
+			} else if !strings.Contains(snap.DegradedReason, "ambiguous") {
+				t.Fatalf("want ambiguity, got %+v", snap)
+			}
+		})
+	}
+}
+
 func mkOcSession(id, dir string, created time.Time) ocSession {
 	var s ocSession
 	s.ID = id

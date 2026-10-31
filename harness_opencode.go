@@ -136,6 +136,7 @@ func (c *opencodeClient) do(ctx context.Context, method, path string, body, out 
 type ocSession struct {
 	ID       string `json:"id"`
 	ParentID string `json:"parentID"`
+	Title    string `json:"title"`
 	Time     struct {
 		Created float64 `json:"created"`
 		Updated float64 `json:"updated"`
@@ -255,7 +256,9 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 	if len(cands) == 0 {
 		return "", nil // launched, nothing sent yet
 	}
-	if sameDir > 0 && len(cands) > 1 {
+	// Another unbound instance in this directory could own the lone candidate
+	// just as well: bind it only when it demonstrably belongs to this instance.
+	if sameDir > 0 && (len(cands) > 1 || !ocOwnsSession(se, created, cands[0])) {
 		return "", fmt.Errorf("ambiguous opencode session: %d agent-deck instances share %s", sameDir+1, se.Path)
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].Time.Updated > cands[j].Time.Updated })
@@ -263,6 +266,23 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 	c.binding[se.ID] = ocBinding{sessionID: cands[0].ID, at: time.Now()}
 	c.mu.Unlock()
 	return cands[0].ID, nil
+}
+
+// ocStartWindow is how close to its instance's creation an opencode session
+// must start to count as that instance's own.
+const ocStartWindow = 30 * time.Second
+
+// ocOwnsSession reports whether s is evidently se's: the titles match, or it
+// started within ocStartWindow of the instance's creation.
+func ocOwnsSession(se sessionInfo, created time.Time, s ocSession) bool {
+	if t := strings.TrimSpace(se.Title); t != "" && strings.EqualFold(t, strings.TrimSpace(s.Title)) {
+		return true
+	}
+	if created.IsZero() {
+		return false
+	}
+	d := time.UnixMilli(int64(s.Time.Created)).Sub(created)
+	return d >= -ocStartWindow && d <= ocStartWindow
 }
 
 func sameDirectory(a, b string) bool {
