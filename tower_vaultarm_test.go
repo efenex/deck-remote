@@ -204,6 +204,29 @@ func TestRunVerifySeqBlock(t *testing.T) {
 	}
 }
 
+// run/verify must carry items[].line (runner.py emits it): the PWA's armCheck re-hashes it, and a
+// missing line made every prog step read "the line does not match its hash" (review P2-1).
+func TestRunVerifyCarriesLine(t *testing.T) {
+	e, _ := armServer(t)
+	power := mintTok(t, e.s, "phone", "act", "run:prog", "prof:power")
+	w := e.req("GET", "/api/rc/tower/run/verify?ask=ask1", power, nil)
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &raw) != nil {
+		t.Fatalf("verify: %d %s", w.Code, w.Body.String())
+	}
+	for _, it := range raw.Items {
+		if it["sha256"] == shaProg {
+			if it["line"] != "pwd" {
+				t.Fatalf("prog item line = %v, want pwd; keys %v", it["line"], it)
+			}
+			return
+		}
+	}
+	t.Fatalf("no prog item in %s", w.Body.String())
+}
+
 // The arm endpoint: caps, config, shape, stale rev, then the runner decides; one line each.
 func TestArmEndpoint(t *testing.T) {
 	e, ar := armServer(t)

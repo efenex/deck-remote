@@ -101,6 +101,7 @@ type runItem struct {
 	Sig      string         `json:"sig"`
 	Runnable bool           `json:"runnable"`
 	Why      string         `json:"why"`
+	Line     string         `json:"line,omitempty"` // the runner's line (runner.py verify_ask); the PWA re-hashes it in armCheck
 	Run      map[string]any `json:"run"`
 	Cwd      string         `json:"cwd,omitempty"`
 	Timeout  int            `json:"timeout,omitempty"`
