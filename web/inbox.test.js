@@ -16,7 +16,7 @@ function makeEnv(notifs, seenAt, routes) {
   const docLs = {};
   const mkEl = (sel) => {
     const e = {
-      sel, hidden: false, textContent: '', className: '', dataset: {}, children: [], style: {}, _ls: {}, _html: '',
+      sel, hidden: false, value: '', textContent: '', className: '', dataset: {}, children: [], style: {}, _ls: {}, _html: '',
       get innerHTML() { return this._html; }, set innerHTML(v) { this._html = v; this.children = []; },
       classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
       addEventListener(ev, fn) { this._ls[ev] = fn; if (!listeners.has(sel)) listeners.set(sel, {}); listeners.get(sel)[ev] = fn; },
@@ -259,4 +259,53 @@ test('event stream retries have an owned deadline and growing, visible attempts'
   sockets.at(-1).onopen();
   assert.equal(env.els.get('#connStrip').hidden, true);
   assert.ok(![...timers.values()].some(t => t.delay === 12000), 'connection deadline cleared on recovery');
+});
+
+// A synced agent-deck view filter hides rows from /api/rc/sessions; the unfiltered
+// list (?all=1) keeps inbox and toast lookups working for them.
+function hiddenFilterEnv(hiddenNeedsAttention, onES) {
+  const shown = { id: 'shown', title: 'Shown', status: 'idle' };
+  const hidden = { id: 'hid', title: 'Hidden', status: 'stopped', needsAttention: hiddenNeedsAttention };
+  const notifs = [{ id: 'n1', at: 1000, kind: 'approval', sessionId: 'hid', title: 'Approve?' }];
+  const env = makeEnv(notifs, null, (u) => {
+    if (u.startsWith('/api/rc/sessions')) {
+      return u.includes('all=1') ? { sessions: [shown, hidden] } : { sessions: [shown], view: { label: 'Open', hidden: 1 } };
+    }
+    return undefined;
+  });
+  env.ctx.DeckThread = require('./thread.js');
+  if (onES) { const Base = env.ctx.EventSource; env.ctx.EventSource = function () { Base.call(this); onES(this); }; }
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  return env;
+}
+
+test('Filtered view: a hidden session’s approval is handled once needsAttention clears', async () => {
+  for (const [needs, handled] of [[true, false], [false, true]]) {
+    const env = hiddenFilterEnv(needs);
+    await new Promise((r) => setTimeout(r, 80));
+    env.els.get('#screenInbox').hidden = false;
+    env.listeners.get('#inboxRefresh').click();
+    await new Promise((r) => setTimeout(r, 50));
+    let card = null;
+    walk(env.els.get('#inboxList'), (n) => { if (/\bnotif\b/.test(n.className || '')) card = n; });
+    assert.ok(card, 'inbox card rendered');
+    assert.strictEqual(/\bhandled\b/.test(card.className), handled, 'needsAttention=' + needs);
+    assert.ok(!/Session no longer listed/.test(card.innerHTML), 'hidden session is still known');
+  }
+});
+
+test('Filtered view: a foreground toast for a hidden session opens its sheet', async () => {
+  const sources = [];
+  const env = hiddenFilterEnv(false, (es) => sources.push(es));
+  await new Promise((r) => setTimeout(r, 80));
+  const es = sources[sources.length - 1];
+  assert.ok(es && es.onmessage, 'event stream is open');
+  es.onmessage({ data: JSON.stringify({ type: 'reply', sessionId: 'hid', error: 'boom' }) });
+  const toastEl = env.ctx.document.body.children.find((c) => c && c.className === 'toast');
+  assert.ok(toastEl && toastEl._ls.click, 'the toast is tappable');
+  toastEl._ls.click();
+  await new Promise((r) => setTimeout(r, 50));
+  const opened = env.ctx.document.body.children.some((c) => c && c.id === 'sheet');
+  assert.ok(opened, 'the hidden session\u2019s sheet opened');
 });

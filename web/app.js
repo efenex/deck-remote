@@ -182,6 +182,7 @@
     pushConfig: null,         // {enabled, publicKey}
     openSheetId: null,        // session id whose sheet is open
     view: {},                 // {label, hidden}: agent-deck TUI filter applied server-side
+    allSessions: new Map(),   // unfiltered list, kept only while a synced view filter hides rows (inbox/toast/sheet lookups)
     showAll: false,           // bypass that filter for this visit (?all=1)
     activityTimer: null,      // interval id for the open sheet's live-activity poll
     convoScrollHandler: null, // scroll listener attached to the open sheet's #convo
@@ -1297,9 +1298,14 @@
   }
   // An approval/question whose session no longer needs you was answered
   // (here, on the laptop, or it went away): show it as handled.
+  // A session by id from the full list: the filtered view's rows first, then
+  // the unfiltered copy (sessions the synced agent-deck filter hides).
+  function lookupSession(id) {
+    return state.sessions.get(id) || state.allSessions.get(id);
+  }
   function inboxHandled(n) {
     if (n.kind !== 'approval' && n.kind !== 'question') return false;
-    const s = n.sessionId && state.sessions.get(n.sessionId);
+    const s = n.sessionId && lookupSession(n.sessionId);
     return !!s && !s.needsAttention;
   }
   function renderInbox() {
@@ -1329,7 +1335,7 @@
       const card = el('div', cls);
       card.dataset.id = n.id;
       if (n.sessionId) card.dataset.session = n.sessionId;
-      const known = !n.sessionId || !state.sessions.size || state.sessions.has(n.sessionId);
+      const known = !n.sessionId || !state.sessions.size || !!lookupSession(n.sessionId);
       card.innerHTML =
         '<div class="card-top">' + (n.at > seen ? '<span class="unread-dot" title="Unread"></span>' : '') +
           '<div class="card-title">' + esc(n.title || 'deck-remote') + '</div>' +
@@ -1383,6 +1389,7 @@
     if (!state.sessions.has(id)) {
       try { await loadSessions(false); } catch (_) {}
     }
+    if (!state.sessions.has(id) && state.allSessions.has(id)) state.sessions.set(id, state.allSessions.get(id));
     if (!state.sessions.has(id)) {
       // Hidden by the synced agent-deck filter: fetch it unfiltered.
       try {
@@ -3413,7 +3420,7 @@
   }
 
   function titleFor(id) {
-    const s = state.sessions.get(id);
+    const s = lookupSession(id);
     return (s && s.title) || 'Session';
   }
 
@@ -3422,7 +3429,7 @@
   function notifyForeground(id, kind, title, body) {
     if (!prefs[kind]) return;
     if (document.visibilityState !== 'visible') return; // system push handles backgrounded
-    toast(title, body, () => { showTab('deck'); openSheet(id); });
+    toast(title, body, () => openSession(id));
   }
 
   // ---------------------------------------------------------------------------
@@ -3845,6 +3852,18 @@
   // Boot
   // ---------------------------------------------------------------------------
   let retryTimer = null;
+  // While a synced view filter hides rows, also fetch the unfiltered list so
+  // inbox/toast/sheet lookups still see the hidden sessions. Skipped when
+  // nothing is filtered (the main list is already complete).
+  async function loadAllSessions() {
+    if (state.showAll || !(state.view && state.view.hidden > 0)) { state.allSessions.clear(); return; }
+    try {
+      const r = await api('GET', '/api/rc/sessions?all=1');
+      const next = new Map();
+      ((r && r.sessions) || []).forEach((s) => next.set(s.id, DeckThread.mergeSessionRow(state.allSessions.get(s.id), s)));
+      state.allSessions = next;
+    } catch (_) { /* keep the previous copy; the filtered list still loaded */ }
+  }
   async function loadSessions(initial, userInitiated = false) {
     try {
       const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
@@ -3861,6 +3880,7 @@
       });
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       if (!state.showAll) saveDeckCache(list);
+      await loadAllSessions();
       if (evRC && evRC.readyState === 1) connection.offline = false;
       renderConnection();
       renderQuota();
@@ -3932,6 +3952,7 @@
     localStorage.setItem(PROFILE_KEY, name);
     if ($('#sheet')) closeSheet(); // the open session belongs to the old profile
     state.sessions.clear();
+    state.allSessions.clear();
     state.convos.clear();
     state.pending.clear();
     state.history.clear();
