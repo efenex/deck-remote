@@ -53,7 +53,7 @@ const code = source.slice(source.indexOf('  async function openNotification('), 
 
 function appEnv({ sheetOpenFor, sessions }) {
   const calls = [];
-  const state = { sessions: new Map(sessions.map((id) => [id, { id }])), openSheetId: sheetOpenFor || null };
+  const state = { sessions: new Map(sessions.map((id) => [id, { id }])), allSessions: new Map(), openSheetId: sheetOpenFor || null };
   let sheet = !!sheetOpenFor;
   const ctx = {
     state, inbox: { focusId: null }, NEEDS_KINDS: new Set(['approval', 'question', 'stall']),
