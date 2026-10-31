@@ -1,5 +1,5 @@
 // End-to-end: run-bang phase 2 #7 (docs/design/run-bang-phase2-review.md §5 W3) in a real browser.
-// Run: make e2e   (needs `npm install` in e2e/ once, and Google Chrome; downloads no browser)
+// Run: make e2e   (installs e2e/ deps if missing; needs Google Chrome; downloads no browser)
 //
 // Boots a freshly built deck-remote on a free loopback port with a temp HOME and state dir, a fake
 // tower root (scripts/run_bang.py prints a fixture verify and records argv; nothing runs) and a fake
@@ -12,11 +12,10 @@ import assert from 'node:assert';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright-core';
+import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(here);
@@ -31,12 +30,6 @@ const LINES = {
   zw: '! git pu​ll',
 };
 
-function freePort() {
-  return new Promise((resolve) => {
-    const s = net.createServer();
-    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
-  });
-}
 
 function writeFixture(dir) {
   const root = path.join(dir, 'tower');
@@ -87,13 +80,6 @@ else:
   return { root, cwd };
 }
 
-async function waitUp(base) {
-  for (let i = 0; i < 100; i++) {
-    try { const r = await fetch(base + '/healthz'); if (r.ok) return; } catch (_) { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error('deck-remote did not come up');
-}
 
 test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID run', { timeout: 180e3 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-remote-e2e-'));
@@ -113,15 +99,15 @@ test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID
   let srvErr = '';
   srv.stderr.on('data', (d) => { srvErr += d; });
   t.after(() => { srv.kill(); fs.rmSync(dir, { recursive: true, force: true }); });
-  await waitUp(base);
+  await waitHttp(base + '/healthz');
 
   // The laptop mints the phone's token (run:* caps are minted locally only, W1 #4).
   const mint = await (await fetch(base + '/api/rc/devices/mint', { method: 'POST', headers: { Authorization: 'Bearer ' + SHARED, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'e2e-phone', caps: ['act', 'run:mut'] }) })).json();
   assert.ok(mint.token, 'mint: ' + JSON.stringify(mint));
 
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await launchChrome();
   t.after(() => browser.close());
-  const ctx = await browser.newContext({ extraHTTPHeaders: { 'Tailscale-User-Login': OPERATOR }, serviceWorkers: 'block' });
+  const ctx = withDefaults(await browser.newContext({ extraHTTPHeaders: { 'Tailscale-User-Login': OPERATOR }, serviceWorkers: 'block' }));
   await ctx.addInitScript((tok) => { localStorage.setItem('deck_remote_token', tok); }, mint.token);
   const page = await ctx.newPage();
   const problems = [];
