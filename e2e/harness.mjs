@@ -58,7 +58,7 @@ export async function startMockApi(t) {
 // the very first render without its cards (not reproduced elsewhere yet); the log says why. The
 // app retries the session list itself, but not the tower probe (initTower), so a single slow
 // /api/rc/tower hides the Tower tab until the next page load.
-export async function openDeck(page, url, ready = '.card[data-id="s1"]', state = 'attached') {
+export async function openApp(page, url, ready = '.card[data-id="s1"]', state = 'attached') {
   const pending = new Map(); const failed = [];
   const t0 = Date.now(); const since = () => Date.now() - t0 + 'ms';
   const on = {
@@ -75,7 +75,7 @@ export async function openDeck(page, url, ready = '.card[data-id="s1"]', state =
       return resp;
     } catch {
       const text = (sel) => page.locator(sel).first().innerText({ timeout: 1000 }).catch(() => '?');
-      console.error(`openDeck: ${ready} not rendered after ${since()}; reloading once.\n` +
+      console.error(`openApp: ${ready} not rendered after ${since()}; reloading once.\n` +
         `  connection: ${await text('#connText')}\n  deck: ${(await text('#deck')).slice(0, 200).replace(/\s+/g, ' ')}\n` +
         `  failed: ${failed.join(' | ') || 'none'}\n` +
         `  pending: ${[...pending].map(([r, at]) => at + ' ' + r.url()).join(' | ') || 'none'}`);

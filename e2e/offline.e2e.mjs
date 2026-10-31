@@ -1,7 +1,7 @@
 // Uses the existing UI fixture server; no real sessions or sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openDeck, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone: offline refresh feedback, transcript failure and resume layout recovery', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
@@ -16,7 +16,7 @@ test('phone: offline refresh feedback, transcript failure and resume layout reco
       path.endsWith('/whoami') ? {} : { enabled: true, overview: { generated_at: '2026-10-25T15:02:00Z', counts: {} } };
     return route.fulfill({ json: data });
   });
-  await openDeck(page, base + '/?token=fake');
+  await openApp(page, base + '/?token=fake');
   // A black-holed response must have a finite spinner, including on the session shield.
   await page.route('**/api/rc/**', route => new Promise(resolve => {
     setTimeout(() => route.abort().catch(() => {}).finally(resolve), 13500);

@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freePort, waitHttp, launchChrome, withDefaults, openDeck } from './harness.mjs';
+import { freePort, waitHttp, launchChrome, withDefaults, openApp } from './harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(here);
@@ -116,7 +116,7 @@ test('run-bang phase 2 in Chrome: CSP, passkey enrolment, confirm sheet, Face ID
   await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
 
   // CSP header present, and the app loads under it with no violation.
-  const resp = await openDeck(page, origin + '/', '#tabTower', 'visible');
+  const resp = await openApp(page, origin + '/', '#tabTower', 'visible');
   const csp = resp.headers()['content-security-policy'] || '';
   assert.match(csp, /script-src 'self';/);
   assert.match(csp, /connect-src 'self'/);

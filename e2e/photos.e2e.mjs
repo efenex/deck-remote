@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openDeck, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
 test('phone photos: pick, preview, remove, failed upload, queued send and unsupported harness', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
@@ -14,7 +14,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
     const req = route.request(); requests.push({ headers: req.headers(), body: req.postDataBuffer(), url: req.url() });
     await route.fulfill(reject ? { status: 400, json: { error: 'fixture refusal' } } : { status: 202, json: { requestId: 'photo1', sendId: 'queued1', status: 'queued', images: 1 } });
   });
-  await openDeck(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
+  await openApp(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.waitForFunction(() => !document.getElementById('composerInput').disabled);
   assert.equal(await page.locator('#photoCamera').getAttribute('capture'), 'environment');
   assert.equal(await page.locator('#photoLibrary').getAttribute('multiple'), '');
@@ -53,7 +53,7 @@ test('phone photos: pick, preview, remove, failed upload, queued send and unsupp
   await page.screenshot({ path: '/tmp/deckremote-photo-composer.png' });
   await page.click('#sheetBack'); await page.click('.card[data-id="s2"]');
   assert.equal(await page.locator('#photoLibrary').count(), 0, 'running Codex has no attachment control');
-  await openDeck(page, base + '/?session=s6', '#photoCamera');
+  await openApp(page, base + '/?session=s6', '#photoCamera');
   assert.equal(await page.locator('#composerInput').isDisabled(), false, 'Gemini supports photo captions');
   await page.locator('#photoCamera').setInputFiles(file);
   await page.waitForFunction(() => document.querySelectorAll('.photo-preview').length === 1);
