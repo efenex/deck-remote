@@ -266,6 +266,11 @@
   function answerFailureLabel(err) {
     const e = err || {};
     const d = e.data || {};
+    // A review that disagrees with the phone's answers refuses the same way every time: say so
+    // instead of inviting another tap.
+    if (d.total > 0 && d.done > 0 && /review shows/.test(e.message || '')) {
+      return d.done + ' of ' + d.total + ' answers are entered, but the terminal does not match your choices, so nothing was submitted. ' + e.message;
+    }
     if (d.total > 0 && d.done > 0) {
       return d.done >= d.total
         ? 'All ' + d.total + ' answers are entered but not submitted yet; tap Submit answers to finish.'

@@ -307,6 +307,9 @@ test('answerFailureLabel says how far a multi-question submit got, never "Not se
   const partial = answerFailureLabel({ status: 409, message: '3 of 4 answers are entered: x', data: { done: 3, total: 4 } });
   assert.strictEqual(partial, '3 of 4 answers sent; tap Submit answers to finish.');
   assert.match(answerFailureLabel({ status: 409, message: 'x', data: { done: 4, total: 4 } }), /All 4 answers are entered but not submitted/);
+  const mismatch = answerFailureLabel({ status: 409, message: '4 of 4 answers are entered: review shows "Beta 1" for question 1, not the answer sent; not submitted', data: { done: 4, total: 4 } });
+  assert.match(mismatch, /nothing was submitted/);
+  assert.doesNotMatch(mismatch, /tap Submit answers to finish/);
   const timeout = answerFailureLabel(new Error('Host did not respond within 12 s'));
   assert.doesNotMatch(timeout, /^Not sent/);
   assert.match(timeout, /may still be going in/);
