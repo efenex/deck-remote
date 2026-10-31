@@ -1577,6 +1577,7 @@
     const sheet = $('#sheet');
     if (scrim) scrim.remove();
     if (sheet) sheet.remove();
+    $('#app').inert = false;
     state.openSheetId = null;
     // remove session deep-link param
     const url = new URL(location.href);
@@ -1607,9 +1608,11 @@
   function applyViewport() {
     const vv = window.visualViewport;
     if (!vv) return;
-    const focused = document.activeElement;
-    const editing = focused && (focused.matches('input, textarea') || focused.isContentEditable);
-    const kb = !!editing && DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
+    // Focus can move to Send / a photo control before iOS closes its keyboard.
+    // Clearing kb on blur moves the hit target between pointer-down and click.
+    // The visual viewport (including the native accessory bar) owns geometry;
+    // wait for its resize to restore the full-height sheet.
+    const kb = DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
     const was = document.documentElement.classList.contains('kb');
     document.documentElement.classList.toggle('kb', kb);
     const sheet = $('#sheet');
@@ -1722,6 +1725,9 @@
     const sheet = el('div', 'sheet');
     sheet.id = 'sheet';
     document.body.appendChild(sheet);
+    // The deck remains behind the modal sheet during viewport pans. It must
+    // neither receive stray touches nor participate in keyboard focus traversal.
+    $('#app').inert = true;
 
     sheet.innerHTML = sheetHeadHTML(s);
     buildDetailSheet(sheet, s);
@@ -1951,7 +1957,13 @@
     // Hide the popup on blur (deferred so a tap on a suggestion still fires).
     ta.addEventListener('blur', () => setTimeout(() => hideSlashPop(), 120));
     const send = el('button', 'send-btn', '↑');
+    send.type = 'button';
     send.disabled = true;
+    // Keep the textarea and keyboard steady until the normal click handler.
+    // Do not send on pointerdown: a cancelled tap/drag must not submit.
+    send.addEventListener('pointerdown', (e) => {
+      if (e.button === 0 && document.activeElement === ta) e.preventDefault();
+    });
     send.addEventListener('click', async () => {
       if (ta.disabled || photos.preparing || photos.sending) return;
       const text = ta.value.trim();

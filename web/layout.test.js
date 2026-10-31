@@ -206,6 +206,37 @@ test('applyViewport detects the keyboard via DeckViewport.keyboardUp, not vv < i
   assert.match(fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8'), /'\/viewport\.js\?v=\d+'/);
 });
 
+test('keyboard layout survives focus moving to Send until the visual viewport actually expands', () => {
+  const vm = require('node:vm');
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const start = js.indexOf('function applyViewport()');
+  const source = js.slice(start, js.indexOf("document.addEventListener('focusout'", start));
+  const classes = new Set(['kb']);
+  const sheet = { style: {} };
+  const vv = { height: 449, offsetTop: 50, scale: 1 };
+  const document = {
+    activeElement: { matches: () => true },
+    documentElement: { clientHeight: 793, classList: {
+      contains: k => classes.has(k),
+      toggle: (k, on) => on ? classes.add(k) : classes.delete(k),
+    } },
+  };
+  const ctx = { document, window: { visualViewport: vv, innerHeight: 447 },
+    DeckViewport: require('./viewport.js'), $: sel => sel === '#sheet' ? sheet : null };
+  const apply = () => vm.runInNewContext(source + '\napplyViewport();', ctx);
+  apply();
+  assert.deepEqual(sheet.style, { top: '50px', height: '449px', bottom: 'auto' });
+  document.activeElement = { matches: () => false }; // button focus, keyboard still up
+  apply();
+  assert.ok(classes.has('kb'));
+  assert.equal(sheet.style.height, '449px');
+  vv.offsetTop = 80; apply(); // viewport pan uses the same coordinate space
+  assert.equal(sheet.style.top, '80px');
+  vv.height = 793; vv.offsetTop = 0; apply();
+  assert.ok(!classes.has('kb'));
+  assert.deepEqual(sheet.style, { top: '', height: '', bottom: '' });
+});
+
 test('composer placeholder is just "Message…" (the / button sits beside it; the long form wrapped in the 1-line input)', () => {
   const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   assert.match(js, /ta\.placeholder = 'Message…';/);

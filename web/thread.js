@@ -72,8 +72,15 @@
   // "yes" in the transcript does not swallow a new "yes" still in flight.
   function mergeFreshHistory(fresh, current) {
     const used = new Set();
+    const first = fresh.find((e) => e.ts);
     const kept = current.filter((e) => {
       if (e.hist) return false;
+      // A delivered echo can have missed tail reconciliation (sheet closed),
+      // or predate the hist promotion fix. Once outside this history window it
+      // belongs on an older page, not after the newest reply. Keep unresolved
+      // sends regardless of age so queued/failed messages remain actionable.
+      if (e.role === 'me' && e.status === 'delivered' && first && e.ts &&
+          e.ts < first.ts - SAME_TURN_SECS) return false;
       if (e.role !== 'me' && e.role !== 'reply') return true;
       const k = turnKey(e);
       for (let i = fresh.length - 1; i >= 0; i--) {
@@ -163,19 +170,27 @@
   // a long turn can settle "unconfirmed" while its text is plainly in the
   // transcript. Promote each phone bubble that has a not-older matching 'me'
   // row in the tail (one-for-one, time-bounded like mergeFreshHistory so an old
-  // identical "yes" proves nothing). Returns how many bubbles changed.
+  // identical "yes" proves nothing). Adopt the transcript timestamp and hist
+  // ownership too: otherwise reopening a newer page re-appends this old echo.
+  // Returns how many bubbles changed, including already-delivered SSE echoes.
   function promoteDelivered(conv, tail) {
     const used = new Set();
     let n = 0;
     conv.forEach((e) => {
-      if (e.role !== 'me' || e.hist || !e.status || e.status === 'delivered') return;
+      if (e.role !== 'me' || (!e.hist && !e.status)) return;
       const k = turnKey(e);
-      for (let i = tail.length - 1; i >= 0; i--) {
+      for (let i = 0; i < tail.length; i++) {
         const f = tail[i];
         if (used.has(i) || f.role !== 'me' || turnKey(f) !== k) continue;
+        // Reserve rows already reconciled on an earlier poll, so the same
+        // transcript "yes" cannot deliver another queued "yes" next time.
+        if (e.hist && e.ts !== f.ts) continue;
         if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
+        if (e.hist) return;
         e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
+        e.hist = true;
+        if (f.ts) e.ts = f.ts;
         if (f.origin) e.origin = f.origin;
         n++;
         return;

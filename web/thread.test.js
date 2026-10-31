@@ -45,6 +45,41 @@ test('a live row is matched to its transcript copy by time', () => {
   assert.deepStrictEqual(mergeFreshHistory(fresh, conv).map((t) => t.ts), [1000, 4990, 5001]);
 });
 
+test('delivered phone echo ages out with history instead of resurfacing after the latest reply', () => {
+  const sent = Date.parse('2026-10-30T18:02:00Z') / 1000;
+  const echo = me('disk cleanup commands from the phone', { ts: sent });
+  const landed = h('me', echo.content, sent + 1);
+  const conv = [echo];
+  promoteDelivered(conv, [landed]);
+  assert.equal(echo.hist, true, 'transcript-confirmed echo must become history');
+  assert.equal(echo.ts, landed.ts, 'use the transcript timestamp');
+  const recent = [h('reply', '01:04 reply', sent + 7 * 3600)];
+  assert.deepEqual(mergeFreshHistory(recent, conv), recent);
+  // Scrolling back restores the canonical 18:02 row in its original place.
+  assert.deepEqual(trimOverlap([landed], recent).concat(recent).map(e => e.content), [echo.content, '01:04 reply']);
+});
+
+test('an SSE-delivered echo is reconciled too; a pre-fix stale echo outside the page is retired', () => {
+  const echo = me('old phone send', { ts: 1000, status: 'delivered', queued: false });
+  assert.equal(promoteDelivered([echo], [h('me', echo.content, 1001)]), 1);
+  assert.equal(echo.hist, true);
+  const recent = [h('reply', 'latest', 30000)];
+  const stale = me('old phone send', { ts: 1000, status: 'delivered', queued: false });
+  assert.deepEqual(mergeFreshHistory(recent, [stale]), recent);
+  for (const status of ['queued', 'unconfirmed', 'failed']) {
+    const outstanding = me('still unresolved', { ts: 1000, status });
+    assert.ok(mergeFreshHistory(recent, [outstanding]).includes(outstanding), status + ' must survive');
+  }
+});
+
+test('a previously reconciled identical turn cannot deliver the next queued message on a later poll', () => {
+  const conv = [me('yes', { ts: 1000 }), me('yes', { ts: 1001 })];
+  const tail = [h('me', 'yes', 1002)];
+  assert.equal(promoteDelivered(conv, tail), 1);
+  assert.equal(promoteDelivered(conv, tail), 0);
+  assert.equal(conv[1].status, 'sent');
+});
+
 const { bashBlockHTML, turnKey, imagesLabel } = require('./thread.js');
 
 test('bashBlockHTML: command and stdout, escaped', () => {
