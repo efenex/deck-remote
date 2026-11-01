@@ -1,5 +1,5 @@
 // End-to-end: phone pairing by QR (pair.go, web/pair.js) in a real browser.
-// Run: make e2e   (needs `npm install` in e2e/ once, Google Chrome, qrencode and ffmpeg)
+// Run: make e2e   (installs e2e/ deps if missing; needs Google Chrome, qrencode and ffmpeg)
 //
 // Boots a freshly built deck-remote on a free loopback port with a temp HOME and state dir. The
 // laptop asks for a pairing offer (loopback, no serve headers); its URL becomes a QR still that
@@ -10,31 +10,15 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright-core';
+import { freePort, waitHttp, launchChrome, withDefaults } from './harness.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(here);
 const OPERATOR = 'op@example.com';
 const SHARED = 'shared-e2e-token';
-
-function freePort() {
-  return new Promise((resolve) => {
-    const s = net.createServer();
-    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
-  });
-}
-
-async function waitUp(base) {
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(base + '/healthz')).ok) return; } catch (_) { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error('deck-remote did not come up');
-}
 
 test('scan a pairing QR inside the app: token, Face ID without a code, app opens', { timeout: 120e3 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deck-pair-e2e-'));
@@ -54,7 +38,7 @@ test('scan a pairing QR inside the app: token, Face ID without a code, app opens
   let srvErr = '';
   srv.stderr.on('data', (d) => { srvErr += d; });
   t.after(() => { srv.kill(); fs.rmSync(dir, { recursive: true, force: true }); });
-  await waitUp(base);
+  await waitHttp(base + '/healthz');
 
   // The laptop's half: scripts/pair-phone.sh does this request and prints the URL as a QR.
   const offer = await (await fetch(base + '/api/rc/devices/pair', { method: 'POST', headers: { Authorization: 'Bearer ' + SHARED, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'e2e-phone', caps: ['act', 'run:ro', 'run:mut'] }) })).json();
@@ -64,10 +48,10 @@ test('scan a pairing QR inside the app: token, Face ID without a code, app opens
   execFileSync('qrencode', ['-o', png, '-s', '8', '-m', '4', offer.url]);
   execFileSync('ffmpeg', ['-loglevel', 'error', '-loop', '1', '-i', png, '-t', '2', '-r', '10', '-vf', 'scale=480:480,format=yuv420p', y4m]);
 
-  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: [
+  const browser = await launchChrome({ args: [
     '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--use-file-for-fake-video-capture=' + y4m] });
   t.after(() => browser.close());
-  const ctx = await browser.newContext({ extraHTTPHeaders: { 'Tailscale-User-Login': OPERATOR }, serviceWorkers: 'block' });
+  const ctx = withDefaults(await browser.newContext({ extraHTTPHeaders: { 'Tailscale-User-Login': OPERATOR }, serviceWorkers: 'block' }));
   await ctx.grantPermissions(['camera'], { origin });
   const page = await ctx.newPage();
   const problems = [];
