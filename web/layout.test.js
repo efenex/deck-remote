@@ -213,11 +213,12 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
   const source = js.slice(start, js.indexOf('// iOS pans/resizes in stages', start));
   const classes = new Set(['kb']);
   let paintShift = 0; // how far iOS paints the sheet from where its inline top says
-  const sheet = { style: {}, getBoundingClientRect: () => ({ top: (parseFloat(sheet.style.top) || 0) + paintShift }) };
-  const vv = { height: 449, offsetTop: 50, scale: 1 };
+  let docShift = 0;   // how far iOS has panned the whole document (html rect top = -docShift)
+  const sheet = { style: {}, getBoundingClientRect: () => ({ top: (parseFloat(sheet.style.top) || 0) + paintShift - docShift }) };
+  const vv = { height: 449, offsetTop: 50, pageTop: 50, scale: 1 };
   const document = {
     activeElement: { matches: () => true },
-    documentElement: { clientHeight: 793, classList: {
+    documentElement: { clientHeight: 793, getBoundingClientRect: () => ({ top: -docShift }), classList: {
       contains: k => classes.has(k),
       toggle: (k, on) => on ? classes.add(k) : classes.delete(k),
     } },
@@ -231,13 +232,22 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
   apply();
   assert.ok(classes.has('kb'));
   assert.equal(sheet.style.height, '449px');
-  vv.offsetTop = 80; apply(); // viewport pan uses the same coordinate space
+  vv.offsetTop = 80; vv.pageTop = 80; apply(); // viewport pan uses the same coordinate space
   assert.equal(sheet.style.top, '80px');
   // iOS paints the sheet 58px higher than its inline top says (clock over the
   // title, list showing under the composer): the measured error is corrected.
   paintShift = -58; apply();
   assert.equal(sheet.style.top, '138px');
   paintShift = 0;
+  // REGRESSION (iPhone overlay 2026-11-02 23:02Z): iOS shifted the whole document up by
+  // offsetTop (html top -344); inline top = offsetTop already paints at 0, and the sheet
+  // must NOT be moved to 2 x offsetTop (688, painted 344 low, composer under the keyboard).
+  vv.offsetTop = 344; vv.pageTop = 344; docShift = 344; apply();
+  assert.equal(sheet.style.top, '344px');
+  assert.equal(sheet.getBoundingClientRect().top, 0);
+  sheet.style.top = '688px'; apply(); // recovers from the state the phone showed
+  assert.equal(sheet.style.top, '344px');
+  docShift = 0; vv.pageTop = 0;
   vv.height = 793; vv.offsetTop = 0; apply();
   assert.ok(!classes.has('kb'));
   assert.deepEqual(sheet.style, { top: '', height: '', bottom: '' });
