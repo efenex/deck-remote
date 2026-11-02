@@ -122,6 +122,10 @@ type runVerify struct {
 	// Seq is verify's sequence block, passed to the PWA as is (the arm sheet is built from it);
 	// absent for a loose ask. armState reads seq.arm.state from it.
 	Seq json.RawMessage `json:"seq,omitempty"`
+	// Runner is verify's runner-mode block (runner-mode interface: source, prelude_lines,
+	// needs_arm, phone/laptop steps, elevation, gate without nonce), present only for a runner
+	// ask; passed to the PWA as is. tower_runner.go reads it through runnerBlock.
+	Runner json.RawMessage `json:"runner,omitempty"`
 }
 
 var errRunAskNotFound = errors.New("no such open ask")
@@ -386,6 +390,9 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 		out["seq"] = v.Seq
 		out["arm_device"] = dt.ID
 		out["arm"] = s.armConfig(dt)
+	}
+	if len(v.Runner) > 0 && string(v.Runner) != "null" {
+		out["runner"] = v.Runner
 	}
 	writeJSON(w, http.StatusOK, out)
 }
