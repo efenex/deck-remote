@@ -37,14 +37,19 @@ import (
 var runnerCaps = []string{"run:mut", "run:prog"}
 
 var (
-	runnerIDRe    = regexp.MustCompile(`^[!-~]{1,300}$`)     // ask / elevation ids: printable ASCII, no space
-	runnerNonceRe = regexp.MustCompile(`^[0-9a-f]{16,128}$`) // the interface pins no length: hex, 64..512 bits
+	runnerIDRe    = regexp.MustCompile(`^[!-~]{1,200}$`)           // ask ids: printable ASCII, no space
+	runnerElevRe  = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,256}$`) // <ask>:elev:<rev8>:<stamp>.<pid>; the structure is not parsed
+	runnerNonceRe = regexp.MustCompile(`^[0-9a-f]{16,128}$`)       // the interface pins no length: hex, 64..512 bits
 	runnerWordRe  = regexp.MustCompile(`^[\x20-\x7e]{1,64}$`)
 	runnerDecide  = map[string]bool{"run": true, "skip": true, "quit": true, "retry": true}
 )
 
 func runnerIDOK(id string, max int) bool {
 	return len(id) <= max && runnerIDRe.MatchString(id) && !strings.HasPrefix(id, "-")
+}
+
+func runnerElevOK(id string) bool {
+	return runnerElevRe.MatchString(id) && !strings.HasPrefix(id, "-")
 }
 
 // runnerBlock is the part of verify's runner block deck-remote decides on; the PWA gets it whole.
@@ -369,9 +374,9 @@ func (s *server) handleRunnerGatePoll(w http.ResponseWriter, r *http.Request) {
 	entry["device"] = dt.Name
 	elev := r.URL.Query().Get("elevation")
 	entry["elevation"] = elev
-	if !runnerIDOK(elev, 300) {
+	if !runnerElevOK(elev) {
 		entry["elevation"] = oneLineGo(elev, 80)
-		refuse(http.StatusBadRequest, "need elevation (printable id)", nil)
+		refuse(http.StatusBadRequest, "need elevation (id of [A-Za-z0-9._:-], up to 256)", nil)
 		return
 	}
 	if why != "" {
@@ -430,8 +435,8 @@ func (s *server) handleRunnerGate(w http.ResponseWriter, r *http.Request) {
 		entry["word_len"] = len(req.Word)
 	}
 	switch {
-	case !runnerIDOK(req.Elevation, 300) || !runnerNonceRe.MatchString(req.Nonce) || !runnerDecide[req.Decision]:
-		refuse(http.StatusBadRequest, "need elevation (printable id), nonce (hex) and decision (run|skip|quit|retry)", nil)
+	case !runnerElevOK(req.Elevation) || !runnerNonceRe.MatchString(req.Nonce) || !runnerDecide[req.Decision]:
+		refuse(http.StatusBadRequest, "need elevation (id of [A-Za-z0-9._:-], up to 256), nonce (hex) and decision (run|skip|quit|retry)", nil)
 		return
 	case req.Word != "" && (!runnerWordRe.MatchString(req.Word) || req.Decision != "run"):
 		refuse(http.StatusBadRequest, "word: up to 64 printable characters, only with decision run", nil)
@@ -481,8 +486,8 @@ func (s *server) handleRunnerEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entry["elevation"] = oneLineGo(req.Elevation, 300)
-	if !runnerIDOK(req.Elevation, 300) {
-		refuse(http.StatusBadRequest, "need elevation (printable id)", nil)
+	if !runnerElevOK(req.Elevation) {
+		refuse(http.StatusBadRequest, "need elevation (id of [A-Za-z0-9._:-], up to 256)", nil)
 		return
 	}
 	if why != "" {

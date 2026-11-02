@@ -51,6 +51,7 @@
       rev: seq.rev || '', steps, preludeLines: rn.prelude_lines || 0, pointer: seq.pointer,
       needsArm: !!rn.needs_arm, armState, offerArm: false, startable: false, resume: mine, elevation: el,
     };
+    if (rn.file && rn.file !== 'ok') { out.why = 'The runner file no longer matches its signed sha256 (' + rn.file + '): re-sign it on the laptop.'; return out; }
     if (seq.sig !== 'ok') { out.why = 'The sequence signature is ' + (seq.sig || 'missing') + ': re-sign it on the laptop.'; return out; }
     if (!/^[0-9a-f]{16}$/.test(out.rev)) { out.why = 'verify reports no revision for this runner'; return out; }
     if (el.state === 'elevated') {
@@ -166,7 +167,9 @@
         if (el.state && el.state !== 'elevated') { this.over = true; reason = el.state + (el.reason ? ' (' + el.reason + ')' : ''); }
       } catch (e) {
         const refused = e && e.status === 403 && e.data && e.data.refused;
-        if (refused && OVER.has(refused)) { this.over = true; reason = refused; } else this.fails++;
+        if (refused && OVER.has(refused)) { this.over = true; reason = refused; }
+        else if (e && e.status === 404) { this.over = true; reason = 'the ask is closed'; } // verify: no longer open (a restart never answers 404)
+        else this.fails++;
       }
       if (this.over) this.reason = reason;
       const conn = { reconnecting: this.fails > 0, fails: this.fails, over: this.over, reason };

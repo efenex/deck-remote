@@ -20,7 +20,7 @@ const (
 	runnerSrc   = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	runnerNonce = "0123456789abcdef0123456789abcdef"
 	runnerWord  = "orchid-delete"
-	runnerElev  = "ask1:elev:50b7656d:20261103T010203Z"
+	runnerElev  = "ask1:elev:50b7656d:20261103T010203Z.4242"
 )
 
 type runnerStub struct {
@@ -314,6 +314,8 @@ func TestRunnerGatePoll(t *testing.T) {
 	expectCode(t, "wrong device", e.req("GET", "/api/rc/tower/runner/gate?elevation="+runnerElev, tok, nil), 403, `"refused":"wrong-device"`)
 	expectCode(t, "bad id", e.req("GET", "/api/rc/tower/runner/gate?elevation=-x", tok, nil), 400, "need elevation")
 	expectCode(t, "no id", e.req("GET", "/api/rc/tower/runner/gate", tok, nil), 400, "need elevation")
+	expectCode(t, "slash in id", e.req("GET", "/api/rc/tower/runner/gate?elevation=a/b", tok, nil), 400, "need elevation")
+	expectCode(t, "id too long", e.req("GET", "/api/rc/tower/runner/gate?elevation="+strings.Repeat("a", 257), tok, nil), 400, "need elevation")
 	expectCode(t, "no cap", e.req("GET", "/api/rc/tower/runner/gate?elevation="+runnerElev, mintTok(t, e.s, "ro", "act", "run:ro"), nil), 403, "lacks run:mut")
 	if n := len(st.runnerCalls()); n != 3 {
 		t.Fatalf("runner calls %d", n)
@@ -339,13 +341,14 @@ func TestRunnerGateDecide(t *testing.T) {
 	expectCode(t, "double tap", e.gate(tok, body("word", runnerWord)), 429, "duplicate tap")
 
 	for name, b := range map[string]map[string]any{
-		"bad decision":   body("decision", "yes"),
-		"nonce not hex":  body("nonce", strings.Repeat("Z", 32)),
-		"nonce short":    body("nonce", "abcd"),
-		"dash elevation": body("elevation", "-x"),
-		"long word":      body("word", strings.Repeat("w", 65)),
-		"word newline":   body("word", "a\nb"),
-		"word with skip": body("decision", "skip", "word", runnerWord),
+		"bad decision":    body("decision", "yes"),
+		"nonce not hex":   body("nonce", strings.Repeat("Z", 32)),
+		"nonce short":     body("nonce", "abcd"),
+		"dash elevation":  body("elevation", "-x"),
+		"space elevation": body("elevation", "a b"),
+		"long word":       body("word", strings.Repeat("w", 65)),
+		"word newline":    body("word", "a\nb"),
+		"word with skip":  body("decision", "skip", "word", runnerWord),
 	} {
 		expectCode(t, name, e.gate(tok, b), 400, "")
 	}
@@ -363,7 +366,7 @@ func TestRunnerGateDecide(t *testing.T) {
 	if strings.Contains(string(b), runnerWord) || strings.Contains(string(b), "orchid-delet\"") || strings.Contains(string(b), runnerNonce) || strings.Contains(string(b), n2) {
 		t.Fatalf("word or full nonce in the action log: %s", b)
 	}
-	if l := e.logLines("runner/gate"); len(l) != 12 || l[0]["nonce8"] != runnerNonce[:8] || l[0]["word_len"] != float64(len(runnerWord)) {
+	if l := e.logLines("runner/gate"); len(l) != 13 || l[0]["nonce8"] != runnerNonce[:8] || l[0]["word_len"] != float64(len(runnerWord)) {
 		t.Fatalf("gate log (%d): %v", len(l), l)
 	}
 }

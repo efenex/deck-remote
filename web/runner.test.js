@@ -70,6 +70,13 @@ test('sheetModel: this phone\'s live elevation resumes; another device\'s blocks
   assert.match(other.why, /another device/);
 });
 
+test('sheetModel: a runner file changed since signing is not startable', () => {
+  const m = M.sheetModel(top({ runner: { file: 'sha-mismatch' } }), 'ask1');
+  assert.strictEqual(m.startable, false);
+  assert.match(m.why, /sha-mismatch/);
+  assert.strictEqual(M.sheetModel(top({ runner: { file: 'ok' } }), 'ask1').startable, true);
+});
+
 test('sheetModel: a complete runner is not startable', () => {
   assert.strictEqual(M.sheetModel(top({ seq: { pointer: null } }), 'ask1').startable, false);
 });
@@ -158,4 +165,10 @@ test('Poller: verify reporting the elevation ended stops polling with its reason
   const p = new M.Poller({ gate: async () => ({ pending: false }), verify: async () => top({ runner: { elevation: { state: 'ended', reason: 'complete' } } }) });
   assert.strictEqual(await p.tick(), null);
   assert.strictEqual(p.reason, 'ended (complete)');
+});
+
+test('Poller: verify 404 (the ask closed) ends the view', async () => {
+  const p = new M.Poller({ gate: async () => ({ pending: false }), verify: async () => { throw err(404, { error: 'ask is no longer open' }); } });
+  assert.strictEqual(await p.tick(), null);
+  assert.strictEqual(p.reason, 'the ask is closed');
 });
