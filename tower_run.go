@@ -51,6 +51,10 @@ var runHints = map[string]string{
 	"laptop-only":      "laptop only (phase 2, F8a/F10a): copy the line and run it on the laptop",
 	"params-changed":   "the signed cwd/timeout changed since the sheet loaded (re-signed?): reload and confirm again",
 	"still-running":    "the previous attempt's process group is still alive: wait for it, or stop it on the laptop",
+	// runner mode v1: a runner ask's steps run only through runner mode (tower_runner.go)
+	"phone-runner-only":      "this ask is a runner: open it with Runner mode… (one Face ID, then a gate per step)",
+	"runner-file-changed":    "the runner file changed since it was signed: re-sign it on the laptop (run_bang.py runner build/sign)",
+	"runner-prelude-unarmed": "the runner's prelude runs under the arm: Arm… this revision first",
 }
 
 func runHint(reason, ask string) string {

@@ -18,6 +18,8 @@
   // the runner's own "this elevation is over" answers: a result, unlike a dropped connection
   const OVER = new Set(['no-elevation', 'wrong-device', 'ended', 'expired', 'no-loop']);
 
+  // refusals the Arm… flow fixes (the runner's prelude counts as a prog step under the arm)
+  const ARM_FIX = (refused) => /^arm-/.test(String(refused || '')) || refused === 'runner-prelude-unarmed';
   const sha8 = (s) => String(s || '').slice(0, 8);
   const isoMin = (sec) => (typeof sec === 'number' && isFinite(sec) ? new Date(sec * 1000).toISOString().slice(11, 16) + 'Z' : '');
 
@@ -49,6 +51,7 @@
       ok: true, why: '', title: seq.title || askId,
       source: { path: rn.source.path || '', sha8: sha8(rn.source.sha256) },
       rev: seq.rev || '', steps, preludeLines: rn.prelude_lines || 0, pointer: seq.pointer,
+      prelude: typeof rn.prelude === 'string' ? rn.prelude : null, cd: typeof rn.cd === 'string' ? rn.cd : null,
       needsArm: !!rn.needs_arm, armState, offerArm: false, startable: false, resume: mine, elevation: el,
     };
     if (rn.file && rn.file !== 'ok') { out.why = 'The runner file no longer matches its signed sha256 (' + rn.file + '): re-sign it on the laptop.'; return out; }
@@ -74,13 +77,20 @@
   function gateView(g) {
     if (!g || g.pending !== true) return null;
     const b = (decision, label, primary) => ({ decision, label, primary: !!primary });
-    const v = { kind: g.kind, step: g.step, attempt: g.attempt || 1, title: g.title || '', class: g.class || '', buttons: [], word: false, wordLen: 0, note: '' };
+    // body: the step's exact text, control/format characters already ⟨U+XXXX⟩ (tower); drawn with textContent only
+    const v = { kind: g.kind, step: g.step, attempt: g.attempt || 1, title: g.title || '', class: g.class || '', buttons: [], word: false, wordLen: 0, note: '',
+      body: typeof g.body === 'string' ? g.body : null, sha8: typeof g.sha256 === 'string' ? g.sha256.slice(0, 8) : '' };
     switch (g.kind) {
       case 'run':
         v.buttons = [b('run', 'Run', true), b('skip', 'Skip'), b('quit', 'Quit')];
         break;
       case 'failed':
         v.note = 'The last attempt failed.';
+        if (typeof g.word_len === 'number') { // a failed destructive step: Retry needs the word again
+          v.word = true;
+          v.wordLen = g.word_len;
+          v.note += ' Destructive step: retype its word to retry.';
+        }
         v.buttons = [b('retry', 'Retry', true), b('skip', 'Skip'), b('quit', 'Quit')];
         break;
       case 'word':
@@ -107,11 +117,11 @@
     const v = gateView(gate);
     if (!v) throw new Error('no gate is pending');
     if (!v.buttons.some((x) => x.decision === decision)) throw new Error(decision + ' is not offered at this gate');
-    if (!/^[0-9a-f]{16,128}$/.test(String(gate.nonce || ''))) throw new Error('the gate carries no nonce: reload');
+    if (!/^[0-9a-f]{32}$/.test(String(gate.nonce || ''))) throw new Error('the gate carries no nonce: reload');
     const body = { elevation, nonce: gate.nonce, decision };
-    if (v.word && decision === 'run') {
+    if (v.word && (decision === 'run' || decision === 'retry')) {
       const w = String(word == null ? '' : word);
-      if (!/^[\x20-\x7e]{1,64}$/.test(w)) throw new Error('retype the word (up to 64 printable characters)');
+      if (!/^[\x21-\x7e]{1,64}$/.test(w)) throw new Error('retype the word (up to 64 printable characters, no spaces)');
       body.word = w;
     }
     return body;
@@ -207,6 +217,36 @@
       box.append(d);
     }
 
+    // preludeBlock: the prelude in full before Face ID, open the first time this phone sees this
+    // revision's prelude (localStorage), collapsible after.
+    function preludeBlock(askId, m) {
+      const KEY = 'deckRunnerPreludeSeen';
+      let seen = {};
+      try { seen = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (_) { seen = {}; }
+      const id = askId + '@' + m.rev;
+      const det = el('details', 'rmprelude');
+      det.setAttribute('data-rm', 'prelude');
+      det.open = !seen[id];
+      det.append(el('summary', 'rbnote', 'prelude (' + m.preludeLines + ' lines, runs before every step)'));
+      const pre = el('pre', 'rbline rmcode');
+      pre.textContent = m.prelude;
+      det.append(pre);
+      try {
+        seen[id] = Date.now();
+        const keep = Object.keys(seen).sort((a, b) => seen[b] - seen[a]).slice(0, 50);
+        localStorage.setItem(KEY, JSON.stringify(Object.fromEntries(keep.map((k) => [k, seen[k]]))));
+      } catch (_) { /* a convenience */ }
+      return det;
+    }
+
+    function offerArm(askId, note, btns, close) {
+      if (deps.canArm && deps.canArm()) {
+        const arm = el('button', 'tbtn tprimary', 'Arm…');
+        arm.addEventListener('click', () => { close(); deps.openArmSheet(askId, null); });
+        btns.append(arm);
+      } else note.textContent += ' This phone cannot arm (needs run:prog + prof:power): arm on the laptop.';
+    }
+
     function stepList(m) {
       const box = el('div', 'rmsteps');
       box.setAttribute('data-rm', 'steps');
@@ -254,16 +294,14 @@
       fact(facts, 'file', m.source.path + ' · sha256 ' + m.source.sha8);
       fact(facts, 'revision', m.rev + ' · ' + m.steps.length + ' steps');
       fact(facts, 'prelude', m.preludeLines + ' line' + (m.preludeLines === 1 ? '' : 's') + ' (exports and helpers run before each step)');
+      fact(facts, 'cd', m.cd === null ? '(none: the runner file\'s directory)' : m.cd);
+      if (m.prelude !== null) facts.append(preludeBlock(askId, m));
       fact(facts, 'arm', m.needsArm ? (m.armState === 'armed' ? '✓ armed' : 'needs an arm (' + m.armState + ')') : 'not needed (ro/mut only)');
       sh.insertBefore(stepList(m), note);
       if (m.resume) { close(); enter(askId, m.elevation.id, m); return; }
       if (m.offerArm) {
         note.textContent = m.why;
-        if (deps.canArm && deps.canArm()) {
-          const arm = el('button', 'tbtn tprimary', 'Arm…');
-          arm.addEventListener('click', () => { close(); deps.openArmSheet(askId, null); });
-          btns.append(arm);
-        } else note.textContent += ' This phone cannot arm (needs run:prog + prof:power): arm on the laptop.';
+        offerArm(askId, note, btns, close);
         return;
       }
       if (!m.startable) { note.textContent = m.why; return; }
@@ -284,6 +322,7 @@
           const resume = e.data && e.data.elevation;
           if (resume) { close(); enter(askId, resume, m); return; }
           note.textContent = 'Refused: ' + (e.message || e) + (e.data && e.data.hint ? '\n↳ ' + e.data.hint : '');
+          if (e.data && ARM_FIX(e.data.refused)) { go.remove(); offerArm(askId, note, btns, close); return; }
           go.textContent = 'Start with Face ID';
           go.disabled = false;
         }
@@ -374,7 +413,13 @@
       v.gateBox.append(el('div', 'rbtitle', 'Step ' + (g.step + 1) + ': ' + (g.title || '(untitled)')));
       const meta = el('div', 'rbnote', 'class ' + g.class + (g.attempt > 1 ? ' · attempt ' + g.attempt : ''));
       v.gateBox.append(meta);
-      if (g.note) v.gateBox.append(el('div', g.kind === 'word' ? 'rbwarn' : 'rbnote', g.note));
+      if (g.note) v.gateBox.append(el('div', g.word ? 'rbwarn' : 'rbnote', g.note));
+      if (g.body !== null) {
+        const pre = el('pre', 'rbline rmcode');
+        pre.setAttribute('data-rm', 'body');
+        pre.textContent = g.body; // already escaped by tower; never HTML
+        v.gateBox.append(el('div', 'rbnote', 'the exact step' + (g.sha8 ? ' · sha256 ' + g.sha8 : '')), pre);
+      } else v.gateBox.append(el('div', 'rbwarn', 'the runner sent no step text: check it on the laptop before you run it'));
       let input = null;
       if (g.word) {
         input = document.createElement('input');
@@ -486,7 +531,7 @@
     return { open, active: () => (live ? { askId: live.askId, elevation: live.elevation } : null) };
   }
 
-  const api = { sheetModel, gateView, decisionBody, currentRun, banner, backoff, Poller, mount, POLL_MS, POLL_MAX_MS };
+  const api = { ARM_FIX, sheetModel, gateView, decisionBody, currentRun, banner, backoff, Poller, mount, POLL_MS, POLL_MAX_MS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckRunner = api;
 })(typeof window !== 'undefined' ? window : globalThis);

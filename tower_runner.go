@@ -40,8 +40,8 @@ var runnerCaps = []string{"run:mut", "run:prog"}
 var (
 	runnerIDRe    = regexp.MustCompile(`^[!-~]{1,200}$`)           // ask ids: printable ASCII, no space
 	runnerElevRe  = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,256}$`) // <ask>:elev:<rev8>:<stamp>.<pid>; the structure is not parsed
-	runnerNonceRe = regexp.MustCompile(`^[0-9a-f]{16,128}$`)       // the interface pins no length: hex, 64..512 bits
-	runnerWordRe  = regexp.MustCompile(`^[\x20-\x7e]{1,64}$`)
+	runnerNonceRe = regexp.MustCompile(`^[0-9a-f]{32}$`)           // tower: secrets.token_hex(16)
+	runnerWordRe  = regexp.MustCompile(`^[\x21-\x7e]{1,64}$`)      // printable, no space (tower's word rule)
 	runnerDecide  = map[string]bool{"run": true, "skip": true, "quit": true, "retry": true}
 )
 
@@ -200,6 +200,9 @@ func (r runnerResult) fail(refuse func(int, string, map[string]any), what, scrub
 			code = http.StatusConflict
 		}
 		extra := map[string]any{"refused": r.str("refused")}
+		if rf := r.str("refused"); strings.HasPrefix(rf, "arm-") || rf == "runner-prelude-unarmed" {
+			extra["needsArm"] = true // the sheet offers Arm…
+		}
 		if h := r.str("hint"); h != "" {
 			extra["hint"] = clean(h)
 		}
@@ -447,8 +450,8 @@ func (s *server) handleRunnerGate(w http.ResponseWriter, r *http.Request) {
 	case !runnerElevOK(req.Elevation) || !runnerNonceRe.MatchString(req.Nonce) || !runnerDecide[req.Decision]:
 		refuse(http.StatusBadRequest, "need elevation (id of [A-Za-z0-9._:-], up to 256), nonce (hex) and decision (run|skip|quit|retry)", nil)
 		return
-	case req.Word != "" && (!runnerWordRe.MatchString(req.Word) || req.Decision != "run"):
-		refuse(http.StatusBadRequest, "word: up to 64 printable characters, only with decision run", nil)
+	case req.Word != "" && (!runnerWordRe.MatchString(req.Word) || (req.Decision != "run" && req.Decision != "retry")):
+		refuse(http.StatusBadRequest, "word: up to 64 printable characters without spaces, only with decision run or retry", nil)
 		return
 	case why != "":
 		refuse(http.StatusForbidden, why, nil)

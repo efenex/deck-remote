@@ -172,3 +172,38 @@ test('Poller: verify 404 (the ask closed) ends the view', async () => {
   assert.strictEqual(await p.tick(), null);
   assert.strictEqual(p.reason, 'the ask is closed');
 });
+
+test('gateView: the exact step body and sha8 travel with the gate; a failed destructive step needs the word to retry', () => {
+  const g = M.gateView({ pending: true, step: 1, kind: 'failed', attempt: 2, nonce: NONCE, body: 'rm -rf "$DIR"⟨U+200B⟩', sha256: 'abcdef12' + '0'.repeat(56), word_len: 6 });
+  assert.strictEqual(g.body, 'rm -rf "$DIR"⟨U+200B⟩');
+  assert.strictEqual(g.sha8, 'abcdef12');
+  assert.strictEqual(g.word, true);
+  assert.deepStrictEqual(g.buttons.map((b) => b.decision), ['retry', 'skip', 'quit']);
+  const gate = { pending: true, step: 1, kind: 'failed', nonce: NONCE, word_len: 6 };
+  assert.deepStrictEqual(M.decisionBody(ELEV, gate, 'retry', 'delete'), { elevation: ELEV, nonce: NONCE, decision: 'retry', word: 'delete' });
+  assert.throws(() => M.decisionBody(ELEV, gate, 'retry', ''), /retype the word/);
+  assert.strictEqual(M.decisionBody(ELEV, { pending: true, kind: 'failed', nonce: NONCE }, 'retry').word, undefined, 'plain failed: no word');
+  assert.strictEqual(M.gateView({ pending: true, kind: 'run', nonce: NONCE }).body, null);
+});
+
+test('decisionBody: the word has no spaces; the nonce is exactly 32 lowercase hex', () => {
+  const word = { pending: true, step: 1, kind: 'word', nonce: NONCE };
+  assert.throws(() => M.decisionBody(ELEV, word, 'run', 'orchid delete'), /retype the word/);
+  assert.throws(() => M.decisionBody(ELEV, Object.assign({}, word, { nonce: NONCE.slice(1) }), 'skip'), /no nonce/);
+  assert.throws(() => M.decisionBody(ELEV, Object.assign({}, word, { nonce: NONCE.toUpperCase() }), 'skip'), /no nonce/);
+});
+
+test('sheetModel: prelude text and cd from the runner block', () => {
+  const m = M.sheetModel(top({ runner: { prelude: 'export X=1\nLIB=⟨U+0007⟩', cd: '/Users/op/src' } }), 'ask1');
+  assert.strictEqual(m.prelude, 'export X=1\nLIB=⟨U+0007⟩');
+  assert.strictEqual(m.cd, '/Users/op/src');
+  const n = M.sheetModel(top({ runner: { cd: null } }), 'ask1');
+  assert.strictEqual(n.cd, null);
+  assert.strictEqual(n.prelude, null);
+});
+
+test('ARM_FIX: arm-* and runner-prelude-unarmed are fixed by Arm…', () => {
+  assert.strictEqual(M.ARM_FIX('arm-missing'), true);
+  assert.strictEqual(M.ARM_FIX('runner-prelude-unarmed'), true);
+  assert.strictEqual(M.ARM_FIX('runner-file-changed'), false);
+});

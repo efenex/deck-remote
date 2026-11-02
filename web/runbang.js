@@ -27,6 +27,9 @@
     'arm-key-unknown': 'the arm was signed by a key version the laptop no longer pins: arm again',
     'arm-exp-too-far': 'the arm expires further out than 4 h: refused, arm again',
     'arm-wrong-profile': 'the arm is not a power arm: arm again',
+    'phone-runner-only': 'this ask is a runner: open it with Runner mode… (one Face ID, then a gate per step)',
+    'runner-file-changed': 'the runner file changed since it was signed: re-sign it on the laptop',
+    'runner-prelude-unarmed': "the runner's prelude runs under the arm: Arm… this revision first",
   };
   const PHASE2 = new Set(['mut', 'secret']); // mut: phase 2 (passkey per line); secret: phase 3
   const RUN_CLASSES = new Set(['ro', 'mut', 'prog']);
@@ -49,6 +52,13 @@
       tone: ok ? 'ok' : (sig === 'tampered' || sig === 'sig-stale-params' ? 'urgent' : 'warn'),
       hint: hint(sig, ask), offer: 'run', why: '', passkey: PASSKEY_CLASSES.has(cls),
     };
+    // A runner ask's steps run only through runner mode (tower: runnable_via.phone false, why phone-runner-only).
+    if (rb.runner || /phone-runner-only/.test(String(rb.why || ''))) {
+      out.offer = 'runner';
+      out.why = 'runner step: use Runner mode…';
+      out.hint = '';
+      return out;
+    }
     const gated = (cls === 'mut' || cls === 'prog') && !rb.ok && /class|copy-only|phase/.test(String(rb.why || ''));
     // The feed's class is the classifier's (a `pwd` tagged prog reads ro); the runner's arm-* reason
     // is the authority that the step is a prog step waiting for an arm.

@@ -290,6 +290,8 @@ func TestRunnerStartRunnerRefusal(t *testing.T) {
 	w := e.runnerStart(tok, e.runnerFaceID(a, tok))
 	expectCode(t, "refused", w, 403, `"refused":"already-elevated"`)
 	expectCode(t, "hint", w, 403, `"hint":"end it first"`)
+	st.out["start"] = `{"refused":"runner-prelude-unarmed"}` + "\n"
+	expectCode(t, "prelude unarmed offers Arm", e.runnerStart(tok, e.runnerFaceID(a, tok)), 403, `"needsArm":true`)
 	st.out["start"] = `{"refused":"seq-rev-changed"}` + "\n"
 	expectCode(t, "rev moved", e.runnerStart(tok, e.runnerFaceID(a, tok)), 409, "seq-rev-changed")
 	st.rc["start"], st.out["start"] = 1, "Traceback\n"
@@ -349,6 +351,9 @@ func TestRunnerGateDecide(t *testing.T) {
 		"long word":       body("word", strings.Repeat("w", 65)),
 		"word newline":    body("word", "a\nb"),
 		"word with skip":  body("decision", "skip", "word", runnerWord),
+		"word with space": body("word", "orchid delete"),
+		"nonce 31 hex":    body("nonce", runnerNonce[:31]),
+		"nonce 33 hex":    body("nonce", runnerNonce+"0"),
 	} {
 		expectCode(t, name, e.gate(tok, b), 400, "")
 	}
@@ -359,14 +364,19 @@ func TestRunnerGateDecide(t *testing.T) {
 	expectCode(t, "mismatch", e.gate(tok, body("nonce", n2, "word", "orchid-delet")), 403, `"refused":"word-mismatch"`)
 	delete(st.out, "gate")
 	expectCode(t, "retry after refusal", e.gate(tok, body("nonce", n2, "decision", "skip")), 200, `"decision":"skip"`)
-	if n := len(st.runnerCalls()); n != 3 {
+	n3 := strings.Repeat("3", 32) // a failed destructive step: retry carries the word
+	expectCode(t, "retry with word", e.gate(tok, body("nonce", n3, "decision", "retry", "word", runnerWord)), 200, `"decision":"retry"`)
+	if got := st.runnerCalls()[3]; argvFlag(got, "--decision") != "retry" || got[len(got)-1] != "--word="+runnerWord {
+		t.Fatalf("retry argv %q", got)
+	}
+	if n := len(st.runnerCalls()); n != 4 {
 		t.Fatalf("runner calls %d", n)
 	}
 	b, _ := json.Marshal(actionLog(t))
 	if strings.Contains(string(b), runnerWord) || strings.Contains(string(b), "orchid-delet\"") || strings.Contains(string(b), runnerNonce) || strings.Contains(string(b), n2) {
 		t.Fatalf("word or full nonce in the action log: %s", b)
 	}
-	if l := e.logLines("runner/gate"); len(l) != 13 || l[0]["nonce8"] != runnerNonce[:8] || l[0]["word_len"] != float64(len(runnerWord)) {
+	if l := e.logLines("runner/gate"); len(l) != 17 || l[0]["nonce8"] != runnerNonce[:8] || l[0]["word_len"] != float64(len(runnerWord)) {
 		t.Fatalf("gate log (%d): %v", len(l), l)
 	}
 }
