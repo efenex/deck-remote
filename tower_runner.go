@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -367,6 +368,9 @@ func (s *server) handleRunnerStart(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/rc/tower/runner/gate?elevation= — the pending gate (with its nonce) or the running
 // step, for this device's elevation. Gated by authAct.
+// runnerPollSeen: (device id, elevation) → the last logged poll summary (handleRunnerGatePoll).
+var runnerPollSeen sync.Map
+
 func (s *server) handleRunnerGatePoll(w http.ResponseWriter, r *http.Request) {
 	entry := map[string]any{"action": "runner/gate-poll", "allowed": false, "login": tsLogin(r)}
 	refuse := s.runnerRefuser(w, entry)
@@ -404,7 +408,12 @@ func (s *server) handleRunnerGatePoll(w http.ResponseWriter, r *http.Request) {
 	if n := res.str("nonce"); n != "" {
 		entry["nonce8"] = n[:min(8, len(n))]
 	}
-	s.towerLog(entry)
+	// The PWA polls every 2 s while elevated: log an allowed poll only when what it saw changed (a new gate, a
+	// step started or finished), not ~1800 identical lines an hour. Refusals are always logged (runnerRefuser).
+	seen := fmt.Sprintf("%v|%v|%v|%v", entry["pending"], entry["step"], entry["nonce8"], entry["running"])
+	if prev, ok := runnerPollSeen.Swap(dt.ID+"\x00"+elev, seen); !ok || prev.(string) != seen {
+		s.towerLog(entry)
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, res.raw)
 }
