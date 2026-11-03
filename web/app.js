@@ -711,7 +711,11 @@
       out.hidden = false;
       status.textContent = '⏳ running…';
       btns.append(runLogButton(res.id));
-      streamRun(sh, askId, rb, res.id, out, status);
+      streamRun(sh, askId, rb, res.id, out, status, () => {
+        // rc=0: nothing more to do with this line here: drop Copy now, close the sheet once the ✓ was seen
+        copy.hidden = true;
+        setTimeout(close, RUN_OK_CLOSE_MS);
+      });
     });
   }
 
@@ -882,7 +886,8 @@
     api, el, toast, authHeaders, openArmSheet, loadTower, R: DeckRunBang, canArm: () => tower.runProg && tower.profPower, canProg: () => tower.runProg,
   }) : null;
 
-  async function streamRun(sh, askId, rb, id, out, status) {
+  const RUN_OK_CLOSE_MS = 700;
+  async function streamRun(sh, askId, rb, id, out, status, onOk) {
     const ctl = new AbortController();
     sh._abort = ctl;
     const key = askId + ':' + rb.index + ':' + rb.sha256;
@@ -908,6 +913,7 @@
             status.className = 'rbstatus trb-' + (rs ? rs.tone : 'dim');
             tower.runLocal.set(key, ev.data);
             loadTower();
+            if (onOk && DeckRunBang.runOk(ev.data)) onOk();
           }
         }
         out.scrollTop = out.scrollHeight;
