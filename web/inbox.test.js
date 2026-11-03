@@ -309,3 +309,136 @@ test('Filtered view: a foreground toast for a hidden session opens its sheet', a
   const opened = env.ctx.document.body.children.some((c) => c && c.id === 'sheet');
   assert.ok(opened, 'the hidden session\u2019s sheet opened');
 });
+
+// --- Tower tab BACKLOG (backlog.js) -------------------------------------------------
+
+function backlogEnv(modelExtra, overviewExtra) {
+  const model = Object.assign({
+    header: 'TOWER', generated_at: new Date().toISOString(), palette: {}, legend: [],
+    sections: [{ id: 'suggested', title: 'SUGGESTED', count: '2', urgent: 0, folded: null, items: [
+      { kind: 'suggest', id: 'sg-a', key: 'suggest:sg-a', status: 'suggest', title: 'Shown', prompt: 'p', why_blocks: [], action_blocks: [], bangs: [], head: 'sg-a' },
+      { kind: 'suggest', id: 'sg-b', key: 'suggest:sg-b', status: 'suggest', title: 'Hidden', prompt: 'p', why_blocks: [], action_blocks: [], bangs: [], head: 'sg-b', folded: { since: null } }] }],
+  }, modelExtra);
+  const posts = [];
+  const env = makeEnv([], null, (u, opts) => {
+    if (u.startsWith('/api/rc/tower/whoami')) return { actions_enabled: true, act: true };
+    if (u.startsWith('/api/rc/tower/model')) return { enabled: true, actions: true, model };
+    if (u.startsWith('/api/rc/tower/act')) { posts.push(JSON.parse(opts.body)); return { ok: true, msg: 'queued → tower' }; }
+    if (u.startsWith('/api/rc/tower')) return { enabled: true, mtime: 'x', overview: Object.assign({ generated_at: model.generated_at, counts: { waiting: 0 } }, overviewExtra) };
+    return undefined;
+  });
+  env.ctx.window.DeckBacklog = require('./backlog.js');
+  env.ctx.confirm = () => true;
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  const list = () => env.els.get('#towerList');
+  const find = (pred) => { const out = []; walk(list(), (n) => { if (pred(n)) out.push(n); }); return out; };
+  const text = (n) => { let t = n.textContent || ''; (n.children || []).forEach((c) => { if (c && typeof c === 'object') t += text(c); }); return t; };
+  const click = async (n) => { n._ls.click({ stopPropagation() {} }); await new Promise((r) => setTimeout(r, 30)); };
+  const backlogHead = () => find((n) => /\btbacklog\b/.test(n.className || ''))[0];
+  return { env, posts, list, find, text, click, backlogHead };
+}
+
+const BACKLOG = [
+  { id: 'T-42.fix_Thing', title: 'Fix the thing that has been broken for a while', status: 'backlog', age_days: 12.4, created: '2026-10-22T08:00:00Z', goal: 'g-home', project: 'p', class: 'c', not_before: null, deps_open: ['T-7'] },
+  { id: 'T-43', title: 'Later', status: 'backlog', age_days: 3, goal: 'g-x', not_before: '2026-11-20T08:00:00Z', deps_open: [] },
+  { id: 'T-44', title: 'Already deferred', status: 'backlog', age_days: 1, goal: '', deps_open: [] },
+];
+
+test('Tower tab BACKLOG: collapsed with the count, rows on open (age, id, goal, title, deps, not before)', async () => {
+  const t = backlogEnv({ backlog: BACKLOG, counts: { backlog: 3 }, open_requests: ['pick-defer-t-44'] });
+  await new Promise((r) => setTimeout(r, 100));
+  const head = t.backlogHead();
+  assert.ok(head, 'BACKLOG header rendered');
+  assert.match(t.text(head), /BACKLOG \(3\)/);
+  assert.match(t.text(head), /▸/, 'collapsed by default');
+  assert.strictEqual(t.find((n) => /\btbrow\b/.test(n.className || '')).length, 0);
+  await t.click(head);
+  const rows = t.find((n) => /\btbrow\b/.test(n.className || ''));
+  assert.strictEqual(rows.length, 3);
+  const r0 = t.text(rows[0]);
+  assert.match(r0, /12 d/); assert.match(r0, /T-42\.fix_Thing/); assert.match(r0, /g-home/); assert.match(r0, /waits on T-7/);
+  assert.ok(!/not before/.test(r0));
+  assert.match(t.text(rows[1]), /not before 2026-11-20/);
+  assert.ok(!/waits on/.test(t.text(rows[1])));
+  // T-44 has pick-defer-t-44 open with tower: no actions, "queued with tower"
+  assert.match(t.text(rows[2]), /queued with tower/);
+  assert.ok(!t.text(rows[2]).includes('Start'));
+});
+
+test('Tower tab BACKLOG: start / defer / drop confirm, then POST tower/act with the exact task id', async () => {
+  const t = backlogEnv({ backlog: BACKLOG, counts: { backlog: 3 } });
+  await new Promise((r) => setTimeout(r, 100));
+  await t.click(t.backlogHead());
+  const btn = (row, label) => t.find((n) => /\btbtn\b/.test(n.className || '') && n.textContent === label)[row];
+  // declining a confirm sends nothing
+  t.env.ctx.confirm = () => false;
+  await t.click(btn(0, 'Start'));
+  await t.click(btn(0, 'Drop'));
+  assert.deepStrictEqual(t.posts, []);
+  // start
+  let asked = '';
+  t.env.ctx.confirm = (m) => { asked = m; return true; };
+  await t.click(btn(0, 'Start'));
+  assert.match(asked, /T-42\.fix_Thing/);
+  assert.deepStrictEqual(t.posts, [{ op: 'backlog_start', id: 'T-42.fix_Thing' }]);
+  // the row now reads "queued with tower" (the overview has not caught up yet)
+  let rows = t.find((n) => /\btbrow\b/.test(n.className || ''));
+  assert.match(t.text(rows[0]), /queued with tower/);
+  // T-42 has no buttons now, so the first row with actions is T-43.
+  // defer: the picker defaults to tomorrow; the confirm posts not_before at 08:00Z
+  await t.click(btn(0, 'Defer…'));
+  const inp = t.find((n) => n.className === 'tdate')[0];
+  assert.ok(inp, 'date picker shown');
+  const B = require('./backlog.js');
+  assert.strictEqual(inp.value, B.tomorrow());
+  inp.value = '2026-12-01';
+  await t.click(btn(0, 'Defer'));
+  assert.match(asked, /T-43 until 2026-12-01/);
+  assert.deepStrictEqual(t.posts[1], { op: 'backlog_defer', id: 'T-43', not_before: '2026-12-01T08:00:00Z' });
+  // T-43 is queued now too, so the remaining Drop belongs to T-44
+  rows = t.find((n) => /\btbrow\b/.test(n.className || ''));
+  assert.match(t.text(rows[1]), /queued with tower/);
+  await t.click(btn(0, 'Drop'));
+  assert.deepStrictEqual(t.posts[2], { op: 'backlog_drop', id: 'T-44' });
+  assert.strictEqual(t.posts.length, 3);
+});
+
+test('Tower tab: an overview without backlog keys shows no BACKLOG section and no errors', async () => {
+  const errors = [];
+  const t = backlogEnv({});
+  const orig = t.env.ctx.console;
+  t.env.ctx.console = Object.assign({}, orig, { error: (...a) => errors.push(a) });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(t.backlogHead(), undefined);
+  assert.ok(t.find((n) => /tsechead/.test(n.className || '')).length === 1, 'the other sections still render');
+  assert.deepStrictEqual(errors, []);
+});
+
+test('Tower tab legacy (overview only) lists the backlog read-only', async () => {
+  const t = backlogEnv({}, { backlog: BACKLOG, counts: { waiting: 0, backlog: 3 } });
+  t.env.ctx.fetch = ((f) => async (u, o) => (String(u).startsWith('/api/rc/tower/model') ? { ok: true, status: 200, text: async () => JSON.stringify({ enabled: true, error: 'x' }) } : f(u, o)))(t.env.ctx.fetch);
+  await new Promise((r) => setTimeout(r, 100));
+  const head = t.backlogHead();
+  assert.ok(head);
+  await t.click(head);
+  assert.strictEqual(t.find((n) => /\btbrow\b/.test(n.className || '')).length, 3);
+  assert.strictEqual(t.find((n) => n.textContent === 'Start').length, 0, 'no actions without the model');
+});
+
+test('Tower tab suggestions: folded ones hide behind "N folded"; Fold posts the ask fold shape', async () => {
+  const t = backlogEnv({});
+  await new Promise((r) => setTimeout(r, 100));
+  const det = t.find((n) => /\btsugfolded\b/.test(n.className || ''))[0];
+  assert.ok(det, 'a folded toggle exists');
+  assert.match(t.text(det), /^1 folded/);
+  assert.match(t.text(det), /Hidden/);
+  const top = t.list().children.filter((c) => c !== det).map(t.text).join('|');
+  assert.ok(top.includes('Shown') && !top.includes('Hidden'), 'the folded suggestion is not shown outside the toggle');
+  const fold = t.find((n) => /\btbtn\b/.test(n.className || '') && n.textContent === 'Fold')[0];
+  await t.click(fold);
+  assert.deepStrictEqual(t.posts, [{ op: 'fold', id: 'sg-a' }]);
+  const unfold = t.find((n) => /\btbtn\b/.test(n.className || '') && n.textContent === 'Unfold')[0];
+  await t.click(unfold);
+  assert.deepStrictEqual(t.posts[1], { op: 'unfold', id: 'sg-b' });
+});

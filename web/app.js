@@ -432,7 +432,10 @@
   // Tailscale identity (the server refuses otherwise). Nothing is ever sent
   // automatically; "send to session" is deliberately not in this version.
   // ---------------------------------------------------------------------------
-  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runProg: false, profPower: false, runLocal: new Map() };
+  const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runProg: false, profPower: false, runLocal: new Map(),
+    // BACKLOG section (backlog.js): collapsed by default; the row whose defer picker is open;
+    // request ids posted from this tab (shown "queued with tower" until the overview has them).
+    backlogOpen: false, backlogDefer: null, backlogQueued: new Set() };
 
   async function initTower() {
     // The overview (counts for the badge) and whoami load concurrently; the badge
@@ -984,13 +987,14 @@
     return box;
   }
 
-  async function towerAct(body, btn, okTitle) {
+  async function towerAct(body, btn, okTitle, onOk) {
     if (tower.busy) return;
     tower.busy = true;
     const label = btn && btn.textContent;
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     try {
       const r = await api('POST', '/api/rc/tower/act', body);
+      if (onOk) onOk(r);
       toast(okTitle || 'Done', (r && r.msg) || '');
       tower.localFold.clear();
       await loadTower();
@@ -1020,6 +1024,9 @@
           if (!confirm('Dismiss suggestion ' + it.id + '?')) return;
           towerAct({ op: 'dismiss', id: it.id }, b, 'Dismissed');
         }));
+        // same fold record as an ask's Fold, keyed by the suggestion id
+        if (it.folded) row.append(towerBtn('Unfold', '', (b) => towerAct({ op: 'unfold', id: it.id }, b, 'Unfolded ' + it.id)));
+        else row.append(towerBtn('Fold', '', (b) => towerAct({ op: 'fold', id: it.id }, b, 'Folded ' + it.id)));
       }
       row.append(towerBtn('Copy prompt', '', (b) => towerCopy(it.prompt || it.id, b)));
     } else {
@@ -1114,6 +1121,7 @@
     list.append(el('div', 'thint', m.header + (ageMin > 30 ? ' · STALE data' : '')));
     if (!tower.act) list.append(el('div', 'thint', 'Read-only here' + (tower.actReason ? ': ' + tower.actReason : '') + '. Queue / close / fold need an act-capable device token.'));
     m.sections.forEach((sec, n) => {
+      if (sec.id === 'backlog' && towerBacklogData(m)) return; // drawn below, with its actions
       const key = 'section:' + sec.id;
       const folded = tower.localFold.has(key) ? tower.localFold.get(key) : !!sec.folded;
       const hdr = el('div', 'tsechead');
@@ -1125,13 +1133,27 @@
       });
       list.append(hdr);
       if (folded) return;
-      if (!sec.items.length) { list.append(el('div', 'thint', '(nothing)')); return; }
+      // folded suggestions (suggested[].folded) hide behind an "N folded" toggle
+      const sugFolded = sec.items.filter((it) => it.kind === 'suggest' && it.folded);
+      const shown = sec.items.filter((it) => !(it.kind === 'suggest' && it.folded));
+      const nSugFolded = sugFolded.length || (sec.id === 'suggested' && m.counts && Number(m.counts.suggested_folded)) || 0;
+      if (!shown.length && !nSugFolded) { list.append(el('div', 'thint', '(nothing)')); return; }
       let grp = null;
-      sec.items.forEach((it) => {
+      shown.forEach((it) => {
         if (it.group && it.group !== grp) { grp = it.group; list.append(towerStyle(el('div', 'tgroup', '── ' + grp + ' ──'), 'dim')); }
         list.append(towerItemCard(it));
       });
+      if (nSugFolded) {
+        const det = document.createElement('details');
+        det.className = 'tfolded tsugfolded';
+        const sum = document.createElement('summary');
+        sum.textContent = nSugFolded + ' folded';
+        det.append(sum);
+        sugFolded.forEach((it) => det.append(towerItemCard(it)));
+        list.append(det);
+      }
     });
+    renderTowerBacklog(list, m, true);
     const lg = document.createElement('details');
     lg.className = 'tlegend';
     const sm = document.createElement('summary'); sm.textContent = 'Legend'; lg.append(sm);
@@ -1141,6 +1163,63 @@
       lg.append(row);
     });
     list.append(lg);
+  }
+
+  // --- BACKLOG (tower overview-backlog; helpers in backlog.js) ---
+  function towerBacklogData(m) { return window.DeckBacklog ? window.DeckBacklog.section(m) : null; }
+
+  // withActions: the model view (the server validates actions against the model); the legacy
+  // overview-only view lists the rows read-only.
+  function renderTowerBacklog(list, m, withActions) {
+    const B = window.DeckBacklog;
+    const sec = towerBacklogData(m);
+    if (!sec) return; // older tower: no backlog key, no section
+    const hdr = el('div', 'tsechead tbacklog');
+    hdr.append(el('span', 'tnum', ''), el('span', 'tarrow', tower.backlogOpen ? '▾ ' : '▸ '), towerStyle(el('span', 'tsectitle', sec.title), 'sec'), el('span', 'tcount', ' (' + sec.count + ')'));
+    hdr.addEventListener('click', () => { tower.backlogOpen = !tower.backlogOpen; renderTower(); });
+    list.append(hdr);
+    if (!tower.backlogOpen) return;
+    if (!sec.rows.length) { list.append(el('div', 'thint', '(nothing)')); return; }
+    const open = B.openRequestIds(m);
+    sec.rows.forEach((row) => list.append(towerBacklogRow(row, B.rowView(row), B.isQueued(row.id, open, tower.backlogQueued), withActions)));
+  }
+
+  function towerBacklogRow(row, v, queued, withActions) {
+    const B = window.DeckBacklog;
+    const card = el('div', 'tcard tbrow' + (queued ? ' done' : ''));
+    const head = el('div', 'thead');
+    head.append(el('span', 'tmeta tage', v.age + ' '), el('span', 'tid', v.id));
+    if (v.goal) head.append(el('span', 'tmeta', ' · ' + v.goal));
+    card.append(head, towerRich(el('div', 'tbody ttitle'), v.title));
+    if (v.waits) card.append(towerStyle(el('div', 'thint tbwaits', v.waits), 'dim'));
+    if (v.notBefore) card.append(towerStyle(el('div', 'thint tbnotbefore', v.notBefore), 'dim'));
+    if (queued) { card.append(towerStyle(el('div', 'thint tqueued', 'queued with tower'), 'accent')); return card; }
+    if (!withActions || !tower.act) return card;
+    const post = (action, b, date) => {
+      let body;
+      try { body = B.actBody(action, row.id, date); } catch (e) { toast('Defer', e.message || String(e)); return; }
+      towerAct(body, b, 'Queued with tower', () => { tower.backlogQueued.add(B.requestId(action, row.id)); tower.backlogDefer = null; });
+    };
+    if (tower.backlogDefer === row.id) {
+      const pr = el('div', 'tactions tbdefer');
+      const inp = document.createElement('input');
+      inp.type = 'date'; inp.className = 'tdate'; inp.value = B.tomorrow(); inp.min = B.tomorrow(Date.now() - 86400000);
+      pr.append(inp,
+        towerBtn('Defer', 'tprimary', (b) => {
+          if (!confirm('Defer ' + row.id + ' until ' + inp.value + ' (08:00 UTC)?')) return;
+          post('defer', b, inp.value);
+        }),
+        towerBtn('Cancel', '', () => { tower.backlogDefer = null; renderTower(); }));
+      card.append(pr);
+      return card;
+    }
+    const acts = el('div', 'tactions');
+    acts.append(
+      towerBtn('Start', 'tprimary', (b) => { if (confirm('Start ' + row.id + ' now?')) post('start', b); }),
+      towerBtn('Defer…', '', () => { tower.backlogDefer = row.id; renderTower(); }),
+      towerBtn('Drop', '', (b) => { if (confirm('Drop ' + row.id + ' from the backlog?')) post('drop', b); }));
+    card.append(acts);
+    return card;
   }
 
   function renderTowerLegacy() {
@@ -1237,6 +1316,7 @@
       line.innerHTML = '<b>' + esc(d.due_text || '') + '</b> ' + (isNaN(left) ? '' : '<span class="tmeta' + (left < 2 ? ' stale' : '') + '">' + (left >= 0 ? 'in ' + left.toFixed(1) + ' d' : (-left).toFixed(1) + ' d ago') + '</span> ') + esc(d.item || '');
       list.append(line);
     });
+    renderTowerBacklog(list, o, false);
     renderTowerBadge();
   }
   async function refreshButton(btn, title, work) {

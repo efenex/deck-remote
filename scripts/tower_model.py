@@ -48,6 +48,8 @@ def main():
     def blocks(text):
         return tt.split_detail(text or "")
 
+    ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
+
     sections = []
     for n, (sid, title, items, folded) in enumerate(m.visible(), 1):
         hdr = m.header_item(n, sid, title, items, folded)
@@ -95,9 +97,32 @@ def main():
     for name, (fg256, _fg8, flags) in tt.PALETTE.items():
         pal[name] = {"fg": xterm_hex(fg256), "dim": "d" in flags, "bold": "b" in flags, "underline": "u" in flags}
     legend = [{"status": s, "glyph": tt.STATUS[s][0], "style": tt.STATUS[s][1], "label": label} for s, label in tt.STATUS_LEGEND]
-    print(json.dumps({"header": m.header(), "generated_at": m.o.get("generated_at"), "sections": sections,
-                      "palette": pal, "legend": legend, "gaq_stale": bool((m.o.get("ga_queue") or {}).get("stale"))}))
+    out = {"header": m.header(), "generated_at": m.o.get("generated_at"), "sections": sections,
+           "palette": pal, "legend": legend, "gaq_stale": bool((m.o.get("ga_queue") or {}).get("stale"))}
+    out.update(backlog_extras(ov))
+    print(json.dumps(out))
     return 0
+
+
+def backlog_extras(ov):
+    """overview-backlog keys passed through from overview.json for the Tower tab's BACKLOG section.
+    Absent keys (an older tower) are simply left out: the tab then shows no section."""
+    out = {}
+    bl = ov.get("backlog")
+    if isinstance(bl, list):
+        out["backlog"] = [b for b in bl if isinstance(b, dict) and isinstance(b.get("id"), str) and b["id"]]
+    c = ov.get("counts")
+    if isinstance(c, dict):
+        cc = {k: c[k] for k in ("backlog", "suggested", "suggested_folded") if k in c}
+        if cc:
+            out["counts"] = cc
+    reqs = ov.get("requests")
+    if isinstance(reqs, list):
+        # "open" is the TUI's own test (tower_tui.queued_picks): status == "open" exactly, so a declined or
+        # free-text status never keeps a row "queued"
+        out["open_requests"] = [r["id"] for r in reqs if isinstance(r, dict) and isinstance(r.get("id"), str)
+                                and r.get("status") == "open"]
+    return out
 
 
 if __name__ == "__main__":
