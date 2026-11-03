@@ -167,7 +167,7 @@ test('the fixture copy has not drifted from tower\'s', { skip: !fs.existsSync(TO
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 function armTop(now, o) {
   o = o || {};
-  const f = Object.assign({ ask: 's1', seq_rev: '50b7656d9999e475', n: 3, seq_sha256: 'ab'.repeat(32), exp: now + 4 * 3600, device: 'dev-1', profile: 'power' }, o.fields);
+  const f = Object.assign({ ask: 's1', seq_rev: '50b7656d9999e475', n: 3, seq_sha256: fx.seq_sha256, exp: now + 4 * 3600, device: 'dev-1', profile: 'power' }, o.fields);
   const text = R.armString(f);
   const items = [
     { index: 0, class: 'ro', line: 'true', sha256: sha('true') },
@@ -175,7 +175,7 @@ function armTop(now, o) {
     { index: 2, class: 'ro', line: 'printf ok', sha256: sha('printf ok') },
   ];
   const top = { ask: 's1', arm_device: 'dev-1', items, arm: { enabled: true, can: true },
-    seq: { rev: '50b7656d9999e475', sig: 'ok', steps: [{ index: 1, title: 'two', tag: 'prog' }], arm: { state: 'missing' }, arm_payload: text, arm_payload_sha256: sha(text), arm_fields: f } };
+    seq: { rev: '50b7656d9999e475', sig: 'ok', steps: [{ index: 1, title: 'two', tag: 'prog' }], arm: { state: 'missing' }, arm_payload: text, arm_payload_sha256: sha(text), arm_fields: f, data: fx.seq } };
   if (o.mod) o.mod(top);
   return top;
 }
@@ -208,8 +208,20 @@ test('armCheck recomputes the string from what the sheet shows and refuses any d
     assert.strictEqual(r.ok, false, name);
     assert.match(r.why, re, name);
   }
-  const withData = armTop(now, { fields: { seq_sha256: fx.seq_sha256 }, mod: (t) => { t.seq.data = fx.seq; } });
-  assert.strictEqual((await R.armCheck(withData, 's1', now)).ok, true, 'raw data.seq that hashes right');
+});
+
+test('armCheck requires the raw seq.data and never trusts arm_fields.seq_sha256 alone', async () => {
+  const now = 1800000000;
+  for (const [name, mod] of Object.entries({ 'missing': (t) => { delete t.seq.data; }, 'null': (t) => { t.seq.data = null; } })) {
+    const r = await R.armCheck(armTop(now, { mod }), 's1', now);
+    assert.strictEqual(r.ok, false, 'no seq.data -> refuse (' + name + ')');
+    assert.match(r.why, /tower verify did not include seq\.data; update tower/, name);
+  }
+  const mism = await R.armCheck(armTop(now, { fields: { seq_sha256: 'ab'.repeat(32) } }), 's1', now);
+  assert.strictEqual(mism.ok, false, 'seq.data hash mismatch -> refuse');
+  assert.match(mism.why, /does not hash/);
+  const ok = await R.armCheck(armTop(now), 's1', now);
+  assert.strictEqual(ok.ok, true, 'match -> arm ok: ' + ok.why);
 });
 
 test('armDiff: unchanged steps collapse by hash, edits and new steps show in full, removed ones are named', () => {

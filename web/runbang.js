@@ -267,8 +267,8 @@
   // armCheck(top, askId, nowSec) -> {ok, why, fields, text, b64, sha256, prog: [{index, title, line, sha256}]}
   // from one run/verify response: every field of the string is recomputed from what the sheet
   // shows (ask id from the card, rev / n from the seq block and items, device from arm_device,
-  // profile power, each prog line's sha256 from its own bytes, seq_sha256 from the raw data.seq
-  // when verify carries it as seq.data) and the string must equal verify's arm_payload and its sha.
+  // profile power, each prog line's sha256 from its own bytes, seq_sha256 from the raw data.seq,
+  // which verify must carry as seq.data) and the string must equal verify's arm_payload and its sha.
   async function armCheck(top, askId, nowSec) {
     const bad = (why) => ({ ok: false, why });
     const seq = top && top.seq;
@@ -286,7 +286,9 @@
     if (f.profile !== 'power') return bad('not a power arm');
     if (!/^[0-9a-f]{64}$/.test(String(f.seq_sha256))) return bad('bad seq_sha256');
     if (!Number.isSafeInteger(f.exp) || f.exp <= now - ARM_SKEW || f.exp > now + ARM_TTL + ARM_SKEW) return bad('the arm expiry is not within 4 h of now: check the phone clock, reload');
-    if (seq.data && typeof seq.data === 'object' && (await canonSha256(seq.data)) !== f.seq_sha256) return bad('data.seq does not hash to the payload');
+    // seq_sha256 is never taken on trust: the raw signed data.seq must be here and hash to it.
+    if (!seq.data || typeof seq.data !== 'object') return bad('tower verify did not include seq.data; update tower');
+    if ((await canonSha256(seq.data)) !== f.seq_sha256) return bad('data.seq does not hash to the payload');
     const steps = new Map((Array.isArray(seq.steps) ? seq.steps : []).map((s) => [s.index, s]));
     const prog = [];
     for (const it of items) {
