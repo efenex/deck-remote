@@ -99,6 +99,7 @@ type pendingReg struct {
 // for this device token and the credentials allowed when issued.
 type runChallenge struct {
 	id      string // challenge id8 (sha256 of the challenge), for logs and the journal's auth field
+	kind    string // "" = one `! ` line (run/challenge); "runner" = a runner-mode elevation (tower_runner.go)
 	ask     string
 	item    int
 	sha     string
@@ -109,6 +110,17 @@ type runChallenge struct {
 	device  string // device-token id
 	session webauthn.SessionData
 	exp     time.Time
+	// runner mode only: the revision and the runner file's sha256 the sheet showed
+	rev       string
+	runnerSHA string
+}
+
+// needCaps are the caps the presenting token must still hold when the assertion arrives.
+func (c runChallenge) needCaps() []string {
+	if c.kind == "runner" {
+		return runnerCaps
+	}
+	return []string{passkeyClasses[c.class]}
 }
 
 // passkeyReceipt is what a verified assertion hands the run endpoint: --expect-cwd/-timeout
@@ -772,23 +784,43 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusForbidden, "device token "+dt.Name+" lacks "+passkeyClasses[it.Class])
 		return
 	}
+	assertion, session, code, why := s.beginPasskey(wa, dt, req.Cred, entry)
+	if why != "" {
+		refuse(code, why)
+		return
+	}
+	ch := runChallenge{
+		id: challengeID8(session.Challenge), ask: req.Ask, item: *req.Item, sha: req.SHA256, class: it.Class,
+		fp: runSigFingerprint(req.Ask, it, v.SigTS), cwd: it.Cwd, timeout: it.Timeout,
+		device: dt.ID, session: *session,
+	}
+	ch = s.passkeys.storeChallenge(session.Challenge, ch)
+	entry["allowed"], entry["challenge"] = true, ch.id
+	s.towerLog(entry)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"options": assertion, "challenge": ch.id, "expiresIn": int(passkeyChallengeTTL / time.Second),
+		"cwd": it.Cwd, "timeout": it.Timeout, "exp": it.Exp, "kid": it.Kid,
+	})
+}
+
+// beginPasskey makes the assertion options for dt's credentials (all, or the one credSel names):
+// platform, UV required. entry gets the credential id8 when exactly one is allowed.
+func (s *server) beginPasskey(wa *webauthn.WebAuthn, dt deviceToken, credSel string, entry map[string]any) (*protocol.CredentialAssertion, *webauthn.SessionData, int, string) {
 	h := s.passkeys
 	h.mu.Lock()
 	creds := h.credsLocked(dt.ID)
 	h.mu.Unlock()
 	var allowed []protocol.CredentialDescriptor
 	for _, cred := range creds {
-		if req.Cred == "" || base64.RawURLEncoding.EncodeToString(cred.ID) == req.Cred {
+		if credSel == "" || base64.RawURLEncoding.EncodeToString(cred.ID) == credSel {
 			allowed = append(allowed, cred.Descriptor())
 		}
 	}
 	if len(allowed) == 0 {
 		if len(creds) == 0 {
-			refuse(http.StatusForbidden, "no passkey enrolled for this device: enrol in Settings with a code from the laptop")
-		} else {
-			refuse(http.StatusBadRequest, "unknown passkey (cred) for this device")
+			return nil, nil, http.StatusForbidden, "no passkey enrolled for this device: enrol in Settings with a code from the laptop"
 		}
-		return
+		return nil, nil, http.StatusBadRequest, "unknown passkey (cred) for this device"
 	}
 	if len(allowed) == 1 {
 		entry["cred"] = credID8(allowed[0].CredentialID)
@@ -798,29 +830,24 @@ func (s *server) handleRunChallenge(w http.ResponseWriter, r *http.Request) {
 		webauthn.WithUserVerification(protocol.VerificationRequired),
 	)
 	if err != nil {
-		refuse(http.StatusInternalServerError, "assertion options: "+webauthnWhy(err))
-		return
+		return nil, nil, http.StatusInternalServerError, "assertion options: " + webauthnWhy(err)
 	}
-	ch := runChallenge{
-		id: challengeID8(session.Challenge), ask: req.Ask, item: *req.Item, sha: req.SHA256, class: it.Class,
-		fp: runSigFingerprint(req.Ask, it, v.SigTS), cwd: it.Cwd, timeout: it.Timeout,
-		device: dt.ID, session: *session, exp: h.now().Add(passkeyChallengeTTL),
-	}
+	return assertion, session, 0, ""
+}
+
+// storeChallenge records ch under its challenge with a fresh 60 s expiry, dropping expired ones.
+func (h *passkeyHub) storeChallenge(challenge string, ch runChallenge) runChallenge {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	now := h.now()
+	ch.exp = now.Add(passkeyChallengeTTL)
 	for k, c := range h.chals {
 		if !now.Before(c.exp) {
 			delete(h.chals, k)
 		}
 	}
-	h.chals[session.Challenge] = ch
-	h.mu.Unlock()
-	entry["allowed"], entry["challenge"] = true, ch.id
-	s.towerLog(entry)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"options": assertion, "challenge": ch.id, "expiresIn": int(passkeyChallengeTTL / time.Second),
-		"cwd": it.Cwd, "timeout": it.Timeout, "exp": it.Exp, "kid": it.Kid,
-	})
+	h.chals[challenge] = ch
+	return ch
 }
 
 // verifyRunAssertion checks one assertion for (ask, item, sha) presented by dt and spends its
@@ -835,6 +862,39 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if len(sha) >= 8 {
 		entry["sha8"] = sha[:8]
 	}
+	bind := func(ch runChallenge) string {
+		if ch.kind != "" || ch.ask != ask || ch.item != item || ch.sha != sha {
+			return "the challenge is for another line"
+		}
+		return ""
+	}
+	recheck := func(ch runChallenge) (int, string) {
+		if v == nil {
+			var err error
+			if v, err = s.runVerify(ask, dt.ID); err != nil {
+				return http.StatusBadGateway, err.Error()
+			}
+		}
+		it, code, why := runLineOK(v, item, sha)
+		if why != "" {
+			return code, why
+		}
+		if it.Class != ch.class || runSigFingerprint(ask, it, v.SigTS) != ch.fp {
+			return http.StatusConflict, "re-signed since the challenge: try again"
+		}
+		return 0, ""
+	}
+	return s.spendAssertion(r, dt, assertion, entry, bind, recheck)
+}
+
+// spendAssertion is the WebAuthn core shared by the line run and runner mode: it spends the
+// presented challenge whatever the outcome, then checks expiry, the presenting device token,
+// bind (the challenge names what the caller is about to authorise), the allowed credential, the
+// token's caps, the signature, clone semantics and UV, then recheck (the caller's fresh
+// re-verify), and stores the sign count. entry is the caller's action-log line; exactly one line
+// is written. Returns (receipt, HTTP status, reason); reason "" means verified.
+func (s *server) spendAssertion(r *http.Request, dt deviceToken, assertion []byte, entry map[string]any,
+	bind func(runChallenge) string, recheck func(runChallenge) (int, string)) (passkeyReceipt, int, string) {
 	refuse := func(code int, reason string) (passkeyReceipt, int, string) {
 		entry["reason"], entry["code"] = reason, code
 		s.towerLog(entry)
@@ -869,8 +929,8 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if ch.device != dt.ID {
 		return refuse(http.StatusForbidden, "the challenge was issued to another device token")
 	}
-	if ch.ask != ask || ch.item != item || ch.sha != sha {
-		return refuse(http.StatusForbidden, "the challenge is for another line")
+	if why := bind(ch); why != "" {
+		return refuse(http.StatusForbidden, why)
 	}
 	allowed := false
 	for _, id := range ch.session.AllowedCredentialIDs {
@@ -881,8 +941,11 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if !allowed {
 		return refuse(http.StatusForbidden, "the assertion's credential is not the one the challenge named")
 	}
-	if cur, ok := s.tokens.byID(dt.ID); !ok || !cur.hasCap(passkeyClasses[ch.class]) {
-		return refuse(http.StatusForbidden, "device token revoked or lacks "+passkeyClasses[ch.class])
+	cur, ok := s.tokens.byID(dt.ID)
+	for _, c := range ch.needCaps() {
+		if !ok || !cur.hasCap(c) {
+			return refuse(http.StatusForbidden, "device token revoked or lacks "+c)
+		}
 	}
 	h.mu.Lock()
 	creds := h.credsLocked(dt.ID)
@@ -899,17 +962,8 @@ func (s *server) verifyRunAssertion(r *http.Request, dt deviceToken, ask string,
 	if !parsed.Response.AuthenticatorData.Flags.HasUserVerified() {
 		return refuse(http.StatusForbidden, "user verification (Face ID) did not happen")
 	}
-	if v == nil {
-		if v, err = s.runVerify(ask, dt.ID); err != nil {
-			return refuse(http.StatusBadGateway, err.Error())
-		}
-	}
-	it, code, why := runLineOK(v, item, sha)
-	if why != "" {
+	if code, why := recheck(ch); why != "" {
 		return refuse(code, why)
-	}
-	if it.Class != ch.class || runSigFingerprint(ask, it, v.SigTS) != ch.fp {
-		return refuse(http.StatusConflict, "re-signed since the challenge: try again")
 	}
 	h.mu.Lock()
 	stored := false

@@ -297,3 +297,11 @@ test('app.js keeps the Vault token out of storage and off deck-remote', () => {
   const cb = fs.readFileSync(path.join(__dirname, 'vault-callback.js'), 'utf8');
   assert.ok(!/fetch\(|XMLHttpRequest|localStorage/.test(cb), 'the callback page sends nothing and keeps nothing durable');
 });
+
+test('a runner ask\'s steps offer no per-line Run (phone-runner-only, or the card marks it a runner)', () => {
+  const b = R.badge(rb({ class: 'prog', ok: false, why: 'phone-runner-only' }), 'ask1');
+  assert.strictEqual(b.offer, 'runner');
+  assert.match(b.why, /Runner mode/);
+  assert.strictEqual(R.badge(rb({ class: 'ro', runner: true }), 'ask1').offer, 'runner');
+  assert.match(R.hint('runner-prelude-unarmed', 'a'), /Arm/);
+});

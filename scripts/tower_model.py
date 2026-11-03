@@ -76,7 +76,9 @@ def main():
                             b["rb"] = {"index": c["index"], "sha256": c["sha"], "class": c["cls"], "sig": c["sig"], "ok": c["ok"],
                                        "why": c["why"], "run": meta.get("run"), "sig_exp": meta.get("sig_exp"), "learnings": meta.get("learnings") or []}
                     bl.append(b)
-                o.update({"tag": it["tag"], "meta": it["meta"], "summary": it.get("summary"), "blocks": bl})
+                o.update({"tag": it["tag"], "meta": it["meta"], "summary": it.get("summary"), "blocks": bl,
+                          # a sequence ask's feed block {"rev", "title", "steps"[, "source"]}: the PWA offers runner mode on it
+                          "seq": it.get("seq")})
             elif k == "request":
                 lead, trail, text = it["lead"]
                 o.update({"lead": lead.strip(), "text": text, "trail": trail.strip(), "tail": it["tail"],

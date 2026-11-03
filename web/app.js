@@ -542,6 +542,7 @@
       else if (b0.offer === 'laptop') line.append(el('span', 'trbnote', 'laptop only'));
       else if (b0.offer === 'never') line.append(el('span', 'trbnote', 'copy-only'));
       else if (b0.offer === 'blocked') line.append(el('span', 'trbnote', b0.why));
+      else if (b0.offer === 'runner') line.append(el('span', 'trbnote', b0.why));
       else if (b0.offer === 'arm') line.append(el('span', 'trbnote', b0.why));
       wrap.append(line);
       if (b0.hint) wrap.append(el('div', 'trbhint', '↳ ' + b0.hint));
@@ -876,6 +877,11 @@
     return DeckRunBang.credentialJSON(cred);
   }
 
+  // Runner mode v1 (runner.js): the sheet, gates and banner; the server re-checks everything.
+  const runnerUI = window.DeckRunner ? DeckRunner.mount({
+    api, el, toast, authHeaders, openArmSheet, loadTower, R: DeckRunBang, canArm: () => tower.runProg && tower.profPower,
+  }) : null;
+
   async function streamRun(sh, askId, rb, id, out, status) {
     const ctl = new AbortController();
     sh._abort = ctl;
@@ -953,11 +959,12 @@
 
   const TOWER_LEAD = /^(?:\(\d{1,2}\)|\([a-z]\)|\d{1,2}[.)]|NEED \d+|Q\d{1,3})\s/;
   // split_detail blocks -> DOM: p / item / bullet lines, gaps, and one Copy row per `! ` command.
-  function towerBlocks(blocks, askId) {
+  function towerBlocks(blocks, askId, runnerAsk) {
     const box = el('div', 'tblocks');
     (blocks || []).forEach((b) => {
       if (b.k === 'gap') { box.append(el('div', 'tgap')); return; }
-      if (b.k === 'cmd') { box.append(towerCmdRow(b.t, b.rb, askId)); return; }
+      // a runner ask (feed seq.source): no per-line Run, the steps go through Runner mode
+      if (b.k === 'cmd') { box.append(towerCmdRow(b.t, runnerAsk && b.rb ? Object.assign({}, b.rb, { runner: true }) : b.rb, askId)); return; }
       const line = el('div', 'tpara tk-' + b.k);
       let t = b.t;
       if (b.k === 'bullet') line.append(towerStyle(el('span', 'tmark', '• '), 'accent'));
@@ -1010,6 +1017,11 @@
       }
       row.append(towerBtn('Copy prompt', '', (b) => towerCopy(it.prompt || it.id, b)));
     } else {
+      // A sequence ask (the feed's seq block) may be a runner: the sheet's verify decides. A feed that
+      // names the source and says null (not compiled from a runner file) gets no offer.
+      if (it.kind === 'ask' && runnerUI && it.seq && it.seq.rev && it.seq.source !== null && tower.runMut && tower.runProg) {
+        row.append(towerBtn('Runner mode…', 'tprimary', () => runnerUI.open(it.id)));
+      }
       if ((it.bangs || []).length) row.append(towerBtn('Copy ! lines', '', (b) => towerCopy(it.bangs.join('\n'), b)));
       if (it.copy_text) row.append(towerBtn('Copy text', '', (b) => towerCopy(it.copy_text, b)));
       if (tower.act && it.confirm_ok) {
@@ -1048,7 +1060,7 @@
     if (it.kind === 'ask') {
       if (it.tag) head.append(towerStyle(el('b', '', it.tag), 'st_urgent'));
       head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta || '')));
-      card.append(head, towerBlocks(it.blocks, it.id));
+      card.append(head, towerBlocks(it.blocks, it.id, !!(it.seq && it.seq.source)));
       if (tower.act) {
         const rr = el('div', 'treply');
         const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';

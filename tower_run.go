@@ -51,6 +51,10 @@ var runHints = map[string]string{
 	"laptop-only":      "laptop only (phase 2, F8a/F10a): copy the line and run it on the laptop",
 	"params-changed":   "the signed cwd/timeout changed since the sheet loaded (re-signed?): reload and confirm again",
 	"still-running":    "the previous attempt's process group is still alive: wait for it, or stop it on the laptop",
+	// runner mode v1: a runner ask's steps run only through runner mode (tower_runner.go)
+	"phone-runner-only":      "this ask is a runner: open it with Runner mode… (one Face ID, then a gate per step)",
+	"runner-file-changed":    "the runner file changed since it was signed: re-sign it on the laptop (run_bang.py runner build/sign)",
+	"runner-prelude-unarmed": "the runner's prelude runs under the arm: Arm… this revision first",
 }
 
 func runHint(reason, ask string) string {
@@ -122,6 +126,10 @@ type runVerify struct {
 	// Seq is verify's sequence block, passed to the PWA as is (the arm sheet is built from it);
 	// absent for a loose ask. armState reads seq.arm.state from it.
 	Seq json.RawMessage `json:"seq,omitempty"`
+	// Runner is verify's runner-mode block (runner-mode interface: source, prelude_lines,
+	// needs_arm, phone/laptop steps, elevation, gate without nonce), present only for a runner
+	// ask; passed to the PWA as is. tower_runner.go reads it through runnerBlock.
+	Runner json.RawMessage `json:"runner,omitempty"`
 }
 
 var errRunAskNotFound = errors.New("no such open ask")
@@ -386,6 +394,9 @@ func (s *server) handleTowerRunVerify(w http.ResponseWriter, r *http.Request) {
 		out["seq"] = v.Seq
 		out["arm_device"] = dt.ID
 		out["arm"] = s.armConfig(dt)
+	}
+	if len(v.Runner) > 0 && string(v.Runner) != "null" {
+		out["runner"] = v.Runner
 	}
 	writeJSON(w, http.StatusOK, out)
 }

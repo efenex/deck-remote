@@ -777,6 +777,13 @@ html[data-theme=light] .tower .tid{color:var(--yellow)}
 .rbwarn{color:#e0af68;font-size:12.5px}.rbnote{font-size:13px;white-space:pre-wrap;margin:6px 0;color:var(--muted)}
 .rbout{max-height:40lvh;overflow:auto;margin:8px 0;padding:8px;border-radius:8px;background:#16161e;color:#c0caf5;font-size:12px;white-space:pre-wrap;word-break:break-all}
 .rbstatus{font-size:14px;font-weight:600;margin:4px 0}
+/* runner mode v1 (runner.js): elevated banner, the minimised pill, the step list, the word field */
+.rmbanner{position:sticky;top:-16px;z-index:1;margin:-16px -16px 10px;padding:10px 16px;background:#e0af68;color:#1a1b26;font-weight:600;font-size:14px;border-radius:16px 16px 0 0}
+.rmpill{position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:999;padding:10px 14px;border-radius:12px;background:#e0af68;color:#1a1b26;font-weight:600;font-size:13.5px;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.rmpill.rmwait{background:#f7768e}
+.rmsteps{margin:6px 0 8px;font-size:13px}.rmstep{display:flex;gap:8px;align-items:center;padding:3px 0}.rmidx{flex:0 0 1.6em;color:var(--muted);text-align:right}.rmtitle{flex:1;overflow-wrap:anywhere}.rmwhere{font-size:12px;color:var(--muted)}.rm-laptop{color:#e0af68}
+.rmcode{max-height:36lvh;overflow:auto;white-space:pre;font-size:12px}.rmprelude{margin:6px 0}
+.rmgate{margin:6px 0}.rmword{font:600 17px ui-monospace,monospace;width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:1px solid var(--line,#3b4261);background:#16161e;color:inherit}
 .rbbtns{display:flex;gap:10px;justify-content:flex-end;margin-top:10px}.rbbtns .tbtn{min-height:44px;padding:6px 18px;border-radius:10px;border:1px solid #3b4261;background:transparent;color:inherit;font-size:15px}
 .rbbtns .tprimary{background:#9ece6a;border-color:#9ece6a;color:#1a1b26;font-weight:600}.rbbtns .tbtn:disabled{opacity:.45}
 html[data-theme=light] .tower .tcmd pre,html[data-theme=light] .tower .treply textarea{background:var(--code-bg);color:var(--text)}
@@ -990,15 +997,16 @@ html[data-turns=block] .ts{margin-left:4px}
 <!-- ?v= matches CACHE in sw.js; bump both on any web change. Without it a
      phone can pair a fresh index.html with a stale cached app.js. -->
 <script src="/version.js?v=37"></script>
-<script src="/viewport.js?v=39"></script>
+<script src="/viewport.js?v=49"></script>
 <script src="/pulse.js?v=37"></script>
-<script src="/runbang.js?v=46"></script>
+<script src="/runbang.js?v=49"></script>
+<script src="/runner.js?v=49"></script>
 <script src="/pair.js?v=37"></script>
 <script src="/thread.js?v=45"></script>
 <script src="/markdown.js?v=37"></script>
 <script src="/gestures.js?v=37"></script>
 <script src="/photos.js?v=42"></script>
 <script src="/network.js?v=45"></script>
-<script src="/app.js?v=48"></script>
+<script src="/app.js?v=49"></script>
 </body>
 </html>

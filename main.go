@@ -359,6 +359,13 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/tower/run/stream", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunStream))))
 	mux.Handle("GET /api/rc/tower/run/log", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunLog))))
 	mux.Handle("POST /api/rc/tower/run/arm", s.auth(s.authAct(http.HandlerFunc(s.handleTowerRunArm)))) // V-2 Vault-signed arm (tower_vaultarm.go)
+	// runner mode v1 (tower_runner.go): authAct + run:mut + run:prog; one Face ID per elevation, the
+	// gates are answered through the runner loop's nonce socket, never as keystrokes
+	mux.Handle("POST /api/rc/tower/runner/challenge", s.auth(s.authAct(http.HandlerFunc(s.handleRunnerChallenge))))
+	mux.Handle("POST /api/rc/tower/runner/start", s.auth(s.authAct(http.HandlerFunc(s.handleRunnerStart))))
+	mux.Handle("GET /api/rc/tower/runner/gate", s.auth(s.authAct(http.HandlerFunc(s.handleRunnerGatePoll))))
+	mux.Handle("POST /api/rc/tower/runner/gate", s.auth(s.authAct(http.HandlerFunc(s.handleRunnerGate))))
+	mux.Handle("POST /api/rc/tower/runner/end", s.auth(s.authAct(http.HandlerFunc(s.handleRunnerEnd))))
 	// run-bang phase 2 #5 passkeys (passkeys.go). The enrol code is laptop-only and goes to a 0600
 	// file, never into a response; the rest is the act chain.
 	mux.Handle("POST /api/rc/passkey/enrol-code", s.auth(http.HandlerFunc(s.handleEnrolCode)))
