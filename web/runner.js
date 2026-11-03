@@ -23,12 +23,13 @@
   const sha8 = (s) => String(s || '').slice(0, 8);
   const isoMin = (sec) => (typeof sec === 'number' && isFinite(sec) ? new Date(sec * 1000).toISOString().slice(11, 16) + 'Z' : '');
 
-  // sheetModel(top, askId) -> the runner sheet's model from one run/verify response:
+  // sheetModel(top, askId[, caps {prog}]) -> the runner sheet's model from one run/verify response (caps.prog false:
+  // an arm-needing runner is not startable on this phone):
   // { ok, why, title, source: {path, sha8}, rev, steps: [{index, title, class, where}], preludeLines,
   //   needsArm, armState, offerArm, startable, resume, elevation }
   // offerArm: the runner needs an arm this revision lacks (the sheet offers Arm…); resume: this
   // phone's own live elevation (deck-remote restarted, or the sheet was closed): go straight to it.
-  function sheetModel(top, askId) {
+  function sheetModel(top, askId, caps) {
     const bad = (why) => ({ ok: false, why, steps: [] });
     if (!top || typeof top !== 'object') return bad('no answer from the runner');
     if (top.ask !== askId) return bad('verify names another ask');
@@ -59,6 +60,10 @@
     if (!/^[0-9a-f]{16}$/.test(out.rev)) { out.why = 'verify reports no revision for this runner'; return out; }
     if (el.state === 'elevated') {
       if (!mine) out.why = 'Runner mode is on from another device (' + (el.device || '?') + '): end it there or at the laptop.';
+      return out;
+    }
+    if (out.needsArm && caps && caps.prog === false) {
+      out.why = 'This runner has steps that need the Vault arm, and this phone lacks the run:prog capability: run it at the laptop.';
       return out;
     }
     if (out.needsArm && armState !== 'armed') {
@@ -286,7 +291,7 @@
       let m;
       try {
         top = await api('GET', '/api/rc/tower/run/verify?ask=' + encodeURIComponent(askId));
-        m = sheetModel(top, askId);
+        m = sheetModel(top, askId, { prog: !deps.canProg || deps.canProg() });
       } catch (e) { facts.textContent = 'check failed: ' + (e.message || e); return; }
       facts.textContent = '';
       if (!m.ok) { note.textContent = m.why; return; }
@@ -387,7 +392,7 @@
       v.conn = u.conn || {};
       if (u.top) {
         v.top = u.top;
-        const m2 = sheetModel(u.top, v.askId);
+        const m2 = sheetModel(u.top, v.askId, { prog: !deps.canProg || deps.canProg() });
         if (m2.ok) { v.m = m2; v.steps.replaceChildren(stepList(m2)); }
       }
       const line = banner(v.m, v.gate, v.conn);
