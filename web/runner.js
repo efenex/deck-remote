@@ -191,7 +191,17 @@
         if (el.state && el.state !== 'elevated') { this.over = true; reason = el.state + (el.reason ? ' (' + el.reason + ')' : ''); }
       } catch (e) {
         const refused = e && e.status === 403 && e.data && e.data.refused;
-        if (refused && OVER.has(refused)) { this.over = true; reason = refused; }
+        if (refused && OVER.has(refused)) {
+          this.over = true; reason = refused;
+          // The gate answered first and refused: verify was never read this tick, so `top` is the last
+          // tick's. Read it once more for the end reason ("ended (complete)") and the final step results;
+          // if it still says elevated (or fails) the gate's refusal stands.
+          try {
+            const t2 = await this.deps.verify();
+            const e2 = (t2 && t2.runner && t2.runner.elevation) || {};
+            if (e2.state && e2.state !== 'elevated') { this.top = t2; reason = e2.state + (e2.reason ? ' (' + e2.reason + ')' : ''); }
+          } catch (_) { /* keep the gate's refusal */ }
+        }
         else if (e && e.status === 404) { this.over = true; reason = 'the ask is closed'; } // verify: no longer open (a restart never answers 404)
         else this.fails++;
       }
