@@ -14,12 +14,16 @@ import (
 // writes), with tower's ids and data, then wake tower best-effort.
 func TestTowerActBacklogJournalsTowerRequests(t *testing.T) {
 	j := "/tower/scripts/journal.py"
+	// data and wake are tower_tui.py's (start/defer/drop), field for field
 	for _, c := range []struct {
-		body, rid, data string
+		body, rid, data, wake string
 	}{
-		{`{"op":"backlog_start","id":"T-42.fix_Thing"}`, "pick-backlog-t-42-fix-thing", `{"task":"T-42.fix_Thing"}`},
-		{`{"op":"backlog_defer","id":"T-42.fix_Thing","not_before":"2026-11-04T08:00:00Z"}`, "pick-defer-t-42-fix-thing", `{"not_before":"2026-11-04T08:00:00Z","task":"T-42.fix_Thing"}`},
-		{`{"op":"backlog_drop","id":"T-42.fix_Thing"}`, "pick-drop-t-42-fix-thing", `{"task":"T-42.fix_Thing"}`},
+		{`{"op":"backlog_start","id":"T-42.fix_Thing"}`, "pick-backlog-t-42-fix-thing",
+			`{"text":"operator picked backlog task T-42.fix_Thing: dispatch now","task":"T-42.fix_Thing","from":"tui"}`, "[tui] picked backlog T-42.fix_Thing"},
+		{`{"op":"backlog_defer","id":"T-42.fix_Thing","not_before":"2026-11-04T08:00:00Z"}`, "pick-defer-t-42-fix-thing",
+			`{"text":"operator deferred backlog task T-42.fix_Thing until 2026-11-04","task":"T-42.fix_Thing","not_before":"2026-11-04T08:00:00Z","from":"tui"}`, "[tui] deferred backlog T-42.fix_Thing to 2026-11-04"},
+		{`{"op":"backlog_drop","id":"T-42.fix_Thing"}`, "pick-drop-t-42-fix-thing",
+			`{"text":"operator dropped backlog task T-42.fix_Thing","task":"T-42.fix_Thing","from":"tui"}`, "[tui] dropped backlog T-42.fix_Thing"},
 	} {
 		_, do, ran := towerActServer(t) // fresh server: no recent-action memory between cases
 		w := do(c.body)
@@ -30,7 +34,7 @@ func TestTowerActBacklogJournalsTowerRequests(t *testing.T) {
 		if len(*ran) != 2 || !reflect.DeepEqual((*ran)[0], want) {
 			t.Fatalf("%s: argv\n got %q\nwant %q", c.body, *ran, want)
 		}
-		if wake := (*ran)[1]; wake[0] != "agent-deck" || wake[len(wake)-1] != "[tui] queued request "+c.rid {
+		if wake := (*ran)[1]; wake[0] != "agent-deck" || wake[len(wake)-1] != c.wake {
 			t.Fatalf("%s: wake %q", c.body, wake)
 		}
 		// a second tap before the overview shows the open request must not journal again
@@ -106,7 +110,7 @@ class Model:
     def header(self): return "TOWER"
     def header_item(self, n, sid, title, items, folded): return {"count": str(len(items)), "urgent": 0, "folded": folded}
     def visible(self):
-        items = [dict(kind="suggest", id=s["id"], key="suggest:" + s["id"], head=s["id"], attr=0, folded=None, fold_ok=False,
+        items = [dict(kind="suggest", id=s["id"], key="suggest:" + s["id"], head=s["id"], attr=0, folded=s.get("folded"), fold_ok=True,
                       confirm_ok=False, bangs=[], copy_text="", status="suggest", title=s["title"], meta="", prompt="", why="", action="")
                  for s in self.o.get("suggested", [])]
         return [("suggested", "SUGGESTED", items, False)]
@@ -143,7 +147,7 @@ func TestTowerModelPassesBacklogThrough(t *testing.T) {
 	doc := runTowerModelPy(t, `{"generated_at":"2026-11-03T08:00:00Z",
 	 "counts":{"waiting":0,"backlog":2,"suggested":2,"suggested_folded":1},
 	 "backlog":[{"id":"T-1","title":"a","age_days":12,"deps_open":["T-0"]},{"id":"T-2","title":"b","not_before":"2026-11-10T08:00:00Z"},{"title":"no id"}],
-	 "requests":[{"id":"pick-backlog-t-1","status":"open"},{"id":"pick-drop-t-9","status":"done"},{"id":"r-nostatus"}],
+	 "requests":[{"id":"pick-backlog-t-1","status":"open"},{"id":"pick-drop-t-9","status":"done"},{"id":"pick-drop-t-8","status":"declined"},{"id":"pick-drop-t-7","status":"both ready, dispatch at 20:00Z"},{"id":"r-nostatus"}],
 	 "suggested":[{"id":"sg-a","title":"A"},{"id":"sg-b","title":"B","folded":true}]}`)
 	if bl, _ := doc["backlog"].([]any); len(bl) != 2 {
 		t.Fatalf("backlog rows (the id-less one dropped): %v", doc["backlog"])
@@ -151,7 +155,7 @@ func TestTowerModelPassesBacklogThrough(t *testing.T) {
 	if !reflect.DeepEqual(doc["counts"], map[string]any{"backlog": 2.0, "suggested": 2.0, "suggested_folded": 1.0}) {
 		t.Fatalf("counts: %v", doc["counts"])
 	}
-	if !reflect.DeepEqual(doc["open_requests"], []any{"pick-backlog-t-1", "r-nostatus"}) {
+	if !reflect.DeepEqual(doc["open_requests"], []any{"pick-backlog-t-1"}) {
 		t.Fatalf("open_requests: %v", doc["open_requests"])
 	}
 	items := doc["sections"].([]any)[0].(map[string]any)["items"].([]any)

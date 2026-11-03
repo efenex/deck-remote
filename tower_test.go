@@ -295,7 +295,7 @@ const towerStubModel = `{"header":"TOWER 17:35Z","generated_at":"2026-10-19T17:3
 {"id":"flight","title":"IN FLIGHT","count":"2","urgent":0,"folded":null,"items":[
  {"kind":"task","id":"op-task","key":"task:op-task","fold_ok":false,"confirm_ok":true,"status":"flight"},
  {"kind":"task","id":"agent-task","key":"task:agent-task","fold_ok":false,"confirm_ok":false,"status":"flight"}]},
-{"id":"suggested","title":"SUGGESTED","count":"1","urgent":0,"folded":null,"items":[{"kind":"suggest","id":"sg_Next.Thing","key":"suggest:sg_Next.Thing","title":"Do the thing","task":"t-1","fold_ok":false,"confirm_ok":false,"status":"suggest"}]}],
+{"id":"suggested","title":"SUGGESTED","count":"1","urgent":0,"folded":null,"items":[{"kind":"suggest","id":"sg_Next.Thing","key":"suggest:sg_Next.Thing","title":"Do the thing","task":"t-1","fold_ok":true,"confirm_ok":false,"status":"suggest"}]}],
 "backlog":[{"id":"T-42.fix_Thing","title":"Fix the thing","age_days":12},{"id":"t-queued","title":"Already queued"}],
 "open_requests":["pick-defer-t-queued"]}`
 

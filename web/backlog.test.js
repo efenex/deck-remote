@@ -12,9 +12,9 @@ test('slug matches tower_actions.go towerSlug (TestTowerSlugMatchesTab)', () => 
 });
 
 test('request records: tower ids and data for start / defer / drop', () => {
-  assert.deepStrictEqual(B.request('start', 'T-42.fix_Thing'), { id: 'pick-backlog-t-42-fix-thing', data: { task: 'T-42.fix_Thing' } });
-  assert.deepStrictEqual(B.request('defer', 'T-42.fix_Thing', '2026-11-04'), { id: 'pick-defer-t-42-fix-thing', data: { task: 'T-42.fix_Thing', not_before: '2026-11-04T08:00:00Z' } });
-  assert.deepStrictEqual(B.request('drop', 'T-42.fix_Thing'), { id: 'pick-drop-t-42-fix-thing', data: { task: 'T-42.fix_Thing' } });
+  assert.deepStrictEqual(B.request('start', 'T-42.fix_Thing'), { id: 'pick-backlog-t-42-fix-thing', data: { text: 'operator picked backlog task T-42.fix_Thing: dispatch now', task: 'T-42.fix_Thing', from: 'tui' } });
+  assert.deepStrictEqual(B.request('defer', 'T-42.fix_Thing', '2026-11-04'), { id: 'pick-defer-t-42-fix-thing', data: { text: 'operator deferred backlog task T-42.fix_Thing until 2026-11-04', task: 'T-42.fix_Thing', not_before: '2026-11-04T08:00:00Z', from: 'tui' } });
+  assert.deepStrictEqual(B.request('drop', 'T-42.fix_Thing'), { id: 'pick-drop-t-42-fix-thing', data: { text: 'operator dropped backlog task T-42.fix_Thing', task: 'T-42.fix_Thing', from: 'tui' } });
 });
 
 test('act bodies carry the exact task id; defer needs a real date', () => {

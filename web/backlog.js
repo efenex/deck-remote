@@ -30,8 +30,14 @@
   // The tower request record each action produces (what the server journals; shown in tests and
   // used to recognise a row tower already has queued).
   function request(action, id, date) {
-    const data = { task: id };
-    if (action === 'defer') data.not_before = notBefore(date);
+    // the TUI's data, field for field (tower_tui.py start/defer/drop)
+    const nb = action === 'defer' ? notBefore(date) : null;
+    const text = action === 'defer' ? 'operator deferred backlog task ' + id + ' until ' + nb.slice(0, 10)
+      : action === 'drop' ? 'operator dropped backlog task ' + id
+        : 'operator picked backlog task ' + id + ': dispatch now';
+    const data = { text, task: id };
+    if (nb) data.not_before = nb;
+    data.from = 'tui';
     return { id: requestId(action, id), data };
   }
 

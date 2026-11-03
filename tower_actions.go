@@ -231,7 +231,7 @@ func (s *server) pickArgvs(it map[string]any) [][]string {
 // BACKLOG actions (tower overview-backlog): each journals one open request record that tower
 // acts on, the same kind of record pickArgvs writes for a suggestion (`--kind request --to open
 // --by operator`), then wakes tower best-effort. The request ids and data are tower's contract:
-// pick-backlog-/pick-defer-/pick-drop-<slug(task)>, data {"task"[, "not_before"]}.
+// pick-backlog-/pick-defer-/pick-drop-<slug(task)>, data {"text","task"[,"not_before"],"from":"tui"}.
 var backlogReqPrefix = map[string]string{"backlog_start": "pick-backlog-", "backlog_defer": "pick-defer-", "backlog_drop": "pick-drop-"}
 
 // backlogReqIDs: every request id a backlog action may write for this task; one of them
@@ -244,14 +244,31 @@ func backlogReqIDs(task string) []string {
 var notBeforeRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T08:00:00Z$`)
 
 func (s *server) backlogArgvs(op, task, notBefore string) [][]string {
-	rid := backlogReqPrefix[op] + towerSlug(task)
-	data := map[string]string{"task": task}
-	if op == "backlog_defer" {
-		data["not_before"] = notBefore
+	// data and wake wording are the TUI's, byte for byte (tower_tui.py start/defer/drop): the
+	// REQUESTS rows on every surface render data.text, and /tick reads data.task/not_before.
+	type backlogData struct {
+		Text      string `json:"text"`
+		Task      string `json:"task"`
+		NotBefore string `json:"not_before,omitempty"`
+		From      string `json:"from"`
+	}
+	d := backlogData{Task: task, From: "tui"}
+	var wake string
+	switch op {
+	case "backlog_defer":
+		day := notBefore[:10] // validated YYYY-MM-DDT08:00:00Z
+		d.Text, d.NotBefore = "operator deferred backlog task "+task+" until "+day, notBefore
+		wake = "[tui] deferred backlog " + task + " to " + day
+	case "backlog_drop":
+		d.Text = "operator dropped backlog task " + task
+		wake = "[tui] dropped backlog " + task
+	default:
+		d.Text = "operator picked backlog task " + task + ": dispatch now"
+		wake = "[tui] picked backlog " + task
 	}
 	return [][]string{
-		s.journalArgv("--kind", "request", "--id", rid, "--to", "open", "--by", "operator", "--data", jsonStr(data)),
-		append([]string{s.cfg.bin}, adeckArgs(s.cfg.profile, "session", "send", "--no-wait", s.cfg.towerSession, "[tui] queued request "+rid)...),
+		s.journalArgv("--kind", "request", "--id", backlogReqPrefix[op]+towerSlug(task), "--to", "open", "--by", "operator", "--data", jsonStr(d)),
+		append([]string{s.cfg.bin}, adeckArgs(s.cfg.profile, "session", "send", "--no-wait", s.cfg.towerSession, wake)...),
 	}
 }
 
@@ -323,9 +340,10 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 			if it == nil {
 				it = items["request:"+req.ID]
 			}
-			// an open suggestion folds like an ask (same fold record, keyed by the suggestion id)
-			if it == nil && items["suggest:"+req.ID] != nil {
-				it = map[string]any{"fold_ok": true}
+			// an open suggestion folds like an ask (same fold record, keyed by the suggestion id);
+			// tower's own fold_ok stays the gate
+			if it == nil {
+				it = items["suggest:"+req.ID]
 			}
 			if it == nil || it["fold_ok"] != true {
 				httpError(w, http.StatusNotFound, "not a foldable open ask/request/suggestion in the current overview")

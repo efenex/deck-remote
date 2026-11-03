@@ -49,8 +49,6 @@ def main():
         return tt.split_detail(text or "")
 
     ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
-    # overview-backlog: suggested[].folded (a suggestion folds like an ask). An older tower has no flag.
-    sug_folded = {s.get("id"): bool(s.get("folded")) for s in (ov.get("suggested") or []) if isinstance(s, dict)}
 
     sections = []
     for n, (sid, title, items, folded) in enumerate(m.visible(), 1):
@@ -90,8 +88,6 @@ def main():
             elif k == "suggest":
                 o.update({"title": it["title"], "meta": it["meta"], "prompt": it["prompt"], "task": it.get("task"),
                           "why_blocks": blocks(it["why"]), "action_blocks": blocks(it["action"])})
-                if not o.get("folded") and sug_folded.get(it["id"]):
-                    o["folded"] = {"since": None}
             else:
                 o["body"] = [blocks(b) for b in it["body"] if b]
             out_items.append(o)
@@ -108,9 +104,6 @@ def main():
     return 0
 
 
-DONE_REQ = {"done", "closed", "dismissed", "cancelled", "canceled", "failed", "dropped"}
-
-
 def backlog_extras(ov):
     """overview-backlog keys passed through from overview.json for the Tower tab's BACKLOG section.
     Absent keys (an older tower) are simply left out: the tab then shows no section."""
@@ -125,8 +118,10 @@ def backlog_extras(ov):
             out["counts"] = cc
     reqs = ov.get("requests")
     if isinstance(reqs, list):
+        # "open" is the TUI's own test (tower_tui.queued_picks): status == "open" exactly, so a declined or
+        # free-text status never keeps a row "queued"
         out["open_requests"] = [r["id"] for r in reqs if isinstance(r, dict) and isinstance(r.get("id"), str)
-                                and str(r.get("status") or "open").lower() not in DONE_REQ]
+                                and r.get("status") == "open"]
     return out
 
 
