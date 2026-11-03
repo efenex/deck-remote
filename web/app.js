@@ -879,7 +879,7 @@
 
   // Runner mode v1 (runner.js): the sheet, gates and banner; the server re-checks everything.
   const runnerUI = window.DeckRunner ? DeckRunner.mount({
-    api, el, toast, authHeaders, openArmSheet, loadTower, R: DeckRunBang, canArm: () => tower.runProg && tower.profPower,
+    api, el, toast, authHeaders, openArmSheet, loadTower, R: DeckRunBang, canArm: () => tower.runProg && tower.profPower, canProg: () => tower.runProg,
   }) : null;
 
   async function streamRun(sh, askId, rb, id, out, status) {
@@ -1019,7 +1019,7 @@
     } else {
       // A sequence ask (the feed's seq block) may be a runner: the sheet's verify decides. A feed that
       // names the source and says null (not compiled from a runner file) gets no offer.
-      if (it.kind === 'ask' && runnerUI && it.seq && it.seq.rev && it.seq.source !== null && tower.runMut && tower.runProg) {
+      if (it.kind === 'ask' && runnerUI && it.seq && it.seq.rev && it.seq.source !== null && tower.runMut) {
         row.append(towerBtn('Runner mode…', 'tprimary', () => runnerUI.open(it.id)));
       }
       if ((it.bangs || []).length) row.append(towerBtn('Copy ! lines', '', (b) => towerCopy(it.bangs.join('\n'), b)));

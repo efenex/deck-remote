@@ -207,3 +207,18 @@ test('ARM_FIX: arm-* and runner-prelude-unarmed are fixed by Arm…', () => {
   assert.strictEqual(M.ARM_FIX('runner-prelude-unarmed'), true);
   assert.strictEqual(M.ARM_FIX('runner-file-changed'), false);
 });
+
+test('sheetModel: a run:mut phone without run:prog starts a Face-ID-only runner, not an arm-needing one', () => {
+  const plain = top();
+  plain.runner.needs_arm = false;
+  assert.equal(M.sheetModel(plain, 'ask1', { prog: false }).startable, true);
+  const armed = top();
+  armed.runner.needs_arm = true;
+  armed.seq.arm = { state: 'armed' };
+  const m = M.sheetModel(armed, 'ask1', { prog: false });
+  assert.equal(m.startable, false);
+  assert.match(m.why, /lacks the run:prog capability/);
+  assert.equal(m.offerArm, false);
+  assert.equal(M.sheetModel(armed, 'ask1', { prog: true }).startable, true);
+  assert.equal(M.sheetModel(armed, 'ask1').startable, true);      // no caps given: the server decides
+});

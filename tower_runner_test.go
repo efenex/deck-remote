@@ -184,9 +184,9 @@ func TestRunnerChallengeRefusals(t *testing.T) {
 	tok := runnerTok(t, e)
 	a := newSoftAuth(t)
 	e.enrol(a, tok)
-	for _, c := range [][]string{{"act"}, {"act", "run:mut"}, {"act", "run:prog"}, {"act", "run:ro"}} {
+	for _, c := range [][]string{{"act"}, {"act", "run:prog"}, {"act", "run:ro"}} {
 		other := mintTok(t, e.s, "t-"+strings.Join(c, "-"), c...)
-		expectCode(t, "caps "+strings.Join(c, ","), e.runnerChallenge(other, armRev), 403, "lacks run:")
+		expectCode(t, "caps "+strings.Join(c, ","), e.runnerChallenge(other, armRev), 403, "lacks run:mut")
 	}
 	expectCode(t, "bad rev", e.runnerChallenge(tok, "zz"), 400, "need ask")
 	expectCode(t, "dash ask", e.req("POST", "/api/rc/tower/runner/challenge", tok, map[string]any{"ask": "-x", "rev": armRev}), 400, "need ask")
@@ -200,7 +200,11 @@ func TestRunnerChallengeRefusals(t *testing.T) {
 	st.sig = "tampered"
 	expectCode(t, "seq sig", e.runnerChallenge(tok, armRev), 403, "sig-tampered")
 	st.sig = ""
+	// run:mut alone: an arm-needing runner is refused before any Face ID (TestRunnerMutOnlyPhone: the Face-ID-only case)
+	mutOnly := mintTok(t, e.s, "mut-only", "act", "run:mut")
+	e.enrol(newSoftAuth(t), mutOnly)
 	st.needsArm = true
+	expectCode(t, "mut-only, arm needed", e.runnerChallenge(mutOnly, armRev), 403, `"refused":"cap-run-prog"`)
 	w := e.runnerChallenge(tok, armRev)
 	expectCode(t, "unarmed", w, 403, `"refused":"arm-missing"`)
 	expectCode(t, "unarmed needsArm", w, 403, `"needsArm":true`)
@@ -236,12 +240,11 @@ func TestRunnerStartRefusals(t *testing.T) {
 	e, st := runnerServer(t)
 	tok := runnerTok(t, e)
 	other := mintTok(t, e.s, "phone-2", "act", "run:mut", "run:prog")
-	mutOnly := mintTok(t, e.s, "mut-only", "act", "run:mut")
 	a, b := newSoftAuth(t), newSoftAuth(t)
 	e.enrol(a, tok)
 	e.enrol(b, other)
 
-	expectCode(t, "no cap", e.runnerStart(mutOnly, json.RawMessage(`{}`)), 403, "lacks run:prog")
+	expectCode(t, "no cap", e.runnerStart(mintTok(t, e.s, "ro-only", "act", "run:ro"), json.RawMessage(`{}`)), 403, "lacks run:mut")
 	expectCode(t, "no assertion", e.runnerStart(tok, nil), 403, "needs a passkey assertion")
 	expectCode(t, "bad rev", e.req("POST", "/api/rc/tower/runner/start", tok, map[string]any{"ask": "ask1", "rev": "ABC"}), 400, "need ask")
 	expectCode(t, "garbage", e.runnerStart(tok, json.RawMessage(`{"id":"x"}`)), 400, "bad assertion")
@@ -357,7 +360,7 @@ func TestRunnerGateDecide(t *testing.T) {
 	} {
 		expectCode(t, name, e.gate(tok, b), 400, "")
 	}
-	expectCode(t, "no cap", e.gate(mintTok(t, e.s, "mut", "act", "run:mut"), body("nonce", strings.Repeat("1", 32))), 403, "lacks run:prog")
+	expectCode(t, "no cap", e.gate(mintTok(t, e.s, "ro", "act", "run:ro"), body("nonce", strings.Repeat("1", 32))), 403, "lacks run:mut")
 
 	n2 := strings.Repeat("2", 32)
 	st.rc["gate"], st.out["gate"] = 3, `{"refused":"word-mismatch"}`+"\n"
@@ -419,4 +422,14 @@ func TestRunnerRoutesBehindAuthAct(t *testing.T) {
 	if n := len(st.runnerCalls()); n != 0 {
 		t.Fatalf("runner called %d times", n)
 	}
+}
+
+// A phone with run:mut but not run:prog (the operator's iphone-mut, 2026-11-03) gets a challenge for a
+// Face-ID-only runner (no step needs the arm).
+func TestRunnerMutOnlyPhone(t *testing.T) {
+	e, st := runnerServer(t)
+	mutOnly := mintTok(t, e.s, "mut-only", "act", "run:mut")
+	e.enrol(newSoftAuth(t), mutOnly)
+	st.needsArm = false
+	expectCode(t, "mut-only, no arm needed", e.runnerChallenge(mutOnly, armRev), 200, "options")
 }

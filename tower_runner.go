@@ -34,8 +34,10 @@ import (
 	"time"
 )
 
-// runnerCaps: a runner may hold mut and prog steps; one elevation covers both (RM-1 a).
-var runnerCaps = []string{"run:mut", "run:prog"}
+// runnerCaps: every runner needs run:mut; a runner whose steps need the Vault arm (verify's
+// runner.needs_arm: prog/destructive steps or prelude code) also needs run:prog (runnerOK). A
+// Face-ID-only runner (ro/mut lines, inert header) runs on a run:mut phone.
+var runnerCaps = []string{"run:mut"}
 
 var (
 	runnerIDRe    = regexp.MustCompile(`^[!-~]{1,200}$`)           // ask ids: printable ASCII, no space
@@ -116,6 +118,10 @@ func runnerOK(v *runVerify, rev string, dt deviceToken) (*runnerBlock, *runnerRe
 	if seqRev != rev {
 		return rb, &runnerRefusal{http.StatusConflict, "the runner was re-signed since the sheet loaded (rev " + seqRev + "): reload", map[string]any{"refused": "seq-rev-changed", "stale": true}}
 	}
+	if rb.NeedsArm && !dt.hasCap("run:prog") {
+		return rb, &runnerRefusal{http.StatusForbidden, "device token " + dt.Name + " lacks run:prog: this runner has steps that need the Vault arm",
+			map[string]any{"refused": "cap-run-prog"}}
+	}
 	if rb.NeedsArm {
 		if st := v.armState(); st != "armed" {
 			return rb, &runnerRefusal{http.StatusForbidden, "this runner needs a Vault-signed arm of its revision: arm-" + st,
@@ -132,7 +138,8 @@ func runnerOK(v *runVerify, rev string, dt deviceToken) (*runnerBlock, *runnerRe
 	return rb, nil
 }
 
-// runnerActor: authAct already passed; the device token must carry run:mut and run:prog.
+// runnerActor: authAct already passed; the device token must carry run:mut (runnerOK adds run:prog
+// for a runner that needs the arm).
 func (s *server) runnerActor(r *http.Request) (deviceToken, string) {
 	dt, ok := s.tokens.find(bearerHeaderOnly(r))
 	if !ok {
@@ -140,7 +147,7 @@ func (s *server) runnerActor(r *http.Request) (deviceToken, string) {
 	}
 	for _, c := range runnerCaps {
 		if !dt.hasCap(c) {
-			return dt, "device token " + dt.Name + " lacks " + c + " (runner mode needs run:mut and run:prog)"
+			return dt, "device token " + dt.Name + " lacks " + c + " (runner mode needs run:mut)"
 		}
 	}
 	return dt, ""
