@@ -1809,11 +1809,13 @@
     sheet.style.bottom = kb ? 'auto' : '';
     // The inline top above is only right while iOS's pan and the last
     // visualViewport event agree; when they do not the whole sheet is painted
-    // too high (clock over the title, list showing under the composer, caret
-    // one line below its text). Measure where it is actually painted and
+    // too high or low (clock over the title, list under the composer, caret
+    // one line below its text). Measure where it is actually painted against
+    // the painted top of the visible area (same frame: see visibleTop) and
     // correct once. Skipped while a swipe/slide transform is on the sheet.
     if (kb && getComputedStyle(sheet).transform === 'none') {
-      const want = DeckViewport.sheetTop(parseFloat(sheet.style.top) || 0, sheet.getBoundingClientRect().top, vv.offsetTop);
+      const want = DeckViewport.sheetTop(parseFloat(sheet.style.top) || 0, sheet.getBoundingClientRect().top,
+        DeckViewport.visibleTop(vv, document.documentElement.getBoundingClientRect().top));
       if (want !== (parseFloat(sheet.style.top) || 0)) sheet.style.top = want + 'px';
     }
     // Snap to the tail only when the keyboard appears (the thread shrinks); on
@@ -1863,7 +1865,8 @@
       'screen ' + screen.width + 'x' + screen.height + ' dpr ' + devicePixelRatio,
       '100lvh ' + r(lvh.getBoundingClientRect().height) + ' (want = screen ' + screen.height + ')',
       'innerH ' + innerHeight + ' docClientH ' + document.documentElement.clientHeight +
-        ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) : 'none'),
+        ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) + ' pageTop ' + r(vv.pageTop) : 'none') +
+        ' scrollY ' + r(scrollY),
       'safe top ' + ps.paddingTop + ' bottom ' + ps.paddingBottom,
       'standalone ' + matchMedia('(display-mode: standalone)').matches + ' navStandalone ' + !!navigator.standalone,
       'kb ' + document.documentElement.classList.contains('kb') + ' (standalone ' + isStandalone() + ')' +
