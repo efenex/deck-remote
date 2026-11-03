@@ -84,6 +84,9 @@
     return out;
   }
 
+  // runOk(run) -> true only for a finished run with rc 0 (the sheet auto-closes on it; anything else stays open).
+  function runOk(run) { return !!run && typeof run === 'object' && run.state === 'done' && run.rc === 0 && !run.stale; }
+
   // runState(run) -> null | { glyph, tone, text } for the item's latest run (feed / done event).
   function runState(run) {
     if (!run || typeof run !== 'object') return null;
@@ -403,7 +406,7 @@
   }
 
   const api = {
-    badge, runState, parseSSE, hint, SIG_BAD, HINTS, PASSKEY_CLASSES,
+    badge, runState, runOk, parseSSE, hint, SIG_BAD, HINTS, PASSKEY_CLASSES,
     visibleParts, hasInvisible, age, sheet, b64uToBuf, bufToB64u, creationOptions, requestOptions, credentialJSON,
     ARM_TTL, pyStr, canonJSON, armString, sha256Hex, canonSha256, armCheck, armDiff, b64, utf8,
     vaultAuthURL, vaultLogin, vaultSign, nonce,

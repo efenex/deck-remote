@@ -158,6 +158,15 @@
     return parts.join(' · ');
   }
 
+  // cleanComplete(reason, top) -> true when the runner ended because every step ran (reason from
+  // Poller: "ended (complete)") AND verify shows each step's latest run done with rc 0. A skipped,
+  // failed, quit or expired runner is not clean: its sheet stays open with the reason.
+  function cleanComplete(reason, top) {
+    if (!/^ended \(complete\)$/.test(String(reason || ''))) return false;
+    const items = top && Array.isArray(top.items) ? top.items : [];
+    return items.length > 0 && items.every((it) => it && it.run && it.run.state === 'done' && it.run.rc === 0);
+  }
+
   // backoff(fails) -> ms until the next poll: 2 s, then doubling to 30 s while errors repeat.
   function backoff(fails) {
     if (!fails) return POLL_MS;
@@ -359,7 +368,11 @@
       v.endBtn.setAttribute('data-rm', 'end');
       v.endBtn.addEventListener('click', () => end(v));
       btns.append(min, v.endBtn);
-      v.sheet.append(v.head, v.gateBox, v.outHead, v.out, v.status, v.steps, btns);
+      // fixed-size sheet (CSS .rmsheet): banner on top, buttons at the bottom, only this area scrolls/changes
+      v.detail = el('div', 'rmdetail');
+      v.detail.setAttribute('data-rm', 'detail');
+      v.detail.append(v.gateBox, v.outHead, v.out, v.status, v.steps);
+      v.sheet.append(v.head, v.detail, btns);
       v.pill = el('div', 'rmpill', '');
       v.pill.setAttribute('data-rm', 'pill');
       v.pill.addEventListener('click', () => show(v));
@@ -527,6 +540,12 @@
       document.removeEventListener('visibilitychange', v.onVis);
       wakeOff(v);
       v.pill.remove();
+      if (cleanComplete(reason, v.top)) { // every step ran rc=0: nothing left to read or press, close the view
+        v.back.remove();
+        toast('Runner mode', 'complete: every step ran rc=0');
+        if (deps.loadTower) deps.loadTower();
+        return;
+      }
       v.gateBox.replaceChildren(el('div', 'rbnote', 'Runner mode is over' + (reason ? ': ' + reason : '') + '.'));
       v.endBtn.hidden = true;
       if (!v.back.isConnected) toast('Runner mode', 'over' + (reason ? ': ' + reason : ''));
@@ -536,7 +555,7 @@
     return { open, active: () => (live ? { askId: live.askId, elevation: live.elevation } : null) };
   }
 
-  const api = { ARM_FIX, sheetModel, gateView, decisionBody, currentRun, banner, backoff, Poller, mount, POLL_MS, POLL_MAX_MS };
+  const api = { ARM_FIX, cleanComplete, sheetModel, gateView, decisionBody, currentRun, banner, backoff, Poller, mount, POLL_MS, POLL_MAX_MS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckRunner = api;
 })(typeof window !== 'undefined' ? window : globalThis);

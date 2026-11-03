@@ -222,3 +222,17 @@ test('sheetModel: a run:mut phone without run:prog starts a Face-ID-only runner,
   assert.equal(M.sheetModel(armed, 'ask1', { prog: true }).startable, true);
   assert.equal(M.sheetModel(armed, 'ask1').startable, true);      // no caps given: the server decides
 });
+
+test('cleanComplete: only an ended (complete) runner whose every step ran rc=0 closes itself', () => {
+  const ok = (i) => ({ index: i, run: { state: 'done', rc: 0 } });
+  const t = (items) => ({ items });
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), ok(1)])), true);
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: { state: 'done', rc: 1 } }])), false, 'a failed step');
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: null }])), false, 'a skipped step');
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: { state: 'refused' } }])), false);
+  assert.equal(M.cleanComplete('ended (quit)', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('ended (operator)', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('expired', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('ended (complete)', null), false);
+  assert.equal(M.cleanComplete('ended (complete)', t([])), false);
+});

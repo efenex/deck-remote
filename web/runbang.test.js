@@ -305,3 +305,12 @@ test('a runner ask\'s steps offer no per-line Run (phone-runner-only, or the car
   assert.strictEqual(R.badge(rb({ class: 'ro', runner: true }), 'ask1').offer, 'runner');
   assert.match(R.hint('runner-prelude-unarmed', 'a'), /Arm/);
 });
+
+test('runOk: only a finished rc=0 run auto-closes the sheet', () => {
+  assert.strictEqual(R.runOk({ state: 'done', rc: 0 }), true);
+  assert.strictEqual(R.runOk({ state: 'done', rc: 1 }), false);
+  assert.strictEqual(R.runOk({ state: 'done', rc: 0, stale: true }), false);
+  assert.strictEqual(R.runOk({ state: 'running' }), false);
+  assert.strictEqual(R.runOk({ state: 'refused', reason: 'x' }), false);
+  assert.strictEqual(R.runOk(null), false);
+});
