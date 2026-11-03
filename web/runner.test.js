@@ -222,3 +222,43 @@ test('sheetModel: a run:mut phone without run:prog starts a Face-ID-only runner,
   assert.equal(M.sheetModel(armed, 'ask1', { prog: true }).startable, true);
   assert.equal(M.sheetModel(armed, 'ask1').startable, true);      // no caps given: the server decides
 });
+
+test('cleanComplete: only an ended (complete) runner whose every step ran rc=0 closes itself', () => {
+  const ok = (i) => ({ index: i, run: { state: 'done', rc: 0 } });
+  const t = (items) => ({ items });
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), ok(1)])), true);
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: { state: 'done', rc: 1 } }])), false, 'a failed step');
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: null }])), false, 'a skipped step');
+  assert.equal(M.cleanComplete('ended (complete)', t([ok(0), { index: 1, run: { state: 'refused' } }])), false);
+  assert.equal(M.cleanComplete('ended (quit)', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('ended (operator)', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('expired', t([ok(0)])), false);
+  assert.equal(M.cleanComplete('ended (complete)', null), false);
+  assert.equal(M.cleanComplete('ended (complete)', t([])), false);
+});
+
+test('Poller: gate refusing "ended" still reads verify for the end reason and the final step results', async () => {
+  const done = top({ runner: { elevation: { state: 'ended', reason: 'complete' } }, seq: { pointer: null } });
+  done.items.forEach((it) => { it.run = { state: 'done', rc: 0 }; });
+  const ups = [];
+  const p = new M.Poller({
+    gate: async () => { const e = new Error('refused'); e.status = 403; e.data = { refused: 'ended' }; throw e; },
+    verify: async () => done,
+    onUpdate: (u) => ups.push(u),
+  });
+  assert.strictEqual(await p.tick(), null);
+  assert.strictEqual(p.reason, 'ended (complete)');
+  assert.strictEqual(ups[0].top, done, 'onUpdate got the fresh top');
+  assert.strictEqual(M.cleanComplete(p.reason, ups[0].top), true);
+});
+
+test('Poller: gate refusing "ended" while verify still says elevated (or fails) keeps the gate reason', async () => {
+  const live = top({ runner: { elevation: { state: 'elevated', device: 'dev1' } } });
+  const gate = async () => { const e = new Error('refused'); e.status = 403; e.data = { refused: 'ended' }; throw e; };
+  const a = new M.Poller({ gate, verify: async () => live });
+  assert.strictEqual(await a.tick(), null);
+  assert.strictEqual(a.reason, 'ended');
+  const b = new M.Poller({ gate, verify: async () => { throw new Error('boom'); } });
+  assert.strictEqual(await b.tick(), null);
+  assert.strictEqual(b.reason, 'ended');
+});
