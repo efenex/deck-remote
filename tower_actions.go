@@ -7,7 +7,7 @@ package main
 // the tower checkout, so the phone cannot drift from the laptop; the result is cached on the
 // (overview.json, journal.jsonl) mtimes.
 //
-// WRITE: POST /api/rc/tower/act {op, id[, kind]} behind authAct (act-cap device token +
+// WRITE: POST /api/rc/tower/act {op, id[, kind][, not_before]} behind authAct (act-cap device token +
 // Tailscale identity). The ONLY writer is `python3 -I <root>/scripts/journal.py add …` with
 // the same argv the TUI uses (tower_tui.Actions); nothing here touches journal.jsonl or
 // state/. Every op is validated against the CURRENT model (kind/id must exist there and be
@@ -50,11 +50,27 @@ func (c config) towerRootDir() string {
 
 // towerModel is the cached tower_model.py output plus an index of its items.
 type towerModel struct {
-	mu    sync.Mutex
-	key   string // "<overview mtime>|<journal mtime/size>"
-	raw   []byte
-	items map[string]map[string]any // "kind:id" -> item
-	secs  map[string]bool           // section ids
+	mu  sync.Mutex
+	key string // "<overview mtime>|<journal mtime/size>"
+	raw []byte
+	idx *towerIndex
+
+	// backlog request ids journaled from here recently (guarded by server.towerActMu): the
+	// overview may not show the new open request until tower regenerates it, and a second
+	// tap in that window must not journal a second action for the same task.
+	recentBacklog map[string]time.Time
+}
+
+const towerBacklogRecent = 15 * time.Minute
+
+// towerIndex is what handleTowerAct validates against: the model's items and sections, plus
+// the overview's BACKLOG rows and the request ids that are still open (tower_model.py passes
+// both through from overview.json; an older tower has neither, and the index is then empty).
+type towerIndex struct {
+	items    map[string]map[string]any // "kind:id" -> item
+	secs     map[string]bool           // section ids
+	backlog  map[string]bool           // backlog task ids
+	openReqs map[string]bool           // open request ids (model request items + overview requests)
 }
 
 func fileStamp(path string) string {
@@ -66,14 +82,14 @@ func fileStamp(path string) string {
 }
 
 // model returns the model JSON, regenerating it only when overview.json or journal.jsonl moved.
-func (s *server) towerModelJSON(ctx context.Context) ([]byte, map[string]map[string]any, map[string]bool, error) {
+func (s *server) towerModelJSON(ctx context.Context) ([]byte, *towerIndex, error) {
 	m := &s.towerM
 	root := s.cfg.towerRootDir()
 	key := fileStamp(s.cfg.towerOverview) + "|" + fileStamp(filepath.Join(root, "journal.jsonl"))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.raw != nil && m.key == key {
-		return m.raw, m.items, m.secs, nil
+		return m.raw, m.idx, nil
 	}
 	script := s.cfg.towerModelScript
 	if script == "" {
@@ -83,7 +99,7 @@ func (s *server) towerModelJSON(ctx context.Context) ([]byte, map[string]map[str
 	defer cancel()
 	out, err := exec.CommandContext(cctx, "python3", "-I", script, "--root", root, "--file", s.cfg.towerOverview).Output()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("tower_model.py: %w", err)
+		return nil, nil, fmt.Errorf("tower_model.py: %w", err)
 	}
 	var doc struct {
 		Error    string `json:"error"`
@@ -91,24 +107,39 @@ func (s *server) towerModelJSON(ctx context.Context) ([]byte, map[string]map[str
 			ID    string           `json:"id"`
 			Items []map[string]any `json:"items"`
 		} `json:"sections"`
+		Backlog []struct {
+			ID string `json:"id"`
+		} `json:"backlog"`
+		OpenRequests []string `json:"open_requests"`
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
-		return nil, nil, nil, fmt.Errorf("tower_model.py output: %w", err)
+		return nil, nil, fmt.Errorf("tower_model.py output: %w", err)
 	}
 	if doc.Error != "" {
-		return nil, nil, nil, fmt.Errorf("%s", doc.Error)
+		return nil, nil, fmt.Errorf("%s", doc.Error)
 	}
-	items, secs := map[string]map[string]any{}, map[string]bool{}
+	idx := &towerIndex{items: map[string]map[string]any{}, secs: map[string]bool{}, backlog: map[string]bool{}, openReqs: map[string]bool{}}
 	for _, sec := range doc.Sections {
-		secs[sec.ID] = true
+		idx.secs[sec.ID] = true
 		for _, it := range sec.Items {
 			k, _ := it["kind"].(string)
 			id, _ := it["id"].(string)
-			items[k+":"+id] = it
+			idx.items[k+":"+id] = it
+			if st, _ := it["status"].(string); k == "request" && st != "done" {
+				idx.openReqs[id] = true
+			}
 		}
 	}
-	m.key, m.raw, m.items, m.secs = key, out, items, secs
-	return out, items, secs, nil
+	for _, b := range doc.Backlog {
+		if b.ID != "" {
+			idx.backlog[b.ID] = true
+		}
+	}
+	for _, id := range doc.OpenRequests {
+		idx.openReqs[id] = true
+	}
+	m.key, m.raw, m.idx = key, out, idx
+	return out, idx, nil
 }
 
 func (m *towerModel) invalidate() {
@@ -124,7 +155,7 @@ func (s *server) handleTowerModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t0 := time.Now()
-	raw, _, _, err := s.towerModelJSON(r.Context())
+	raw, _, err := s.towerModelJSON(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "error": err.Error()})
 		return
@@ -197,6 +228,33 @@ func (s *server) pickArgvs(it map[string]any) [][]string {
 	}
 }
 
+// BACKLOG actions (tower overview-backlog): each journals one open request record that tower
+// acts on, the same kind of record pickArgvs writes for a suggestion (`--kind request --to open
+// --by operator`), then wakes tower best-effort. The request ids and data are tower's contract:
+// pick-backlog-/pick-defer-/pick-drop-<slug(task)>, data {"task"[, "not_before"]}.
+var backlogReqPrefix = map[string]string{"backlog_start": "pick-backlog-", "backlog_defer": "pick-defer-", "backlog_drop": "pick-drop-"}
+
+// backlogReqIDs: every request id a backlog action may write for this task; one of them
+// already open means tower has the task queued, so a second action is refused.
+func backlogReqIDs(task string) []string {
+	return []string{"pick-backlog-" + towerSlug(task), "pick-defer-" + towerSlug(task), "pick-drop-" + towerSlug(task)}
+}
+
+// notBeforeRe is the only not_before shape the tab sends: a date at 08:00 UTC.
+var notBeforeRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T08:00:00Z$`)
+
+func (s *server) backlogArgvs(op, task, notBefore string) [][]string {
+	rid := backlogReqPrefix[op] + towerSlug(task)
+	data := map[string]string{"task": task}
+	if op == "backlog_defer" {
+		data["not_before"] = notBefore
+	}
+	return [][]string{
+		s.journalArgv("--kind", "request", "--id", rid, "--to", "open", "--by", "operator", "--data", jsonStr(data)),
+		append([]string{s.cfg.bin}, adeckArgs(s.cfg.profile, "session", "send", "--no-wait", s.cfg.towerSession, "[tui] queued request "+rid)...),
+	}
+}
+
 func (s *server) argvDismiss(id string) []string {
 	return s.journalArgv("--kind", "suggest", "--id", id, "--to", "dismissed", "--by", "operator")
 }
@@ -222,9 +280,10 @@ func (s *server) towerRun(argv []string) (int, string) {
 }
 
 type towerActReq struct {
-	Op   string `json:"op"` // fold | unfold | close | pick | dismiss
-	Kind string `json:"kind"`
-	ID   string `json:"id"`
+	Op        string `json:"op"` // fold | unfold | close | pick | dismiss | backlog_start | backlog_defer | backlog_drop
+	Kind      string `json:"kind"`
+	ID        string `json:"id"`
+	NotBefore string `json:"not_before"` // backlog_defer only: YYYY-MM-DDT08:00:00Z
 }
 
 // POST /api/rc/tower/act — see the file comment. Gated by authAct.
@@ -243,11 +302,12 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 	// tap already changed (the suggestion is gone), not pass validation twice.
 	s.towerActMu.Lock()
 	defer s.towerActMu.Unlock()
-	_, items, secs, err := s.towerModelJSON(r.Context())
+	_, idx, err := s.towerModelJSON(r.Context())
 	if err != nil {
 		httpError(w, http.StatusBadGateway, "overview unavailable: "+err.Error())
 		return
 	}
+	items, secs := idx.items, idx.secs
 	var steps [][]string
 	var wake bool // last step is a best-effort wake: its failure does not fail the action
 	switch req.Op {
@@ -263,8 +323,12 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 			if it == nil {
 				it = items["request:"+req.ID]
 			}
+			// an open suggestion folds like an ask (same fold record, keyed by the suggestion id)
+			if it == nil && items["suggest:"+req.ID] != nil {
+				it = map[string]any{"fold_ok": true}
+			}
 			if it == nil || it["fold_ok"] != true {
-				httpError(w, http.StatusNotFound, "not a foldable open ask/request in the current overview")
+				httpError(w, http.StatusNotFound, "not a foldable open ask/request/suggestion in the current overview")
 				return
 			}
 		}
@@ -292,6 +356,31 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 		} else {
 			steps = [][]string{s.argvDismiss(req.ID)}
 		}
+	case "backlog_start", "backlog_defer", "backlog_drop":
+		if !idx.backlog[req.ID] {
+			httpError(w, http.StatusNotFound, "task not in the current BACKLOG")
+			return
+		}
+		for _, rid := range backlogReqIDs(req.ID) {
+			if at, ok := s.towerM.recentBacklog[rid]; idx.openReqs[rid] || (ok && time.Since(at) < towerBacklogRecent) {
+				httpError(w, http.StatusConflict, "already queued with tower ("+rid+")")
+				return
+			}
+		}
+		if req.Op == "backlog_defer" {
+			if !notBeforeRe.MatchString(req.NotBefore) {
+				httpError(w, http.StatusBadRequest, "not_before must be YYYY-MM-DDT08:00:00Z")
+				return
+			}
+			if _, err := time.Parse(time.RFC3339, req.NotBefore); err != nil {
+				httpError(w, http.StatusBadRequest, "not_before: "+err.Error())
+				return
+			}
+		} else if req.NotBefore != "" {
+			httpError(w, http.StatusBadRequest, "not_before is for backlog_defer only")
+			return
+		}
+		steps, wake = s.backlogArgvs(req.Op, req.ID, req.NotBefore), true
 	default:
 		httpError(w, http.StatusBadRequest, "unknown op")
 		return
@@ -317,6 +406,17 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.towerM.invalidate()
+	if p := backlogReqPrefix[req.Op]; p != "" {
+		if s.towerM.recentBacklog == nil {
+			s.towerM.recentBacklog = map[string]time.Time{}
+		}
+		for rid, at := range s.towerM.recentBacklog {
+			if time.Since(at) >= towerBacklogRecent {
+				delete(s.towerM.recentBacklog, rid)
+			}
+		}
+		s.towerM.recentBacklog[p+towerSlug(req.ID)] = time.Now()
+	}
 	s.towerLog(map[string]any{"action": "act", "op": req.Op, "kind": req.Kind, "id": req.ID, "allowed": true, "ok": true, "device": device, "login": tsLogin(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "op": req.Op, "id": req.ID, "msg": msg})
 }
@@ -326,7 +426,7 @@ func (s *server) warmTower() {
 	if s.tower == nil {
 		return
 	}
-	if _, _, _, err := s.towerModelJSON(context.Background()); err != nil {
+	if _, _, err := s.towerModelJSON(context.Background()); err != nil {
 		log.Printf("tower: warm model: %v", err)
 	}
 }

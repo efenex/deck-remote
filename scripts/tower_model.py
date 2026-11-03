@@ -48,6 +48,10 @@ def main():
     def blocks(text):
         return tt.split_detail(text or "")
 
+    ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
+    # overview-backlog: suggested[].folded (a suggestion folds like an ask). An older tower has no flag.
+    sug_folded = {s.get("id"): bool(s.get("folded")) for s in (ov.get("suggested") or []) if isinstance(s, dict)}
+
     sections = []
     for n, (sid, title, items, folded) in enumerate(m.visible(), 1):
         hdr = m.header_item(n, sid, title, items, folded)
@@ -86,6 +90,8 @@ def main():
             elif k == "suggest":
                 o.update({"title": it["title"], "meta": it["meta"], "prompt": it["prompt"], "task": it.get("task"),
                           "why_blocks": blocks(it["why"]), "action_blocks": blocks(it["action"])})
+                if not o.get("folded") and sug_folded.get(it["id"]):
+                    o["folded"] = {"since": None}
             else:
                 o["body"] = [blocks(b) for b in it["body"] if b]
             out_items.append(o)
@@ -95,9 +101,33 @@ def main():
     for name, (fg256, _fg8, flags) in tt.PALETTE.items():
         pal[name] = {"fg": xterm_hex(fg256), "dim": "d" in flags, "bold": "b" in flags, "underline": "u" in flags}
     legend = [{"status": s, "glyph": tt.STATUS[s][0], "style": tt.STATUS[s][1], "label": label} for s, label in tt.STATUS_LEGEND]
-    print(json.dumps({"header": m.header(), "generated_at": m.o.get("generated_at"), "sections": sections,
-                      "palette": pal, "legend": legend, "gaq_stale": bool((m.o.get("ga_queue") or {}).get("stale"))}))
+    out = {"header": m.header(), "generated_at": m.o.get("generated_at"), "sections": sections,
+           "palette": pal, "legend": legend, "gaq_stale": bool((m.o.get("ga_queue") or {}).get("stale"))}
+    out.update(backlog_extras(ov))
+    print(json.dumps(out))
     return 0
+
+
+DONE_REQ = {"done", "closed", "dismissed", "cancelled", "canceled", "failed", "dropped"}
+
+
+def backlog_extras(ov):
+    """overview-backlog keys passed through from overview.json for the Tower tab's BACKLOG section.
+    Absent keys (an older tower) are simply left out: the tab then shows no section."""
+    out = {}
+    bl = ov.get("backlog")
+    if isinstance(bl, list):
+        out["backlog"] = [b for b in bl if isinstance(b, dict) and isinstance(b.get("id"), str) and b["id"]]
+    c = ov.get("counts")
+    if isinstance(c, dict):
+        cc = {k: c[k] for k in ("backlog", "suggested", "suggested_folded") if k in c}
+        if cc:
+            out["counts"] = cc
+    reqs = ov.get("requests")
+    if isinstance(reqs, list):
+        out["open_requests"] = [r["id"] for r in reqs if isinstance(r, dict) and isinstance(r.get("id"), str)
+                                and str(r.get("status") or "open").lower() not in DONE_REQ]
+    return out
 
 
 if __name__ == "__main__":

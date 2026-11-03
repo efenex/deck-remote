@@ -48,3 +48,47 @@ test('phone: offline refresh feedback, transcript failure and resume layout reco
   assert.equal(await page.locator('#sheet').evaluate(el => el.style.height), '');
   assert.deepEqual(errors, []);
 });
+
+test('phone: Tower BACKLOG section, defer picker and the act payload', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
+  const browser = await launchChrome();
+  t.after(() => browser.close());
+  const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
+  const page = await ctx.newPage(); const errors = []; const posts = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('dialog', d => d.accept());
+  const gen = new Date().toISOString();
+  const backlog = [
+    { id: 'T-42.fix_Thing', title: 'Fix the thing', status: 'backlog', age_days: 12, goal: 'g-home', deps_open: ['T-7'], not_before: null },
+    { id: 'T-43', title: 'Later', status: 'backlog', age_days: 2, goal: 'g-x', deps_open: [], not_before: '2026-11-20T08:00:00Z' },
+  ];
+  await page.route('**/api/rc/tower**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/act')) { posts.push(route.request().postDataJSON()); return route.fulfill({ json: { ok: true, msg: 'queued → tower' } }); }
+    const data = path.endsWith('/model') ? { enabled: true, actions: true, model: { header: 'TOWER', generated_at: gen, sections: [], palette: {}, legend: [], backlog, counts: { backlog: 2 } } } :
+      path.endsWith('/whoami') ? { actions_enabled: true, act: true } : { enabled: true, overview: { generated_at: gen, counts: {} } };
+    return route.fulfill({ json: data });
+  });
+  await openApp(page, base + '/?token=fake');
+  await page.click('.tab[data-tab="tower"]');
+  const head = page.locator('.tsechead.tbacklog');
+  await head.waitFor();
+  const txt = async l => (await l.textContent()).replace(/\s+/g, ' ');
+  assert.match(await txt(head), /▸ BACKLOG \(2\)/);
+  assert.equal(await page.locator('.tbrow').count(), 0, 'collapsed by default');
+  await head.click();
+  assert.equal(await page.locator('.tbrow').count(), 2);
+  assert.match(await txt(page.locator('.tbrow').first()), /12 d T-42\.fix_Thing · g-home.*Fix the thing.*waits on T-7/);
+  await page.locator('.tbrow').first().getByRole('button', { name: 'Defer…' }).click();
+  const date = page.locator('.tbrow input.tdate');
+  const tomorrow = await page.evaluate(() => window.DeckBacklog.tomorrow());
+  assert.equal(await date.inputValue(), tomorrow);
+  await date.fill('2026-12-01');
+  await page.locator('.tbrow').first().getByRole('button', { name: 'Defer', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.tbrow').textContent.includes('queued with tower'));
+  assert.deepEqual(posts, [{ op: 'backlog_defer', id: 'T-42.fix_Thing', not_before: '2026-12-01T08:00:00Z' }]);
+  const box = await page.locator('.tbrow').first().boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390, 'row fits the phone width');
+  await page.screenshot({ path: process.env.E2E_SHOT || '/dev/null' }).catch(() => {});
+  assert.deepEqual(errors, []);
+});
