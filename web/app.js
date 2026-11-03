@@ -1807,6 +1807,17 @@
     sheet.style.top = kb ? Math.max(0, vv.offsetTop) + 'px' : '';
     sheet.style.height = kb ? Math.max(0, vv.height) + 'px' : '';
     sheet.style.bottom = kb ? 'auto' : '';
+    // The inline top above is only right while iOS's pan and the last
+    // visualViewport event agree; when they do not the whole sheet is painted
+    // too high or low (clock over the title, list under the composer, caret
+    // one line below its text). Measure where it is actually painted against
+    // the painted top of the visible area (same frame: see visibleTop) and
+    // correct once. Skipped while a swipe/slide transform is on the sheet.
+    if (kb && getComputedStyle(sheet).transform === 'none') {
+      const want = DeckViewport.sheetTop(parseFloat(sheet.style.top) || 0, sheet.getBoundingClientRect().top,
+        DeckViewport.visibleTop(vv, document.documentElement.getBoundingClientRect().top));
+      if (want !== (parseFloat(sheet.style.top) || 0)) sheet.style.top = want + 'px';
+    }
     // Snap to the tail only when the keyboard appears (the thread shrinks); on
     // dismiss the thread just grows, and snapping would throw away the scroll
     // position that dragging the thread (which blurs the composer) was after.
@@ -1815,10 +1826,27 @@
       if (convo) convo.scrollTop = convo.scrollHeight;
     }
   }
+  // iOS pans/resizes in stages and does not always fire a final visualViewport
+  // event once the keyboard has settled, so re-derive the geometry a few times
+  // after every trigger, then re-seat the caret (WebKit draws it from its own
+  // geometry; after a late pan it sat one line below the text).
+  let settleTimers = [];
+  function settleViewport() {
+    applyViewport();
+    settleTimers.forEach(clearTimeout);
+    settleTimers = [100, 300, 600].map((ms) => setTimeout(() => {
+      applyViewport();
+      const ta = document.activeElement;
+      if (ms === 600 && ta && ta.id === 'composerInput' && document.documentElement.classList.contains('kb')) {
+        try { ta.setSelectionRange(ta.selectionStart, ta.selectionEnd); } catch (e) { /* not a text field */ }
+      }
+    }, ms));
+  }
   document.addEventListener('focusout', () => setTimeout(applyViewport, 0));
-  document.addEventListener('focusin', applyViewport);
+  document.addEventListener('focusin', settleViewport);
+  window.addEventListener('scroll', applyViewport, { passive: true });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', applyViewport);
+    window.visualViewport.addEventListener('resize', settleViewport);
     window.visualViewport.addEventListener('scroll', applyViewport);
   }
 
@@ -1837,7 +1865,8 @@
       'screen ' + screen.width + 'x' + screen.height + ' dpr ' + devicePixelRatio,
       '100lvh ' + r(lvh.getBoundingClientRect().height) + ' (want = screen ' + screen.height + ')',
       'innerH ' + innerHeight + ' docClientH ' + document.documentElement.clientHeight +
-        ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) : 'none'),
+        ' vv ' + (vv ? r(vv.height) + ' off ' + r(vv.offsetTop) + ' pageTop ' + r(vv.pageTop) : 'none') +
+        ' scrollY ' + r(scrollY),
       'safe top ' + ps.paddingTop + ' bottom ' + ps.paddingBottom,
       'standalone ' + matchMedia('(display-mode: standalone)').matches + ' navStandalone ' + !!navigator.standalone,
       'kb ' + document.documentElement.classList.contains('kb') + ' (standalone ' + isStandalone() + ')' +
