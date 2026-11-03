@@ -17,7 +17,7 @@ const SHELL = [
   '/index.html',
   '/theme.js?v=37',
   '/version.js?v=37',
-  '/viewport.js?v=37',
+  '/viewport.js?v=39',
   '/pulse.js?v=37',
   '/runbang.js?v=48',
   '/runner.js?v=48',

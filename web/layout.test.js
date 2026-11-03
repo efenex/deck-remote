@@ -210,19 +210,21 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
   const vm = require('node:vm');
   const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   const start = js.indexOf('function applyViewport()');
-  const source = js.slice(start, js.indexOf("document.addEventListener('focusout'", start));
+  const source = js.slice(start, js.indexOf('// iOS pans/resizes in stages', start));
   const classes = new Set(['kb']);
-  const sheet = { style: {} };
-  const vv = { height: 449, offsetTop: 50, scale: 1 };
+  let paintShift = 0; // how far iOS paints the sheet from where its inline top says
+  let docShift = 0;   // how far iOS has panned the whole document (html rect top = -docShift)
+  const sheet = { style: {}, getBoundingClientRect: () => ({ top: (parseFloat(sheet.style.top) || 0) + paintShift - docShift }) };
+  const vv = { height: 449, offsetTop: 50, pageTop: 50, scale: 1 };
   const document = {
     activeElement: { matches: () => true },
-    documentElement: { clientHeight: 793, classList: {
+    documentElement: { clientHeight: 793, getBoundingClientRect: () => ({ top: -docShift }), classList: {
       contains: k => classes.has(k),
       toggle: (k, on) => on ? classes.add(k) : classes.delete(k),
     } },
   };
   const ctx = { document, window: { visualViewport: vv, innerHeight: 447 },
-    DeckViewport: require('./viewport.js'), $: sel => sel === '#sheet' ? sheet : null };
+    DeckViewport: require('./viewport.js'), getComputedStyle: () => ({ transform: 'none' }), $: sel => sel === '#sheet' ? sheet : null };
   const apply = () => vm.runInNewContext(source + '\napplyViewport();', ctx);
   apply();
   assert.deepEqual(sheet.style, { top: '50px', height: '449px', bottom: 'auto' });
@@ -230,8 +232,22 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
   apply();
   assert.ok(classes.has('kb'));
   assert.equal(sheet.style.height, '449px');
-  vv.offsetTop = 80; apply(); // viewport pan uses the same coordinate space
+  vv.offsetTop = 80; vv.pageTop = 80; apply(); // viewport pan uses the same coordinate space
   assert.equal(sheet.style.top, '80px');
+  // iOS paints the sheet 58px higher than its inline top says (clock over the
+  // title, list showing under the composer): the measured error is corrected.
+  paintShift = -58; apply();
+  assert.equal(sheet.style.top, '138px');
+  paintShift = 0;
+  // REGRESSION (iPhone overlay 2026-11-02 23:02Z): iOS shifted the whole document up by
+  // offsetTop (html top -344); inline top = offsetTop already paints at 0, and the sheet
+  // must NOT be moved to 2 x offsetTop (688, painted 344 low, composer under the keyboard).
+  vv.offsetTop = 344; vv.pageTop = 344; docShift = 344; apply();
+  assert.equal(sheet.style.top, '344px');
+  assert.equal(sheet.getBoundingClientRect().top, 0);
+  sheet.style.top = '688px'; apply(); // recovers from the state the phone showed
+  assert.equal(sheet.style.top, '344px');
+  docShift = 0; vv.pageTop = 0;
   vv.height = 793; vv.offsetTop = 0; apply();
   assert.ok(!classes.has('kb'));
   assert.deepEqual(sheet.style, { top: '', height: '', bottom: '' });
@@ -269,4 +285,14 @@ test('doc viewer tables (real design-all report): wrapper scrolls, table is cont
   assert.doesNotMatch(cell, /anywhere|break-all/);
   assert.doesNotMatch(rule('  .md-table th'), /nowrap/);
   assert.match(css, /@media \(max-width:480px\)\{\.md-table th,\.md-table td\{padding:4px 6px\}\}/);
+});
+
+test('keyboard settles in stages: focus/vv-resize re-derive the sheet a few times and re-seat the caret; window scroll re-applies', () => {
+  const js = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
+  const f = js.slice(js.indexOf('function settleViewport()'), js.indexOf('// Temporary layout readout'));
+  assert.match(f, /\[100, 300, 600\]/);
+  assert.match(f, /setSelectionRange\(ta\.selectionStart, ta\.selectionEnd\)/);
+  assert.match(f, /addEventListener\('focusin', settleViewport\)/);
+  assert.match(f, /visualViewport\.addEventListener\('resize', settleViewport\)/);
+  assert.match(f, /window\.addEventListener\('scroll', applyViewport/);
 });
