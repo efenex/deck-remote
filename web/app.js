@@ -2606,11 +2606,12 @@
     }
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
+    const images = m.images || (role === 'me' ? DeckThread.photoCount(content) : 0);
     // A phone send the target filed as a peer message (server: claimEchoes):
     // the transcript holding it is the proof it landed.
-    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images: m.images || 0, origin: 'phone', status: 'delivered' };
+    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images, origin: 'phone', status: 'delivered' };
     // hist: from the transcript, so a fresh history page may replace it.
-    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images: m.images || 0 };
+    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.

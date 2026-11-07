@@ -260,6 +260,67 @@ test('turnKey: image-only prompts differ by image count, text prompts are unchan
   assert.strictEqual(turnKey({ role: 'me', content: 'hi', images: 0 }), turnKey({ role: 'me', content: 'hi' }));
 });
 
+test('photo echo reconciles on reopen instead of appearing after newer replies', () => {
+  const caption = 'buttons went missing';
+  const echo = me(caption, { images: 2, ts: 1000, status: 'delivered', queued: false });
+  const photo = h('me', caption + ' @/project/.agentdeck-images/1000-0-photo-a.jpg @/project/.agentdeck-images/1000-1-photo-b.jpg', 1001);
+  const fresh = [h('reply', 'earlier', 900), photo, h('reply', 'newer', 2400)];
+  assert.deepEqual(mergeFreshHistory(fresh, [echo]), fresh);
+});
+
+test('photo echo adopts transcript identity and moves before newer replies on tail reconciliation', () => {
+  const echo = me('look', { images: 2, ts: 1000, status: 'delivered', queued: false });
+  const photo = h('me', 'look\n@/project/.agentdeck-images/1000-0-photo-a.jpg\n@/project/.agentdeck-images/1000-1-photo-b.jpg', 1001);
+  const recent = h('reply', 'newer', 2400);
+  const conv = [h('reply', 'earlier', 900), recent, echo];
+  assert.equal(promoteDelivered(conv, [photo, recent]), 1);
+  assert.equal(echo.hist, true);
+  assert.equal(echo.ts, photo.ts);
+  assert.deepEqual(conv.map(e => e.ts), [900, 1001, 2400]);
+  assert.deepEqual(newTailTurns(conv, [photo, recent]), []);
+  assert.equal(promoteDelivered(conv, [photo, recent]), 0);
+});
+
+test('photo matching is count-checked, time-bounded, and restricted to user transport suffixes', () => {
+  const content = 'look @/project/.agentdeck-images/1000-0-photo-a.jpg';
+  for (const row of [
+    h('me', 'look', 1001), // plain text must not claim a photo
+    h('me', content + ' mentioned in prose', 1001),
+    h('me', 'look @/project/1000-0-photo-a.jpg', 1001),
+    h('me', content, 10), // old identical caption
+    { ...h('me', content, 1001), images: 2 }, // contradictory native count
+    h('reply', content, 1001),
+    { ...h('peer', content, 1001), origin: 'peer:someone' },
+    h('me', 'different @/project/.agentdeck-images/1000-0-photo-a.jpg', 1001),
+  ]) {
+    const echo = me('look', { images: 1, ts: 1000 });
+    assert.equal(promoteDelivered([echo], [row]), 0, JSON.stringify(row));
+    // Avoid the separate retirement rule for delivered echoes outside the page.
+    assert.ok(mergeFreshHistory([row], [echo]).includes(echo));
+  }
+  const textOnly = me('look', { ts: 1000 });
+  assert.equal(promoteDelivered([textOnly], [h('me', content, 1001)]), 0);
+});
+
+test('same-caption uploads retain distinct paths and each transcript row claims only one echo', () => {
+  for (const images of [0, 2]) {
+    const conv = [me('look', { images: 2, ts: 1000 }), me('look', { images: 2, ts: 1001 })];
+    const first = { ...h('me', 'look @/p/.agentdeck-images/1000-0-a.jpg @/p/.agentdeck-images/1000-1-b.jpg', 1002), images };
+    const second = { ...h('me', 'look @/p/.agentdeck-images/2000-0-c.jpg @/p/.agentdeck-images/2000-1-d.jpg', 1003), images };
+    assert.equal(promoteDelivered(conv, [first]), 1);
+    assert.equal(conv[0].images, 2, 'native image blocks and refs are not added together');
+    assert.equal(promoteDelivered(conv, [first]), 0);
+    assert.equal(conv[1].status, 'sent');
+    assert.equal(promoteDelivered(conv, [first, second]), 1);
+    assert.notEqual(turnKey(conv[0]), turnKey(conv[1]));
+    assert.deepEqual(newTailTurns(conv, [first, second]), []);
+    assert.deepEqual(trimOverlap([first, second], [second]), [first]);
+  }
+  const caption = 'Please look at the attached photos.';
+  const echo = me(caption, { images: 1, ts: 1000 });
+  assert.equal(promoteDelivered([echo], [h('me', caption + ' @/p/.agentdeck-images/1000-0-a.png', 1001)]), 1);
+});
+
 test('imagesLabel pluralises', () => {
   assert.match(imagesLabel(1), /1 image$/);
   assert.match(imagesLabel(3), /3 images$/);
