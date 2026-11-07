@@ -68,7 +68,14 @@ test('composer: keyboard geometry survives focus transfer and sends once per tap
     const vv = window.visualViewport; vv.offsetTop = 0; vv.height = innerHeight; vv.dispatchEvent(new Event('resize'));
   });
   assert.equal(await page.locator('#sheet').evaluate(el => el.style.height), '');
+  // Closing while keyboard metrics are still short must restore navigation
+  // immediately, without waiting for another visualViewport event.
+  await page.evaluate(() => {
+    const vv = window.visualViewport; vv.height = 449; vv.dispatchEvent(new Event('resize'));
+  });
   await page.click('#sheetBack');
   assert.equal(await page.locator('#app').evaluate(el => el.inert), false);
+  assert.equal(await page.locator('html').evaluate(el => el.classList.contains('kb')), false);
+  assert.equal(await page.locator('.tabbar').isVisible(), true);
   assert.deepEqual(errors, []);
 });
