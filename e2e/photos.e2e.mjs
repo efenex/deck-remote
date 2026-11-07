@@ -2,6 +2,45 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
 
+test('delivered photo caption stays before later replies after reopening', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
+  const browser = await launchChrome(); t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
+  withDefaults(page.context());
+  const sent = Math.floor(Date.now() / 1000);
+  let messages = [{ role: 'reply', content: 'Before the photos', ts: sent - 60 }];
+  await page.route('**/api/rc/history?*', r => r.fulfill({ json: { messages, hasMore: false } }));
+  await page.route('**/api/rc/activity?*', r => r.fulfill({ json: { working: true } }));
+  await page.route('**/api/rc/attention?*', r => r.fulfill({ json: { pending: false } }));
+  await page.route('**/api/rc/ask*', r => r.fulfill({ status: 202, json: { requestId: 'photos-order', sendId: 'send-order', status: 'delivered', images: 2 } }));
+  await openApp(page, base + '/?token=fake');
+  await page.click('.card[data-id="s1"]');
+  await page.getByText('Before the photos', { exact: true }).waitFor();
+  const png = Buffer.from(await page.evaluate(() => {
+    const c = document.createElement('canvas'); c.width = 8; c.height = 8;
+    return c.toDataURL('image/png').split(',')[1];
+  }), 'base64');
+  const file = { name: 'fixture.png', mimeType: 'image/png', buffer: png };
+  await page.locator('#photoLibrary').setInputFiles([file, file]);
+  await page.waitForFunction(() => document.querySelectorAll('.photo-preview').length === 2);
+  await page.fill('#composerInput', 'Photo ordering fixture');
+  await page.click('.send-btn');
+  await page.waitForFunction(() => document.querySelectorAll('.photo-preview').length === 0);
+  messages = [...messages,
+    { role: 'user', content: 'Photo ordering fixture @/fixture/.agentdeck-images/1000-0-photo-a.jpg @/fixture/.agentdeck-images/1000-1-photo-b.jpg', ts: sent + 1 },
+    { role: 'reply', content: 'Reply 24 minutes later', ts: sent + 24 * 60 },
+  ];
+  for (let i = 0; i < 2; i++) {
+    await page.click('#sheetBack');
+    await page.click('.card[data-id="s1"]');
+    await page.getByText('Reply 24 minutes later', { exact: true }).waitFor();
+    const text = await page.locator('#convo').innerText();
+    assert.equal(text.split('Photo ordering fixture').length - 1, 1, 'only one photo turn');
+    assert.match(text, /2 images/, 'attachment count survives history replacement');
+    assert.ok(text.indexOf('Photo ordering fixture') < text.indexOf('Reply 24 minutes later'));
+  }
+});
+
 test('phone photos: pick, preview, remove, failed upload, queued send and unsupported harness', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
   const browser = await launchChrome(); t.after(() => browser.close());

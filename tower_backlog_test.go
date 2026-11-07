@@ -98,7 +98,7 @@ STATUS = {"": ("o", "dim"), "suggest": ("*", "st_suggest")}
 STATUS_LEGEND = []
 PALETTE = {}
 def split_detail(t): return [{"k": "p", "t": t}] if t else []
-def run_choices(it): return []
+def run_choices(it): return it.get("run_choices", [])
 class Model:
     def __init__(self, feed, journal):
         self.feed = feed
@@ -110,6 +110,8 @@ class Model:
     def header(self): return "TOWER"
     def header_item(self, n, sid, title, items, folded): return {"count": str(len(items)), "urgent": 0, "folded": folded}
     def visible(self):
+        if "model_sections" in self.o:
+            return self.o["model_sections"]
         items = [dict(kind="suggest", id=s["id"], key="suggest:" + s["id"], head=s["id"], attr=0, folded=s.get("folded"), fold_ok=True,
                       confirm_ok=False, bangs=[], copy_text="", status="suggest", title=s["title"], meta="", prompt="", why="", action="")
                  for s in self.o.get("suggested", [])]

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -487,6 +488,88 @@ func TestTowerActReportsJournalFailureAndWakeFailureSeparately(t *testing.T) {
 	w := do(`{"op":"pick","id":"sg_Next.Thing"}`)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "waking tower failed") {
 		t.Fatalf("a failed wake keeps the journaled pick: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Exercise the real bridge against a temporary TUI model, never a live journal.
+func TestTowerModelDetailCommandBoundaries(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	block := func(kind, text string) map[string]any { return map[string]any{"k": kind, "t": text} }
+	inline := "Use `printf ' ! embedded'` then ! echo example  and keep prose together."
+	long := strings.Repeat("Keep this prose intact. ", 8) + "Options: `echo a; echo b`"
+	cases := []struct {
+		name, detail string
+		want         []any
+	}{
+		{"empty", "", []any{}},
+		{"inline", inline, []any{block("p", inline)}},
+		{"backtick-command", "`! echo example`", []any{block("p", "`! echo example`")}},
+		{"long-prose", long, []any{block("p", long)}},
+		{"real-lines", "Before\n! echo one  && echo two ! literal\nAfter\n! echo three", []any{block("p", "Before"), block("cmd", "! echo one  && echo two ! literal"), block("p", "After"), block("cmd", "! echo three")}},
+		{"indented", "  ! echo example\n\t! echo tab", []any{block("p", "! echo example"), block("p", "! echo tab")}},
+		{"bullets", "- ! echo example\n* `! echo code`", []any{block("bullet", "! echo example"), block("bullet", "`! echo code`")}},
+		{"exact-prefix", "!\techo tab\n!echo no-space", []any{block("p", "!\techo tab"), block("p", "!echo no-space")}},
+		{"numbered", "1. ! echo example\n(2) Next", []any{block("item", "1. ! echo example"), block("item", "(2) Next")}},
+		{"gaps-crlf", "\r\nBefore\r\n\r\n\r\n! echo yes  \r\n\r\n", []any{block("p", "Before"), block("gap", ""), block("cmd", "! echo yes")}},
+		{"not-newline", "Before\v! echo example ! echo also-example", []any{block("p", "Before\v! echo example ! echo also-example")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := map[string]any{
+				"kind": "ask", "id": "fixture", "key": "ask:fixture", "head": "Fixture", "attr": "",
+				"folded": nil, "fold_ok": true, "confirm_ok": true, "status": "", "copy_text": tc.detail,
+				"bangs": []string{"! upstream phantom"}, "detail": tc.detail, "items": []string{}, "tag": "", "meta": "",
+			}
+			fixture, err := json.Marshal(map[string]any{"model_sections": []any{[]any{"waiting", "WAITING", []any{item}, false}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := runTowerModelPy(t, string(fixture))
+			got := doc["sections"].([]any)[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+			if !reflect.DeepEqual(got["blocks"], tc.want) {
+				t.Fatalf("blocks = %#v, want %#v", got["blocks"], tc.want)
+			}
+			wantBangs := []any{}
+			for _, b := range tc.want {
+				if b.(map[string]any)["k"] == "cmd" {
+					wantBangs = append(wantBangs, b.(map[string]any)["t"])
+				}
+			}
+			if !reflect.DeepEqual(got["bangs"], wantBangs) {
+				t.Fatalf("copy commands = %#v, want %#v", got["bangs"], wantBangs)
+			}
+		})
+	}
+}
+
+func TestTowerModelItemsCommandsUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	doc := runTowerModelPy(t, `{"model_sections":[["waiting","WAITING",[{
+	 "kind":"ask","id":"fixture","key":"ask:fixture","head":"Fixture","attr":"","folded":null,
+	 "fold_ok":true,"confirm_ok":true,"status":"","copy_text":"","bangs":[],"tag":"","meta":"",
+	 "detail":"! echo detail","items":["! echo runnable","plain item","  ! echo indented"],
+	 "items_meta":[{"bang":true,"run":"local","sig_exp":42,"learnings":["note"]}],
+	 "run_choices":[{"index":0,"sha":"hash","cls":"ro","sig":"valid","ok":true,"why":"safe"}]
+	}],false]]}`)
+	got := doc["sections"].([]any)[0].(map[string]any)["items"].([]any)[0].(map[string]any)
+	want := []any{
+		map[string]any{"k": "cmd", "t": "! echo detail"},
+		map[string]any{"k": "cmd", "t": "! echo runnable", "rb": map[string]any{
+			"index": 0.0, "sha256": "hash", "class": "ro", "sig": "valid", "ok": true, "why": "safe",
+			"run": "local", "sig_exp": 42.0, "learnings": []any{"note"},
+		}},
+		map[string]any{"k": "cmd", "t": "plain item"},
+		map[string]any{"k": "cmd", "t": "  ! echo indented"},
+	}
+	if !reflect.DeepEqual(got["blocks"], want) {
+		t.Fatalf("items command blocks changed: %#v", got["blocks"])
+	}
+	if want := []any{"! echo runnable", "plain item", "! echo indented"}; !reflect.DeepEqual(got["bangs"], want) {
+		t.Fatalf("items copy list changed: %#v", got["bangs"])
 	}
 }
 

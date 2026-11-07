@@ -6,6 +6,26 @@
 (function (root) {
   'use strict';
 
+  // agent-deck appends generated attachment references to the caption. Parse
+  // only that trailing transport suffix, never paths mentioned inside prose.
+  function photoParts(content) {
+    const text = String(content == null ? '' : content).trim();
+    const suffix = /(?:\s+@\/(?:[^\s]+\/)?\.agentdeck-images\/\d+-\d+-[^\s]+\.(?:jpg|jpeg|png))+$/i.exec(text);
+    return suffix ? { caption: text.slice(0, suffix.index).trim(), count: suffix[0].trim().split(/\s+/).length } : null;
+  }
+  function photoCount(content) { const p = photoParts(content); return p ? p.count : 0; }
+
+  // Only a local photo echo may match by caption + attachment count. History
+  // rows retain their full references in turnKey: two different uploads with
+  // the same caption must remain distinct on subsequent polls and paging.
+  function sameEcho(e, f) {
+    if (turnKey(e) === turnKey(f)) return true;
+    if (e.hist || e.role !== 'me' || !e.status || !e.images || f.role !== 'me' || (e.kind || '') !== (f.kind || '')) return false;
+    const p = photoParts(f.content);
+    return !!p && p.count === e.images && (!f.images || f.images === p.count) &&
+      p.caption === String(e.content || '').trim();
+  }
+
   // Identity of a turn for dedup: role, kind and trimmed content. Not ts —
   // live SSE rows carry ms-precision Date.now() stamps, the transcript whole
   // seconds.
@@ -14,7 +34,8 @@
     // Bash-mode rows share a command across runs: their output tells them apart.
     if (t.role === 'bash') return k + '\n' + (t.stdout || '') + '\n' + (t.stderr || '');
     // Image-only prompts have no text: the count keeps two of them distinct.
-    return t.images ? k + '\n' + t.images + 'img' : k;
+    const images = t.images || (t.role === 'me' ? photoCount(t.content) : 0);
+    return images ? k + '\n' + images + 'img' : k;
   }
 
   // The chip under/after a user prompt that carried images.
@@ -82,10 +103,9 @@
       if (e.role === 'me' && e.status === 'delivered' && first && e.ts &&
           e.ts < first.ts - SAME_TURN_SECS) return false;
       if (e.role !== 'me' && e.role !== 'reply') return true;
-      const k = turnKey(e);
       for (let i = fresh.length - 1; i >= 0; i--) {
         const f = fresh[i];
-        if (used.has(i) || turnKey(f) !== k) continue;
+        if (used.has(i) || !sameEcho(e, f)) continue;
         if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
         return false;
@@ -175,19 +195,26 @@
   // Returns how many bubbles changed, including already-delivered SSE echoes.
   function promoteDelivered(conv, tail) {
     const used = new Set();
+    const photos = [];
     let n = 0;
     conv.forEach((e) => {
       if (e.role !== 'me' || (!e.hist && !e.status)) return;
-      const k = turnKey(e);
       for (let i = 0; i < tail.length; i++) {
         const f = tail[i];
-        if (used.has(i) || f.role !== 'me' || turnKey(f) !== k) continue;
+        if (used.has(i) || f.role !== 'me' || !sameEcho(e, f)) continue;
         // Reserve rows already reconciled on an earlier poll, so the same
         // transcript "yes" cannot deliver another queued "yes" next time.
         if (e.hist && e.ts !== f.ts) continue;
         if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
         if (e.hist) return;
+        if (e.images) {
+          // Keep the canonical references for later polls, without losing the
+          // image chip when this transcript represents attachments as text only.
+          e.content = f.content;
+          e.images = f.images || photoCount(f.content) || e.images;
+          photos.push(e);
+        }
         e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
         e.hist = true;
         if (f.ts) e.ts = f.ts;
@@ -195,6 +222,14 @@
         n++;
         return;
       }
+    });
+    // A pre-fix echo may already sit after newer history. Move just the
+    // reconciled photos back before later transcript rows; leave pending sends
+    // and untimestamped notes alone rather than sorting the whole conversation.
+    photos.forEach((e) => {
+      const from = conv.indexOf(e);
+      const to = conv.findIndex((f, i) => i < from && f.hist && f.ts && e.ts && f.ts > e.ts);
+      if (to >= 0) { conv.splice(from, 1); conv.splice(to, 0, e); }
     });
     return n;
   }
@@ -285,7 +320,7 @@
     return 'Not sent: ' + (e.message || 'unknown error');
   }
 
-  const api = { attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  const api = { attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, photoCount, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);

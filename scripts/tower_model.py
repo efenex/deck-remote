@@ -3,16 +3,38 @@
 
   python3 -I scripts/tower_model.py --root <tower checkout> [--file overview.json]
 
-Imports scripts/tower_tui.py from the tower checkout and reuses its own build_items /
-split_detail / section_folds / STATUS / PALETTE, so the phone shows exactly what the TUI
-derives (sections, folds, multiline detail, `! ` lines, status glyphs and colours) and can
-never drift from it. Read-only: it never writes anything (writes go through journal.py,
-see tower_actions.go).
+Imports scripts/tower_tui.py from the tower checkout and reuses its model, section folds,
+STATUS and PALETTE. Detail parsing stays local: only actual lines starting with `! ` are
+commands; prose and inline code are never split heuristically. Read-only: it never writes
+anything (writes go through journal.py, see tower_actions.go).
 """
 import argparse
 import json
 import os
+import re
 import sys
+
+
+_LEAD = re.compile(r"^(?:\(\d{1,2}\)|\([a-z]\)|\d{1,2}[.)]|NEED \d+|Q\d{1,3})\s")
+
+
+def blocks(text):
+    """Keep real lines intact, recognizing commands before stripping indent or bullets."""
+    out = []
+    for raw in (text or "").split("\n"):
+        s = raw.strip()
+        if not s:
+            if out and out[-1]["k"] != "gap":
+                out.append({"k": "gap", "t": ""})
+        elif raw.startswith("! "):
+            out.append({"k": "cmd", "t": "! " + raw[2:].strip()})
+        elif s[:2] in ("- ", "* "):
+            out.append({"k": "bullet", "t": s[2:].lstrip()})
+        else:
+            out.append({"k": "item" if _LEAD.match(s + " ") else "p", "t": s})
+    while out and out[-1]["k"] == "gap":
+        out.pop()
+    return out
 
 
 def xterm_hex(n):
@@ -45,9 +67,6 @@ def main():
         print(json.dumps({"error": m.error}))
         return 0
 
-    def blocks(text):
-        return tt.split_detail(text or "")
-
     ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
 
     sections = []
@@ -63,6 +82,9 @@ def main():
             k = it["kind"]
             if k == "ask":
                 bl = blocks(it["detail"])
+                # Match the TUI's items-first copy list, but never inherit its heuristic detail commands.
+                o["bangs"] = [x.strip() for x in it["items"] if isinstance(x, str) and x.strip()] or [
+                    b["t"] for b in bl if b["k"] == "cmd"]
                 metas = it.get("items_meta") or []
                 # run-bang (deck-remote docs/design/run-bang.md): the TUI's own phase-1 rules per `! ` item, so the
                 # phone's badges and Run offer cannot drift from the laptop's. Only `items` entries carry "rb": a `! `

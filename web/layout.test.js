@@ -223,8 +223,9 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
       toggle: (k, on) => on ? classes.add(k) : classes.delete(k),
     } },
   };
+  let sheetOpen = true;
   const ctx = { document, window: { visualViewport: vv, innerHeight: 447 },
-    DeckViewport: require('./viewport.js'), getComputedStyle: () => ({ transform: 'none' }), $: sel => sel === '#sheet' ? sheet : null };
+    DeckViewport: require('./viewport.js'), getComputedStyle: () => ({ transform: 'none' }), $: sel => sel === '#sheet' && sheetOpen ? sheet : null };
   const apply = () => vm.runInNewContext(source + '\napplyViewport();', ctx);
   apply();
   assert.deepEqual(sheet.style, { top: '50px', height: '449px', bottom: 'auto' });
@@ -251,6 +252,15 @@ test('keyboard layout survives focus moving to Send until the visual viewport ac
   vv.height = 793; vv.offsetTop = 0; apply();
   assert.ok(!classes.has('kb'));
   assert.deepEqual(sheet.style, { top: '', height: '', bottom: '' });
+  // A Tower reply can leave stale, keyboard-sized visualViewport metrics after
+  // blur. No sheet owns that geometry: never hide the tab navigation for it.
+  sheetOpen = false;
+  vv.height = 449;
+  apply();
+  assert.ok(!classes.has('kb'), 'Tower textarea must not enable modal keyboard layout');
+  classes.add('kb'); // closing a composer while the keyboard is still shrinking
+  apply();
+  assert.ok(!classes.has('kb'), 'closing the sheet must clear stale keyboard layout');
 });
 
 test('composer placeholder is just "Message…" (the / button sits beside it; the long form wrapped in the 1-line input)', () => {

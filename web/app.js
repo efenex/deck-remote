@@ -1861,6 +1861,7 @@
     if (sheet) sheet.remove();
     $('#app').inert = false;
     state.openSheetId = null;
+    applyViewport(); // release modal keyboard layout even if iOS omits its final resize
     // remove session deep-link param
     const url = new URL(location.href);
     if (url.searchParams.has('session')) {
@@ -1889,15 +1890,17 @@
   // (phone screenshot 2026-10-24). No hand-tuned offsets anymore.
   function applyViewport() {
     const vv = window.visualViewport;
-    if (!vv) return;
+    const sheet = $('#sheet');
+    // This is the modal composer's layout, not a global keyboard lock. Tower's
+    // inline reply must never hide navigation, even when iOS leaves stale viewport
+    // metrics after dismissal. Closing the sheet also releases this state.
     // Focus can move to Send / a photo control before iOS closes its keyboard.
     // Clearing kb on blur moves the hit target between pointer-down and click.
     // The visual viewport (including the native accessory bar) owns geometry;
     // wait for its resize to restore the full-height sheet.
-    const kb = DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
+    const kb = !!(sheet && vv) && DeckViewport.keyboardUp(vv, window.innerHeight, document.documentElement.clientHeight);
     const was = document.documentElement.classList.contains('kb');
     document.documentElement.classList.toggle('kb', kb);
-    const sheet = $('#sheet');
     if (!sheet) return;
     // top is clamped at 0: iOS pans the layout viewport to reveal the focused
     // input and can report a negative offsetTop, which would slide the sheet
@@ -2603,11 +2606,12 @@
     }
     const role = m.role === 'user' ? 'me' : 'reply';
     const content = role === 'reply' ? cleanReplyContent(m.content) : (m.content || '');
+    const images = m.images || (role === 'me' ? DeckThread.photoCount(content) : 0);
     // A phone send the target filed as a peer message (server: claimEchoes):
     // the transcript holding it is the proof it landed.
-    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images: m.images || 0, origin: 'phone', status: 'delivered' };
+    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images, origin: 'phone', status: 'delivered' };
     // hist: from the transcript, so a fresh history page may replace it.
-    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images: m.images || 0 };
+    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
