@@ -701,6 +701,8 @@
 .tower .tcopy{flex:none;padding:6px 10px;border-radius:calc(8px*var(--round));border:1px solid #3b4261;background:transparent;color:inherit;font-size:12px}
 .tower .tcopy.done{border-color:#9ece6a;color:#9ece6a}
 .tower .treply{display:flex;gap:8px;margin-top:8px}.tower .treply textarea{flex:1;min-height:38px;border-radius:calc(8px*var(--round));border:1px solid #3b4261;background:#16161e;color:inherit;padding:6px 8px;font:inherit;font-size:14px}
+.tower .tdraft{border-color:#e0af68}.tower .tdraft .tdrafttext{margin:6px 0 0;padding:6px 8px;border-radius:calc(8px*var(--round));background:#16161e;font-size:13px;white-space:pre-wrap;word-break:break-word;max-height:30vh;overflow:auto}
+html[data-theme=light] .tower .tdraft .tdrafttext{background:var(--code-bg);color:var(--text)}
 .tower .treply button{flex:none;padding:6px 12px;border-radius:calc(8px*var(--round));border:0;background:#7aa2f7;color:#1a1b26;font-weight:600}
 .tower .tline{margin:4px 12px;font-size:13px;line-height:1.35}.tower .tline .tid{font-size:13px}
 .tower .tfolded{margin:6px 10px}.tower .tfolded>summary,.tower .tfrow>summary{cursor:pointer;font-size:13px;padding:6px 2px}.tower .tfrow{margin-left:6px}
@@ -1014,6 +1016,7 @@ html[data-turns=block] .ts{margin-left:4px}
 <script src="/photos.js?v=42"></script>
 <script src="/network.js?v=45"></script>
 <script src="/backlog.js?v=52"></script>
-<script src="/app.js?v=54"></script>
+<script src="/towerdraft.js?v=55"></script>
+<script src="/app.js?v=55"></script>
 </body>
 </html>

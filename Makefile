@@ -17,7 +17,7 @@ test:
 # machine and a different test times out each run. Slow machine: E2E_TIMEOUT_MS=60000 make e2e.
 .PHONY: e2e e2e-deps
 e2e: e2e-deps
-	cd e2e && node --test --test-concurrency=1 runbang.e2e.mjs pair.e2e.mjs offline.e2e.mjs photos.e2e.mjs composer.e2e.mjs tower-navigation.e2e.mjs
+	cd e2e && node --test --test-concurrency=1 runbang.e2e.mjs pair.e2e.mjs offline.e2e.mjs photos.e2e.mjs composer.e2e.mjs tower-navigation.e2e.mjs tower-draft.e2e.mjs
 
 e2e-deps: e2e/node_modules/.package-lock.json
 
