@@ -528,7 +528,10 @@
         const r = await api('POST', '/api/rc/tower/reply', { ask: askId, text });
         toast('Reply sent', 'tower will journal ask ' + askId + ' as answered (' + ((r && r.requestId) || '') + ')');
         // the draft goes only now, and only if it is still what was sent (more typed meanwhile stays)
-        if ((ta.value || '').trim() === text) { ta.value = ''; tower.drafts.clear(askId); }
+        // (the store, not ta, is the truth: the operator's own fold tap during the POST may have replaced the box)
+        if (tower.drafts.get(askId).trim() === text) tower.drafts.clear(askId);
+        if ((ta.value || '').trim() === text) ta.value = '';
+        $$('#towerList textarea').forEach((t) => { if (t.dataset.ask === askId && (t.value || '').trim() === text) t.value = ''; });
       } catch (e) {
         toast('Reply refused', e.message || String(e)); // the draft stays
       } finally { btn.disabled = false; }
