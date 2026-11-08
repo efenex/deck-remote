@@ -44,7 +44,7 @@ function makeEnv(notifs, seenAt, routes) {
     navigator: { serviceWorker: { addEventListener() {}, register: async () => ({}), ready: new Promise(() => {}) }, clipboard: {} }, location: { href: 'http://x/', origin: 'http://x', search: '', hash: '', pathname: '/' },
     history: { replaceState() {} }, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
     URL, URLSearchParams, EventSource: function () { this.readyState = 1; this.close = () => { this.readyState = 2; }; Promise.resolve().then(() => { if (this.readyState === 1 && this.onopen) this.onopen(); }); }, WebSocket: function () { this.close = () => {}; },
-    DeckNetwork: require('./network.js'), DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), Notification: { permission: 'default' },
+    DeckNetwork: require('./network.js'), DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), DeckDrafts: require('./towerdraft.js'), Notification: { permission: 'default' },
     confirm: () => true, requestAnimationFrame: (f) => f(), AbortController, Date, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Error,
   };
   ctx.window = Object.assign(win, ctx);
@@ -441,4 +441,57 @@ test('Tower tab suggestions: folded ones hide behind "N folded"; Fold posts the 
   const unfold = t.find((n) => /\btbtn\b/.test(n.className || '') && n.textContent === 'Unfold')[0];
   await t.click(unfold);
   assert.deepStrictEqual(t.posts[1], { op: 'unfold', id: 'sg-b' });
+});
+
+// --- Tower reply drafts (G15, towerdraft.js): the real app.js render path ----------------
+
+test('Tower reply draft: typed text survives a refresh (same ask), shows as "Ask closed" when the ask is removed, and is cleared by a successful send', async () => {
+  let asks = ['ask-a', 'ask-b'];
+  const replies = [];
+  const model = () => ({ header: 'TOWER', generated_at: new Date().toISOString(), palette: {}, legend: [], sections: [{ id: 'waiting', title: 'WAITING', count: String(asks.length), urgent: 0, folded: null,
+    items: asks.map((id) => ({ kind: 'ask', id, key: 'ask:' + id, status: 'waiting', blocks: [{ k: 'p', t: 'Q ' + id }], bangs: [] })) }] });
+  const env = makeEnv([], null, (u, opts) => {
+    if (u.startsWith('/api/rc/tower/whoami')) return { actions_enabled: true, act: true };
+    if (u.startsWith('/api/rc/tower/model')) return { enabled: true, actions: true, model: model() };
+    if (u.startsWith('/api/rc/tower/reply')) { replies.push(JSON.parse(opts.body)); return { requestId: 'r1' }; }
+    if (u.startsWith('/api/rc/tower')) return { enabled: true, mtime: 'x', overview: { generated_at: new Date().toISOString(), counts: { waiting: asks.length } } };
+    return undefined;
+  });
+  vm.createContext(env.ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), env.ctx, { filename: 'app.js' });
+  const wait = () => new Promise((r) => setTimeout(r, 100));
+  const find = (pred) => { const out = []; walk(env.els.get('#towerList'), (n) => { if (pred(n)) out.push(n); }); return out; };
+  const boxes = () => find((n) => n.dataset && n.dataset.ask);
+  const text = (n) => { let t = n.textContent || ''; (n.children || []).forEach((c) => { if (c && typeof c === 'object') t += text(c); }); return t; };
+  const refresh = async () => { await env.listeners.get('#towerRefresh').click(); await wait(); };
+  await wait();
+  const a1 = boxes().find((b) => b.dataset.ask === 'ask-a');
+  assert.ok(a1, 'reply box for ask-a');
+  a1.value = 'half-typed reply'; a1._ls.input();
+  await refresh();
+  const a2 = boxes().find((b) => b.dataset.ask === 'ask-a');
+  assert.notStrictEqual(a2, a1, 'the list was rebuilt');
+  assert.strictEqual(a2.value, 'half-typed reply');
+  assert.strictEqual(boxes().find((b) => b.dataset.ask === 'ask-b').value, '');
+  assert.strictEqual(find((n) => /\btdraft\b/.test(n.className || '')).length, 0);
+  // the ask closes: no box for it, the draft is shown (with Copy) instead of dropped
+  asks = ['ask-b'];
+  await refresh();
+  assert.ok(!boxes().some((b) => b.dataset.ask === 'ask-a'));
+  const closed = find((n) => /\btdraft\b/.test(n.className || ''));
+  assert.strictEqual(closed.length, 1);
+  assert.match(text(closed[0]), /Ask closed.*ask-a.*half-typed reply/);
+  assert.ok(find((n) => /\btbtn\b/.test(n.className || '') && n.textContent === 'Copy').length >= 1);
+  // back again: restored into the box; a successful send clears the draft for good
+  asks = ['ask-a', 'ask-b'];
+  await refresh();
+  const a3 = boxes().find((b) => b.dataset.ask === 'ask-a');
+  assert.strictEqual(a3.value, 'half-typed reply');
+  const rb = find((n) => n.textContent === 'Reply')[0];
+  await rb._ls.click(); await wait();
+  assert.deepStrictEqual(replies, [{ ask: 'ask-a', text: 'half-typed reply' }]);
+  assert.strictEqual(a3.value, '');
+  await refresh();
+  assert.strictEqual(boxes().find((b) => b.dataset.ask === 'ask-a').value, '');
+  assert.strictEqual(env.store.get('dr-tower-drafts'), undefined);
 });

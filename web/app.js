@@ -435,7 +435,12 @@
   const tower = { enabled: false, data: null, model: null, mtime: '', act: false, actReason: '', unseen: false, loaded: false, open: new Set(), localFold: new Map(), busy: false, runRo: false, runMut: false, runProg: false, profPower: false, runLocal: new Map(),
     // BACKLOG section (backlog.js): collapsed by default; the row whose defer picker is open;
     // request ids posted from this tab (shown "queued with tower" until the overview has them).
-    backlogOpen: false, backlogDefer: null, backlogQueued: new Set() };
+    backlogOpen: false, backlogDefer: null, backlogQueued: new Set(),
+    // The date typed into the open defer picker (kept across renders), and the reply drafts (G15,
+    // towerdraft.js): per ask id, persisted. renderPending: a refresh deferred while the operator
+    // is typing / mid-tap / sending; replyInFlight: a reply is being confirmed or posted.
+    backlogDeferDate: '', drafts: window.DeckDrafts.createStore((() => { try { return localStorage; } catch (_) { return null; } })()),
+    renderPending: false, replyInFlight: false, ptrDown: false, ptrAt: 0 };
 
   async function initTower() {
     // The overview (counts for the badge) and whoami load concurrently; the badge
@@ -465,7 +470,7 @@
       if (r && r.overview) {
         tower.data = r.overview; tower.mtime = r.mtime || ''; tower.loaded = true;
         renderTowerBadge();
-        if (!tower.model) renderTowerLegacy();
+        if (!tower.model) renderTower();
       } else if (r && r.error && !tower.model) {
         $('#towerList').innerHTML = '<div class="placeholder">' + esc(r.error) + '</div>';
       }
@@ -515,16 +520,70 @@
   async function towerReply(askId, ta, btn) {
     const text = (ta.value || '').trim();
     if (!text) { ta.focus(); return; }
-    if (!confirm('Send this answer to tower for ask "' + askId + '"?\n\n' + text)) return;
-    btn.disabled = true;
+    tower.replyInFlight = true; // no rebuild between the confirm and the answer: ta / btn stay live
     try {
-      const r = await api('POST', '/api/rc/tower/reply', { ask: askId, text });
-      toast('Reply sent', 'tower will journal ask ' + askId + ' as answered (' + ((r && r.requestId) || '') + ')');
-      ta.value = '';
-    } catch (e) {
-      toast('Reply refused', e.message || String(e));
-    } finally { btn.disabled = false; }
+      if (!confirm('Send this answer to tower for ask "' + askId + '"?\n\n' + text)) return;
+      btn.disabled = true;
+      try {
+        const r = await api('POST', '/api/rc/tower/reply', { ask: askId, text });
+        toast('Reply sent', 'tower will journal ask ' + askId + ' as answered (' + ((r && r.requestId) || '') + ')');
+        // the draft goes only now, and only if it is still what was sent (more typed meanwhile stays)
+        // (the store, not ta, is the truth: the operator's own fold tap during the POST may have replaced the box)
+        if (tower.drafts.get(askId).trim() === text) tower.drafts.clear(askId);
+        if ((ta.value || '').trim() === text) ta.value = '';
+        $$('#towerList textarea').forEach((t) => { if (t.dataset.ask === askId && (t.value || '').trim() === text) t.value = ''; });
+      } catch (e) {
+        toast('Reply refused', e.message || String(e)); // the draft stays
+      } finally { btn.disabled = false; }
+    } finally {
+      tower.replyInFlight = false;
+      towerFlush();
+    }
   }
+
+  // One reply box: the textarea comes back with its draft, every keystroke updates the draft store.
+  function towerReplyBox(askId) {
+    const rr = el('div', 'treply');
+    const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
+    ta.dataset.ask = askId;
+    ta.value = tower.drafts.get(askId);
+    ta.addEventListener('input', () => tower.drafts.set(askId, ta.value));
+    const rb = el('button', '', 'Reply');
+    // a tap on Reply must not blur the box first (the blur would let a pending refresh rebuild it)
+    rb.addEventListener('mousedown', (e) => e.preventDefault());
+    rb.addEventListener('click', () => towerReply(askId, ta, rb));
+    rr.append(ta, rb);
+    return rr;
+  }
+
+  // A draft whose ask is gone (closed, or answered elsewhere) is never dropped silently: it shows
+  // here, copyable, until the operator discards it.
+  function towerDraftBox(list) {
+    const gone = window.DeckDrafts.orphans(tower.drafts, window.DeckDrafts.presentAskIds(tower.model, tower.data));
+    gone.forEach((d) => {
+      const card = el('div', 'tcard tdraft');
+      const head = el('div', 'thead'); head.append(el('b', '', 'Ask closed'), el('span', 'tid', ' ' + d.id), el('span', 'tmeta', ' — your unsent draft:'));
+      const body = el('pre', 'tdrafttext'); body.textContent = d.text;
+      const acts = el('div', 'tactions');
+      acts.append(towerBtn('Copy', 'tprimary', (b) => towerCopy(d.text, b)),
+        towerBtn('Discard', '', () => { tower.drafts.clear(d.id); card.remove(); }));
+      card.append(head, body, acts);
+      list.append(card);
+    });
+  }
+
+  // Background refreshes wait while a typed reply is focused, a tap is in progress or a reply is
+  // being sent: rebuilding then would eat the text / the tap. Flushed on blur, pointer-up, send end.
+  function towerFlush() { if (tower.renderPending) renderTower(); }
+  (function wireTowerDraftGuard() {
+    const list = $('#towerList');
+    if (!list) return;
+    list.addEventListener('focusout', () => setTimeout(towerFlush, 300));
+    list.addEventListener('pointerdown', () => { tower.ptrDown = true; tower.ptrAt = Date.now(); });
+    const up = () => { if (tower.ptrDown) { tower.ptrDown = false; setTimeout(towerFlush, 300); } };
+    document.addEventListener('pointerup', up, true);
+    document.addEventListener('pointercancel', up, true);
+  })();
 
   function towerCard(cls, headHTML) {
     const c = el('div', 'tcard' + (cls ? ' ' + cls : ''));
@@ -927,10 +986,16 @@
   }
 
   // --- Tower tab, model-driven (mirrors scripts/tower_tui.py via /api/rc/tower/model) ---
-  function renderTower() {
-    if (!tower.model) { renderTowerLegacy(); return; }
-    renderTowerModel(tower.model);
-    renderTowerBadge();
+  // force: the operator's own tap (fold / expand): never deferred. Background refreshes (loadTower)
+  // are, while the draft guard holds; whatever does render restores focus and caret of a reply box.
+  function renderTower(force) {
+    const tapping = tower.ptrDown && Date.now() - tower.ptrAt < 5000;
+    if (!force && (tower.replyInFlight || tapping || window.DeckDrafts.shouldDefer(document.activeElement))) { tower.renderPending = true; return; }
+    tower.renderPending = false;
+    const snap = window.DeckDrafts.capture(document.activeElement);
+    if (!tower.model) renderTowerLegacy();
+    else { renderTowerModel(tower.model); renderTowerBadge(); }
+    window.DeckDrafts.restore($('#towerList'), snap);
   }
 
   const TOWER_URL = /https?:\/\/[^\s)\]>"']+/g;
@@ -1064,7 +1129,7 @@
       head.append(towerStyle(el('span', 'tid', '▸ ' + it.id), 'dim'), el('span', 'tmeta', ' — ' + (it.summary || it.text || it.head) + since));
       head.addEventListener('click', () => {
         if (tower.act && it.folded) towerAct({ op: 'unfold', id: it.id }, null, 'Unfolded ' + it.id);
-        else { tower.localFold.set(it.key, false); renderTower(); }
+        else { tower.localFold.set(it.key, false); renderTower(true); }
       });
       card.append(head);
       return card;
@@ -1074,13 +1139,7 @@
       if (it.tag) head.append(towerStyle(el('b', '', it.tag), 'st_urgent'));
       head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta || '')));
       card.append(head, towerBlocks(it.blocks, it.id, !!(it.seq && it.seq.source)));
-      if (tower.act) {
-        const rr = el('div', 'treply');
-        const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
-        const rb = el('button', '', 'Reply');
-        rb.addEventListener('click', () => towerReply(it.id, ta, rb));
-        rr.append(ta, rb); card.append(rr);
-      }
+      if (tower.act) card.append(towerReplyBox(it.id));
     } else if (it.kind === 'request') {
       head.append(towerStyle(el('b', '', it.lead + ' '), it.style), el('span', 'tid', '[' + it.id + ']'));
       card.append(head);
@@ -1092,7 +1151,7 @@
         card.append(towerRich(el('div', 'tbody'), it.text || ''));
         if (it.tail) card.append(towerStyle(el('div', 'tline ttail', '↳ ' + it.tail), 'dim'));
       }
-      head.addEventListener('click', () => { if (expanded) tower.open.delete(it.key); else tower.open.add(it.key); renderTower(); });
+      head.addEventListener('click', () => { if (expanded) tower.open.delete(it.key); else tower.open.add(it.key); renderTower(true); });
     } else if (it.kind === 'suggest') {
       head.append(el('span', 'tid', it.id), el('span', 'tmeta', ' ' + (it.meta ? '[' + it.meta + ']' : '')));
       card.append(head, towerRich(el('div', 'tbody ttitle'), it.title || ''));
@@ -1120,6 +1179,7 @@
     if (asOf) { asOf.textContent = 'Data ' + (gen || 'time unknown') + ' · ' + towerAgo(gen) + ' ago' + (connection.offline ? ' · OFFLINE / STALE' : ''); asOf.classList.toggle('stale', ageMin > 30); }
     list.append(el('div', 'thint', m.header + (ageMin > 30 ? ' · STALE data' : '')));
     if (!tower.act) list.append(el('div', 'thint', 'Read-only here' + (tower.actReason ? ': ' + tower.actReason : '') + '. Queue / close / fold need an act-capable device token.'));
+    towerDraftBox(list);
     m.sections.forEach((sec, n) => {
       if (sec.id === 'backlog' && towerBacklogData(m)) return; // drawn below, with its actions
       const key = 'section:' + sec.id;
@@ -1129,7 +1189,7 @@
       if (folded && sec.urgent) hdr.append(towerStyle(el('span', 'tcount', '  !' + sec.urgent + ' urgent'), 'urgent'));
       hdr.addEventListener('click', () => {
         if (tower.act) towerAct({ op: folded ? 'unfold' : 'fold', id: key }, null, folded ? 'Section opened' : 'Section folded');
-        else { tower.localFold.set(key, !folded); renderTower(); }
+        else { tower.localFold.set(key, !folded); renderTower(true); }
       });
       list.append(hdr);
       if (folded) return;
@@ -1176,7 +1236,7 @@
     if (!sec) return; // older tower: no backlog key, no section
     const hdr = el('div', 'tsechead tbacklog');
     hdr.append(el('span', 'tnum', ''), el('span', 'tarrow', tower.backlogOpen ? '▾ ' : '▸ '), towerStyle(el('span', 'tsectitle', sec.title), 'sec'), el('span', 'tcount', ' (' + sec.count + ')'));
-    hdr.addEventListener('click', () => { tower.backlogOpen = !tower.backlogOpen; renderTower(); });
+    hdr.addEventListener('click', () => { tower.backlogOpen = !tower.backlogOpen; renderTower(true); });
     list.append(hdr);
     if (!tower.backlogOpen) return;
     if (!sec.rows.length) { list.append(el('div', 'thint', '(nothing)')); return; }
@@ -1198,25 +1258,26 @@
     const post = (action, b, date) => {
       let body;
       try { body = B.actBody(action, row.id, date); } catch (e) { toast('Defer', e.message || String(e)); return; }
-      towerAct(body, b, 'Queued with tower', () => { tower.backlogQueued.add(B.requestId(action, row.id)); tower.backlogDefer = null; });
+      towerAct(body, b, 'Queued with tower', () => { tower.backlogQueued.add(B.requestId(action, row.id)); tower.backlogDefer = null; tower.backlogDeferDate = ''; });
     };
     if (tower.backlogDefer === row.id) {
       const pr = el('div', 'tactions tbdefer');
       const inp = document.createElement('input');
-      inp.type = 'date'; inp.className = 'tdate'; inp.value = B.tomorrow(); inp.min = B.tomorrow(Date.now() - 86400000);
+      inp.type = 'date'; inp.className = 'tdate'; inp.value = tower.backlogDeferDate || B.tomorrow(); inp.min = B.tomorrow(Date.now() - 86400000);
+      inp.addEventListener('input', () => { tower.backlogDeferDate = inp.value; });
       pr.append(inp,
         towerBtn('Defer', 'tprimary', (b) => {
           if (!confirm('Defer ' + row.id + ' until ' + inp.value + ' (08:00 UTC)?')) return;
           post('defer', b, inp.value);
         }),
-        towerBtn('Cancel', '', () => { tower.backlogDefer = null; renderTower(); }));
+        towerBtn('Cancel', '', () => { tower.backlogDefer = null; tower.backlogDeferDate = ''; renderTower(true); }));
       card.append(pr);
       return card;
     }
     const acts = el('div', 'tactions');
     acts.append(
       towerBtn('Start', 'tprimary', (b) => { if (confirm('Start ' + row.id + ' now?')) post('start', b); }),
-      towerBtn('Defer…', '', () => { tower.backlogDefer = row.id; renderTower(); }),
+      towerBtn('Defer…', '', () => { tower.backlogDefer = row.id; tower.backlogDeferDate = ''; renderTower(true); }),
       towerBtn('Drop', '', (b) => { if (confirm('Drop ' + row.id + ' from the backlog?')) post('drop', b); }));
     card.append(acts);
     return card;
@@ -1234,6 +1295,7 @@
     const c = o.counts || {};
     const head = el('div', 'thint', 'waiting ' + (c.waiting || 0) + (c.waiting_folded ? ' [' + c.waiting_folded + ' folded]' : '') + ' (urgent ' + (c.urgent || 0) + ') · requests open ' + (c.requests_open || 0) + ' · in flight ' + (c.in_flight || 0) + (ageMin > 30 ? ' · STALE data' : ''));
     list.append(head);
+    towerDraftBox(list);
 
     list.append(el('div', 'tsec', '1 · Waiting on you'));
     const waiting = o.waiting || [];
@@ -1249,13 +1311,7 @@
       const cb = el('button', 'tcopy', 'Copy'); cb.addEventListener('click', () => towerCopy(w.detail || w.text || '', cb));
       bodyRow.append(cb); card.append(bodyRow);
       (w.items || []).forEach((it) => card.append(towerCmdRow(it)));
-      if (tower.act) {
-        const rr = el('div', 'treply');
-        const ta = document.createElement('textarea'); ta.placeholder = 'Answer this ask… (goes to tower)';
-        const rb = el('button', '', 'Reply');
-        rb.addEventListener('click', () => towerReply(w.id, ta, rb));
-        rr.append(ta, rb); card.append(rr);
-      }
+      if (tower.act) card.append(towerReplyBox(w.id));
       return card;
     };
     // Never say "nothing" while the overview counts open asks: folded ones live in waiting_folded.
