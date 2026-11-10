@@ -2889,16 +2889,21 @@
         if (e.images) body.appendChild(el('span', 'img-chip', DeckThread.imagesLabel(e.images)));
         row.appendChild(body);
         convo.appendChild(row);
-        if (e.queued || e.status === 'failed' || e.status === 'unconfirmed' || closesRun(e, conv[i + 1])) {
+        if (e.queued || e.status || closesRun(e, conv[i + 1])) {
           const label = DeckThread.sendStatusLabel(e);
-          const ts = el('div', 'ts' + (e.status === 'failed' ? ' failed' : ''), fmtTime(e.ts) + (label ? ' · ' + label : ''));
+          const at = e.statusTs || e.ts;
+          const ts = el('div', 'ts' + (e.status === 'failed' || e.status === 'lost' ? ' failed' : ''), fmtTime(at) + (label ? ' · ' + label : ''));
+          if (at) ts.title = new Date(at * 1000).toISOString();
           if (DeckThread.canRetry(e)) {
-            const retry = el('button', 'retry', 'Retry');
+            const retry = el('button', 'retry', 'Re-deliver');
             retry.type = 'button';
+            retry.title = 'Check the original send and retry only if agent-deck can do so safely';
             retry.addEventListener('click', () => retrySend(id, e));
             ts.appendChild(retry);
           }
           convo.appendChild(ts);
+          const details = [e.reason, e.targetStatus ? 'target: ' + e.targetStatus : '', e.attempts ? 'attempts: ' + e.attempts : '', e.redelivering ? 'Checking re-delivery…' : e.redeliveryReason].filter(Boolean);
+          if (details.length) convo.appendChild(el('div', 'ts delivery-reason', details.join(' · ')));
         }
       } else if (e.role === 'peer' || e.role === 'slash') {
         // Collapsed to one line; tap to expand. Peer: sender + first line.
@@ -3076,13 +3081,44 @@
     }
   }
 
-  // Re-send a message agent-deck reported failed (nothing was typed, so a
-  // resend cannot double-deliver). The failed bubble is replaced by the new one.
-  function retrySend(id, entry) {
-    const conv = ensureConvo(id);
-    const i = conv.indexOf(entry);
-    if (i >= 0) conv.splice(i, 1);
-    sendAsk(id, entry.content);
+  // Keep the same bubble and send ID. Never re-submit its text through /ask:
+  // an absent transcript match can be a false negative, not a lost message.
+  async function retrySend(id, entry) {
+    if (!DeckThread.canRetry(entry)) return;
+    entry.redelivering = true;
+    renderConvo(id);
+    try {
+      const event = await api('POST', '/api/rc/ask/redeliver', {
+        sessionId: id, requestId: entry.requestId, sendId: entry.sendId, profile: CURRENT_PROFILE,
+      }, false, 195000);
+      DeckThread.applyAskState(ensureConvo(id), event);
+    } catch (err) {
+      entry.redeliveryReason = 'Re-delivery not confirmed: ' + err.message;
+    } finally {
+      entry.redelivering = false;
+      renderConvo(id);
+    }
+  }
+
+  // A phone may miss the final SSE while asleep. Re-read retained queue receipts
+  // on reconnect; never release them as a side effect of refreshing the UI.
+  function refreshDeliveryStates(id) {
+    ensureConvo(id).forEach(async entry => {
+      if (!DeckThread.canRetry(entry) || entry.checkingDelivery) return;
+      entry.checkingDelivery = true;
+      try {
+        const event = await api('POST', '/api/rc/ask/redeliver', {
+          sessionId: id, requestId: entry.requestId, sendId: entry.sendId,
+          profile: CURRENT_PROFILE, checkOnly: true,
+        });
+        DeckThread.applyAskState(ensureConvo(id), event);
+      } catch (err) {
+        entry.redeliveryReason = 'Delivery status unavailable: ' + err.message;
+      } finally {
+        entry.checkingDelivery = false;
+        renderConvo(id);
+      }
+    });
   }
 
   // ----- attention: guarded approvals + request_user_input forms -----
@@ -3493,6 +3529,7 @@
     if (tower.enabled) loadTower();
     loadInbox(); // pushes that arrived while backgrounded (no SSE then)
     if (state.openSheetId) {
+      refreshDeliveryStates(state.openSheetId);
       reconcileTranscriptTail(state.openSheetId);
       const open = state.sessions.get(state.openSheetId);
       if (open) checkAttention(open, false);
@@ -3519,13 +3556,13 @@
       return;
     }
     const id = ev.sessionId;
-    if (ev.type === 'ask-state' && (ev.state === 'sent' || ev.state === 'steered')) {
+    if (ev.type === 'ask-state' && ((ev.state === 'sent' && !ev.sendId) || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
       if (ev.state === 'sent') DeckThread.applyAskState(ensureConvo(id), ev);
       if (id && !state.pending.has(id)) state.pending.set(id, { ctx: 'thinking', requestId: ev.requestId });
       renderConvo(id);
       if (ev.state === 'steered' && id && state.openSheetId === id) toast('Steered', 'Injected into the current Codex turn.');
-    } else if (ev.type === 'ask-state' && ['queued', 'delivering', 'delivered', 'unconfirmed', 'failed'].includes(ev.state)) {
+    } else if (ev.type === 'ask-state' && ['sent', 'queued', 'delivering', 'delivered', 'unconfirmed', 'lost', 'failed'].includes(ev.state)) {
       // Delivery progress of a queued send (agent-deck's durable queue). The
       // reply arrives through the transcript reconcile / reply push, never as
       // a per-request "reply" event, so drop the per-message "thinking"

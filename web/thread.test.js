@@ -162,7 +162,7 @@ test('ask-state walks a bubble sent -> queued (n) -> delivering -> delivered', (
   applyAskState(conv, { requestId: 'r1', state: 'delivering' });
   assert.strictEqual(conv[0].queued, true);
   applyAskState(conv, { requestId: 'r1', state: 'delivered' });
-  assert.strictEqual(sendStatusLabel(conv[0]), 'delivered');
+  assert.strictEqual(sendStatusLabel(conv[0]), 'landed');
   assert.strictEqual(conv[0].queued, false);
 });
 
@@ -174,9 +174,9 @@ test('events land on their own bubble, not a neighbour', () => {
   assert.strictEqual(applyAskState(conv, { requestId: 'nope', state: 'delivered' }), null);
 });
 
-test('failed shows its reason and offers Retry; unconfirmed does not', () => {
+test('failed offers a same-ID check; no receipt means no blind resend', () => {
   const conv = [me('a', { requestId: 'r1' }), me('b', { requestId: 'r2' })];
-  applyAskState(conv, { requestId: 'r1', state: 'failed', error: 'Not delivered: target not running', retryable: true });
+  applyAskState(conv, { requestId: 'r1', sendId: 'send-1', state: 'failed', error: 'Not delivered: target not running', retryable: true });
   assert.strictEqual(sendStatusLabel(conv[0]), 'failed: Not delivered: target not running');
   assert.strictEqual(conv[0].queued, false);
   assert.ok(canRetry(conv[0]));
@@ -194,7 +194,7 @@ test('a reply clearing queued silences a stale in-flight label', () => {
 test('the transcript showing a bubble promotes it to delivered, even after "unconfirmed"', () => {
   const conv = [me('ship it', { requestId: 'r1', status: 'unconfirmed', queued: false, ts: 1000 })];
   assert.strictEqual(promoteDelivered(conv, [h('me', 'ship it', 1010)]), 1);
-  assert.strictEqual(sendStatusLabel(conv[0]), 'delivered');
+  assert.strictEqual(sendStatusLabel(conv[0]), 'landed');
   // a late agent-deck verdict cannot take it back
   applyAskState(conv, { requestId: 'r1', state: 'unconfirmed' });
   assert.strictEqual(conv[0].status, 'delivered');
@@ -336,10 +336,10 @@ test('a phone send the target filed as a peer message is one row, delivered', ()
   const row = { ...h('me', text, landed), origin: 'phone', status: 'delivered' };
   assert.strictEqual(promoteDelivered(conv, [row]), 1);
   assert.strictEqual(newTailTurns(conv, [row]).length, 0); // not appended a second time
-  assert.strictEqual(sendStatusLabel(conv[0]), 'you (phone) · delivered');
+  assert.strictEqual(sendStatusLabel(conv[0]), 'you (phone) · landed');
   const merged = mergeFreshHistory([row], conv);
   assert.strictEqual(merged.length, 1);
-  assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · delivered');
+  assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · landed');
 });
 
 const { attentionChipLabel, answerProgressLabel, answerFailureLabel } = require('./thread.js');

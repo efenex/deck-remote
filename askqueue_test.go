@@ -251,11 +251,11 @@ func TestMapSendState(t *testing.T) {
 		{queuedSend{State: "queued"}, uiSendState{State: "queued"}},
 		{queuedSend{State: "typing"}, uiSendState{State: "delivering"}},
 		{queuedSend{State: "typed"}, uiSendState{State: "delivering"}},
-		{queuedSend{State: "submitted"}, uiSendState{State: "delivering"}},
+		{queuedSend{State: "submitted"}, uiSendState{State: "sent"}},
 		{queuedSend{State: "landed"}, uiSendState{State: "delivered", Final: true}},
-		{queuedSend{State: "submitted", Settled: true}, uiSendState{State: "delivered", Final: true}},
+		{queuedSend{State: "submitted", Settled: true}, uiSendState{State: "lost", Final: true}},
 		// typed but never confirmed: may be sitting in the composer -> no retry
-		{queuedSend{State: "typed", Settled: true}, uiSendState{State: "unconfirmed", Final: true}},
+		{queuedSend{State: "typed", Settled: true}, uiSendState{State: "lost", Final: true}},
 		{queuedSend{State: "failed"}, uiSendState{State: "failed", Final: true, Retryable: true}},
 	}
 	for _, c := range cases {

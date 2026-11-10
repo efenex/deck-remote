@@ -176,8 +176,20 @@
     // The transcript already proved delivery (promoteDelivered): agent-deck's
     // later, weaker verdict ("unconfirmed") must not take it back.
     if (e.status === 'delivered') return e;
+    // An older poll or the initial acceptance event can arrive after a newer
+    // receipt. Never let it erase delivery diagnostics or regress the state.
+    if (e.sendId && !ev.sendId && ev.state === 'sent') return e;
+    if (ev.state !== 'delivered' && ev.statusTs && e.statusTs && ev.statusTs < e.statusTs) return e;
+    if (ev.sendId) e.sendId = ev.sendId;
+    if (ev.statusTs) e.statusTs = ev.statusTs;
+    if (ev.reason !== undefined) e.reason = ev.reason;
+    if (ev.targetStatus !== undefined) e.targetStatus = ev.targetStatus;
+    if (ev.attempts !== undefined) e.attempts = ev.attempts;
+    if (ev.redeliveryReason !== undefined) e.redeliveryReason = ev.redeliveryReason;
+    if (ev.landedRowId) e.landedRowId = ev.landedRowId;
     if (ev.images) e.images = ev.images;
     e.status = ev.state;
+    if (ev.state === 'delivered') e.redeliveryReason = '';
     e.position = ev.position || 0;
     e.error = ev.error || '';
     e.retryable = !!ev.retryable;
@@ -216,6 +228,8 @@
           photos.push(e);
         }
         e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
+        e.reason = 'Seen in the target transcript'; e.redeliveryReason = '';
+        if (f.ts) e.statusTs = f.ts;
         e.hist = true;
         if (f.ts) e.ts = f.ts;
         if (f.origin) e.origin = f.origin;
@@ -240,7 +254,8 @@
     switch (e.status) {
       case 'queued': return e.position ? 'queued (' + e.position + ')' : 'queued';
       case 'delivering': return 'delivering…';
-      case 'delivered': return e.origin === 'phone' ? 'you (phone) · delivered' : 'delivered';
+      case 'delivered': return e.origin === 'phone' ? 'you (phone) · landed' : 'landed';
+      case 'lost': return 'lost / unconfirmed';
       case 'unconfirmed': return 'unconfirmed — check the terminal before resending';
       case 'failed': return 'failed' + (e.error ? ': ' + e.error : '');
       case 'sent': return 'sent';
@@ -248,9 +263,12 @@
     }
   }
 
-  // Only a send agent-deck says typed nothing may be resent: an "unconfirmed"
-  // one can already be sitting in the composer.
-  function canRetry(e) { return !e.images && e.status === 'failed' && e.retryable !== false; }
+  // This action checks/releases the ORIGINAL durable ID, never copies the
+  // text into /ask. The server refuses uncertain or already-landed sends.
+  function canRetry(e) {
+    return !!e.sendId && !!e.requestId && !e.redelivering &&
+      ['queued', 'delivering', 'sent', 'failed', 'lost', 'unconfirmed'].includes(e.status);
+  }
 
   // Live fields the server drops from a session row when they are falsy
   // (`omitempty`): a session that stopped working is simply sent without
