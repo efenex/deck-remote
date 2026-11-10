@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"regexp"
 	"time"
 )
+
+// sendIDRE bounds what reaches the agent-deck CLI as a positional argument: a
+// durable queue ID (ULID-like), never something that parses as a flag or path.
+var sendIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
 const (
 	maxAutoReleases  = 3
@@ -67,11 +71,15 @@ func (s *server) handleRedeliver(w http.ResponseWriter, r *http.Request) {
 		Profile   string `json:"profile"`
 		CheckOnly bool   `json:"checkOnly"`
 	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.SendID) == "" || req.RequestID == "" || req.SessionID == "" {
+	if json.NewDecoder(r.Body).Decode(&req) != nil || !sendIDRE.MatchString(req.SendID) || req.RequestID == "" || req.SessionID == "" {
 		httpError(w, http.StatusBadRequest, "requestId, sendId and sessionId required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(withProfile(r.Context(), req.Profile), 3*time.Minute+15*time.Second)
+	// Detached from the request: a phone that backgrounds mid-release must not
+	// kill `queue release` after it filed its control request, which would leave
+	// an orphaned control/result pair upstream and block every later release.
+	// The outcome still reaches the phone over SSE (publish below).
+	ctx, cancel := context.WithTimeout(withProfile(context.WithoutCancel(r.Context()), req.Profile), 3*time.Minute+15*time.Second)
 	defer cancel()
 	rec, err := s.sendStatus(ctx, req.SendID)
 	if err != nil {

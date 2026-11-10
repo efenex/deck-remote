@@ -292,3 +292,57 @@ func TestPhoneUsesPersistedPromptGuardWhenTransportFlagGone(t *testing.T) {
 		t.Fatal(calls)
 	}
 }
+
+func TestRedeliverRejectsSendIDsThatCouldParseAsFlags(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	for _, id := range []string{"--help", "-x", "../etc", "a b", ""} {
+		body := `{"requestId":"req1","sessionId":"s1","sendId":` + strings.TrimSpace(mustJSON(t, id)) + `}`
+		if w := postRedeliver(s, body); w.Code != 400 {
+			t.Fatalf("%q: %d %s", id, w.Code, w.Body.String())
+		}
+	}
+	if calls := releaseCalls(t, dir); calls != "" {
+		t.Fatalf("CLI reached with an unvalidated id: %s", calls)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// A phone that backgrounds mid-release cancels the HTTP request; the CLI that
+// filed the upstream control request must still be allowed to finish.
+func TestRedeliverSurvivesClientDisconnect(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	s.handleRedeliver(w, httptest.NewRequest("POST", "/api/rc/ask/redeliver", strings.NewReader(retryBody)).WithContext(ctx))
+	if w.Code != 200 || strings.Count(releaseCalls(t, dir), "queue release") != 1 {
+		t.Fatalf("%d %s calls=%s", w.Code, w.Body.String(), releaseCalls(t, dir))
+	}
+}
+
+// An empty (failed/timed-out) capability probe must not pin the process to the
+// legacy unguarded socket send for its whole lifetime.
+func TestCapabilityProbeRetriesUntilItAnswers(t *testing.T) {
+	bin, argv, _ := fakeAdeckAskQueue(t)
+	s := askTestServer(t, bin)
+	if flags := s.typedSendFlags(context.Background()); len(flags) != 0 {
+		t.Fatalf("no help text yet: %v", flags)
+	}
+	putFixture(t, os.Getenv("FAKE_ADECK_DIR"), "help", "  -require-input-prompt\n")
+	if flags := s.typedSendFlags(context.Background()); len(flags) != 1 || flags[0] != "--require-input-prompt" {
+		t.Fatalf("probe was cached after an empty answer: %v\n%s", flags, readFile(t, argv))
+	}
+	before := strings.Count(readFile(t, argv), "--help")
+	s.typedSendFlags(context.Background())
+	if strings.Count(readFile(t, argv), "--help") != before {
+		t.Fatal("a successful probe must be cached")
+	}
+}

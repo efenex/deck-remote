@@ -91,16 +91,22 @@ func (s *server) enqueueSend(ctx context.Context, id, text string, images ...str
 // --transport tmux, or the legacy call when neither flag exists. Only phone
 // sends use this; tower actions keep the socket. Probed once per process.
 func (s *server) typedSendFlags(ctx context.Context) []string {
-	s.typedOnce.Do(func() {
+	// Probe until it yields help text. A timed-out or failed probe has no output
+	// and must not pin the process to the legacy socket path (peer-framed,
+	// unguarded sends whose landing the queue then misjudges) until restart.
+	s.typedMu.Lock()
+	if !s.typedProbed {
 		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
 		// Read the help even on a non-zero exit (flag.ContinueOnError).
 		out, _ := s.adeckIn(pctx, nil, "session", "send", "--help")
+		cancel()
 		s.typedOK = strings.Contains(string(out), "-transport")
 		s.promptOK = strings.Contains(string(out), "-require-input-prompt")
 		s.imageOK = strings.Contains(string(out), "-image")
-		log.Printf("send: agent-deck --require-input-prompt supported=%v --transport supported=%v", s.promptOK, s.typedOK)
-	})
+		s.typedProbed = strings.TrimSpace(string(out)) != ""
+		log.Printf("send: agent-deck --require-input-prompt supported=%v --transport supported=%v probed=%v", s.promptOK, s.typedOK, s.typedProbed)
+	}
+	s.typedMu.Unlock()
 	// Newer agent-deck removed --transport. Unlike the old outer-call flag,
 	// this guard is persisted in the queue record and inherited by its child;
 	// it both preserves an occupied draft and pins delivery to typed input.

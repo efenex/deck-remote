@@ -247,10 +247,11 @@ type server struct {
 	execTmux  atomic.Int64
 	tmux      *tmuxBudget // pacing, backoff and live-session set for every tmux exec (tmuxbudget.go)
 
-	typedOnce sync.Once // probes `session send --help` once (askqueue.go typedSendFlags)
-	typedOK   bool
-	promptOK  bool // --require-input-prompt pins queued children to guarded tmux
-	imageOK   bool
+	typedMu     sync.Mutex // probes `session send --help` until it answers (askqueue.go typedSendFlags)
+	typedProbed bool
+	typedOK     bool
+	promptOK    bool // --require-input-prompt pins queued children to guarded tmux
+	imageOK     bool
 }
 
 func newServer(cfg config, upstream *url.URL) *server {

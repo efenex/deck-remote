@@ -3104,8 +3104,11 @@
   // on reconnect; never release them as a side effect of refreshing the UI.
   function refreshDeliveryStates(id) {
     ensureConvo(id).forEach(async entry => {
-      if (!DeckThread.canRetry(entry) || entry.checkingDelivery) return;
+      // 'failed' is final (nothing typed) and cannot change; others re-checked at most every 30 s.
+      if (!DeckThread.canRetry(entry) || entry.status === 'failed' || entry.checkingDelivery ||
+          (entry.checkedAt && Date.now() - entry.checkedAt < 30000)) return;
       entry.checkingDelivery = true;
+      entry.checkedAt = Date.now();
       try {
         const event = await api('POST', '/api/rc/ask/redeliver', {
           sessionId: id, requestId: entry.requestId, sendId: entry.sendId,
@@ -3573,7 +3576,7 @@
       renderConvo(id);
       renderDeck();
       if (ev.state === 'failed') notifyForeground(id, 'error', 'Message not delivered', ev.error || '');
-      else if (ev.state === 'queued' && !ev.position && state.openSheetId === id && bubble) toast('Queued', 'The agent will run it after the current turn.');
+      else if (ev.state === 'queued' && !ev.position && !ev.redeliveryReason && state.openSheetId === id && bubble) toast('Queued', 'The agent will run it after the current turn.');
     } else if (ev.type === 'ask-state' && ev.state === 'stopping') {
       if (id && state.openSheetId === id) toast('Stopping', 'Interrupt sent; waiting for rollout confirmation.');
     } else if (ev.type === 'reply') {
