@@ -11,14 +11,26 @@
       (s.serverStale ? ' · server refresh pending or failed; retrying' : '');
   }
 
+  const STALE_AFTER_MS = 45000;
+  // Visible polling runs every 20 s: a list older than 90 s means polling is not landing
+  // (frozen timers, hung request), so the UI must not claim Live over it.
+  const LIST_OLD_MS = 90000;
+  function listIsStale(s, visible = true, now = Date.now()) {
+    return !!(s.cached || s.error || !s.at || (visible && now - s.at > LIST_OLD_MS));
+  }
+
   function listResponse(headers, now = Date.now()) {
     const rawAge = headers && headers.get('X-Sessions-Age-Ms');
     const age = rawAge == null || rawAge === '' ? NaN : Number(rawAge);
     const validAge = Number.isFinite(age) && age >= 0;
     const kind = headers && headers.get('X-Sessions-Cache');
-    // sessions.go's freshness window is 4 s. A failed rebuild of an expired
-    // cache can return kind=miss with old data, so inspect age as well as kind.
-    const stale = kind === 'stale' || validAge && age >= 4000;
+    // sessions.go serves stale-while-revalidate: with a 4 s fresh window, a 1.2 s grace
+    // and builds of 2-5 s on a busy host, EVERY 20 s poll can legitimately answer with
+    // the previous rebuild (kind=stale, age ~20 s). That is a healthy server, not a
+    // failure, so only call the list server-stale once it is older than two poll
+    // intervals plus a build. A failed rebuild of an expired cache (kind=miss, old
+    // body) has a large age and lands here too. Without an age, trust kind=stale.
+    const stale = validAge ? age >= STALE_AFTER_MS : kind === 'stale';
     return { at: stale && !validAge ? 0 : Math.max(0, now - (validAge ? age : 0)),
       cached: stale, serverStale: stale };
   }
@@ -52,7 +64,7 @@
     } finally { finished = true; clearTimeout(timer); cleanup(); }
   }
 
-  const api = { listFeedback, listResponse, updateWorker };
+  const api = { listFeedback, listResponse, listIsStale, updateWorker };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckRecovery = api;
 })(typeof window !== 'undefined' ? window : globalThis);

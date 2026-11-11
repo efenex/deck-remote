@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { listFeedback, listResponse, updateWorker } = require('./recovery.js');
+const { listFeedback, listResponse, listIsStale, updateWorker } = require('./recovery.js');
 
 test('list age and failure are independent of healthy generic contact', () => {
   const now = Date.now();
@@ -21,6 +21,10 @@ test('server-cache age survives HTTP 200, including a failed expired-cache rebui
     assert.match(listFeedback(value, now), /10 min ago.*server refresh pending or failed/);
   }
   assert.equal(listResponse(new Headers({ 'X-Sessions-Cache': 'stale' }), now).at, 0);
+  // Healthy stale-while-revalidate (slow build) answers with the previous poll's rebuild.
+  const swr = listResponse(new Headers({ 'X-Sessions-Cache': 'stale', 'X-Sessions-Age-Ms': '20000' }), now);
+  assert.equal(swr.cached, false); assert.equal(swr.serverStale, false); assert.equal(swr.at, now - 20000);
+  assert.equal(listResponse(new Headers({ 'X-Sessions-Cache': 'stale', 'X-Sessions-Age-Ms': '60000' }), now).serverStale, true);
   const fresh = listResponse(new Headers({ 'X-Sessions-Cache': 'hit', 'X-Sessions-Age-Ms': '2000' }), now);
   assert.equal(fresh.at, now - 2000);
   assert.equal(fresh.cached, false);
@@ -70,4 +74,14 @@ test('service worker never intercepts session-list API and caches the matching s
   const html = fs.readFileSync(require.resolve('./index.html'), 'utf8');
   const sw = fs.readFileSync(require.resolve('./sw.js'), 'utf8');
   for (const [, script] of html.matchAll(/<script src="([^"]+)"/g)) assert.ok(sw.includes("'" + script + "'"), script + ' precached');
+});
+
+test('Live is not claimed over a list older than 90 s while visible', () => {
+  const now = 1000000;
+  assert.equal(listIsStale({ at: now - 30000 }, true, now), false);
+  assert.equal(listIsStale({ at: now - 91000 }, true, now), true, 'frozen timers / hung poll');
+  assert.equal(listIsStale({ at: now - 91000 }, false, now), false, 'hidden: polling is paused by design');
+  assert.equal(listIsStale({ at: 0 }, true, now), true);
+  assert.equal(listIsStale({ at: now, cached: true }, true, now), true);
+  assert.equal(listIsStale({ at: now, error: 'x' }, true, now), true);
 });

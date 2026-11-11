@@ -8,7 +8,7 @@ const rows = Array.from({ length: 17 }, (_, i) => ({
   working: true, state: 'working', lastActive: Math.floor(Date.now() / 1000),
 }));
 
-async function fixture(t, { stallProfiles = false, initialStatus = 503 } = {}) {
+async function fixture(t, { stallProfiles = false, initialStatus = 503, path = '', listDelay = 0, expectFailure = true } = {}) {
   const base = await startMockApi(t);
   const browser = await launchChrome();
   t.after(() => browser.close());
@@ -40,13 +40,15 @@ async function fixture(t, { stallProfiles = false, initialStatus = 503 } = {}) {
     };
   });
   let status = initialStatus, count = 0;
-  await page.route('**/api/rc/sessions*', route => {
+  await page.route('**/api/rc/sessions*', async route => {
     count++;
+    if (listDelay) await new Promise(r => setTimeout(r, listDelay));
     return route.fulfill({ status, json: status === 200 ? { sessions: rows, view: { hidden: 0 } } : { error: 'fixture list unavailable' } });
   });
   if (stallProfiles) await page.route('**/api/rc/profiles', () => {});
-  await page.goto(base);
-  await page.waitForFunction(() => document.querySelector('#connText').textContent.includes('refresh failed'));
+  if (initialStatus === 200) status = 200;
+  await page.goto(base + path);
+  if (expectFailure) await page.waitForFunction(() => document.querySelector('#connText').textContent.includes('refresh failed'));
   return { page, base, count: () => count, status: value => { status = value; } };
 }
 
@@ -192,4 +194,12 @@ test('a 401 keeps the credential and does not retry-loop the list', { timeout: 6
   assert.match(await f.page.locator('#connText').innerText(), /Unauthorized/);
   assert.equal(await f.page.evaluate(() => localStorage.getItem('deck_remote_token')), 'fixture-not-a-real-token');
   assert.equal(await f.page.evaluate(() => localStorage.getItem('dr-tower-drafts') !== null), true);
+});
+
+test('cold start on a ?session= deep link opens the sheet and opens a single stream', { timeout: 60000 }, async t => {
+  const f = await fixture(t, { initialStatus: 200, path: '/?session=session-3', listDelay: 700, expectFailure: false });
+  await f.page.waitForSelector('#sheet', { timeout: 15000 });
+  assert.equal(await f.page.evaluate(() => document.body.textContent.includes('Session not found')), false);
+  // The load-time pageshow is not a resume: one stream, not a torn-down-and-recreated pair.
+  assert.equal(await f.page.evaluate(() => window.streams.length), 1);
 });

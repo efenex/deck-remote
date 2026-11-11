@@ -3485,10 +3485,7 @@
   }
   const listFreshness = { at: 0, cached: false, serverStale: false, loading: false, error: '' };
   function renderConnection() {
-    // Visible polling runs every 20 s: a list older than 90 s means polling is not landing
-    // (frozen timers, hung request), so do not claim Live over it.
-    const listStale = listFreshness.cached || listFreshness.error || !listFreshness.at ||
-      (document.visibilityState === 'visible' && Date.now() - listFreshness.at > 90000);
+    const listStale = DeckRecovery.listIsStale(listFreshness, document.visibilityState === 'visible');
     const networkText = connection.offline ? DeckNetwork.feedback(connection) : 'Live';
     setConn(networkText + (listStale ? ' · ' + DeckRecovery.listFeedback(listFreshness) : ''),
       connection.offline || listStale ? 'bad' : 'live');
@@ -4292,7 +4289,10 @@
     if (recoveryWired) return;
     recoveryWired = true;
     let lastResume = 0;
-    function onResume() {
+    function onResume(e) {
+      // The pageshow of the initial load (persisted === false) is not a resume: boot is
+      // already fetching. Only a bfcache restore (persisted === true) needs recovery.
+      if (e && e.type === 'pageshow' && e.persisted === false) return;
       if (document.visibilityState !== 'visible') { lastResume = 0; return; }
       if (!TOKEN) return;
       applyViewport();
