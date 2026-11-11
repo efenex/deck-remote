@@ -29,6 +29,7 @@ const SHELL = [
   '/photos.js?v=42',
   '/backlog.js?v=52',
   '/towerdraft.js?v=55',
+  '/recovery.js?v=56',
   '/app.js?v=56',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the

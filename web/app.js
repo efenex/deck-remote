@@ -81,8 +81,9 @@
     return path + (path.includes('?') ? '&' : '?') + 'profile=' + encodeURIComponent(CURRENT_PROFILE);
   }
 
-  async function api(method, path, body, raw = false, timeoutMs) {
+  async function api(method, path, body, raw = false, timeoutMs, onResponse) {
     const opts = { method, headers: authHeaders() };
+    if (method === 'GET' && /^\/api\/rc\/(sessions|version)(\?|$)/.test(path)) opts.cache = 'no-store';
     const multipart = typeof FormData !== 'undefined' && body instanceof FormData;
     if (multipart) opts.body = body;
     else if (body !== undefined) {
@@ -93,8 +94,11 @@
       return await DeckNetwork.request(fetch, withProfileParam(path), opts, async (res) => {
         connection.lastContact = Date.now();
         if (res.status === 401) {
-          forgetToken('Token rejected — re-enter it.');
-          throw new Error('unauthorized');
+          // A refresh is not a request to unpair. Keep the credential and drafts;
+          // Settings still offers the explicit Forget token action for re-pairing.
+          const error = new Error('Unauthorized — check pairing in Settings');
+          error.status = 401;
+          throw error;
         }
         let data = null;
         const text = await res.text();
@@ -107,6 +111,7 @@
           e.data = data;
           throw e;
         }
+        if (onResponse) onResponse(res);
         return data;
       }, timeoutMs || (multipart ? 60000 : 12000));
     } catch (e) {
@@ -3478,8 +3483,12 @@
     const sheet = $('#sheetConnection');
     if (sheet) { sheet.hidden = cls === 'live'; sheet.textContent = text; }
   }
+  const listFreshness = { at: 0, cached: false, serverStale: false, loading: false, error: '' };
   function renderConnection() {
-    setConn(connection.offline ? DeckNetwork.feedback(connection) : 'Live', connection.offline ? 'bad' : 'live');
+    const listStale = listFreshness.cached || listFreshness.error || !listFreshness.at;
+    const networkText = connection.offline ? DeckNetwork.feedback(connection) : 'Live';
+    setConn(networkText + (listStale ? ' · ' + DeckRecovery.listFeedback(listFreshness) : ''),
+      connection.offline || listStale ? 'bad' : 'live');
     const stamp = $('#towerAsOf');
     const gen = (tower.model || tower.data || {}).generated_at;
     if (stamp && gen) {
@@ -3528,7 +3537,7 @@
 
   // Everything a backgrounded or disconnected app can have missed.
   function resyncAll() {
-    loadSessions(false);
+    const list = loadSessions(false);
     if (tower.enabled) loadTower();
     loadInbox(); // pushes that arrived while backgrounded (no SSE then)
     if (state.openSheetId) {
@@ -3537,6 +3546,7 @@
       const open = state.sessions.get(state.openSheetId);
       if (open) checkAttention(open, false);
     }
+    return list;
   }
 
   function handleRCEvent(ev) {
@@ -4079,22 +4089,39 @@
   // Boot
   // ---------------------------------------------------------------------------
   let retryTimer = null;
+  let listGeneration = 0;
+  function retryListSoon() {
+    if (!retryTimer) retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (document.visibilityState === 'visible') loadSessions(false);
+    }, 3000);
+  }
   // While a synced view filter hides rows, also fetch the unfiltered list so
   // inbox/toast/sheet lookups still see the hidden sessions. Skipped when
   // nothing is filtered (the main list is already complete).
   async function loadAllSessions() {
     if (state.showAll || !(state.view && state.view.hidden > 0)) { state.allSessions.clear(); return; }
+    const generation = listGeneration, profile = CURRENT_PROFILE;
     try {
       const r = await api('GET', '/api/rc/sessions?all=1');
+      if (generation !== listGeneration || profile !== CURRENT_PROFILE) return;
       const next = new Map();
       ((r && r.sessions) || []).forEach((s) => next.set(s.id, DeckThread.mergeSessionRow(state.allSessions.get(s.id), s)));
       state.allSessions = next;
     } catch (_) { /* keep the previous copy; the filtered list still loaded */ }
   }
   async function loadSessions(initial, userInitiated = false) {
+    const generation = ++listGeneration, profile = CURRENT_PROFILE, showAll = state.showAll;
+    const current = () => generation === listGeneration && profile === CURRENT_PROFILE && showAll === state.showAll;
+    listFreshness.loading = true;
+    renderConnection();
     try {
-      const r = await api('GET', '/api/rc/sessions' + (state.showAll ? '?all=1' : ''));
-      const list = (r && r.sessions) || [];
+      let freshness;
+      const r = await api('GET', '/api/rc/sessions' + (showAll ? '?all=1' : ''), undefined, false, undefined,
+        res => { freshness = DeckRecovery.listResponse(res.headers); });
+      if (!current()) return;
+      if (!r || !Array.isArray(r.sessions)) throw new Error('Invalid session-list response');
+      const list = r.sessions;
       state.view = (r && r.view) || {};
       state.quota = (r && r.quota) || [];
       // Merge: keep ids stable so an open sheet isn't disrupted; replace fields
@@ -4106,18 +4133,24 @@
         state.sessions.set(s.id, DeckThread.mergeSessionRow(prev, s));
       });
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
-      if (!state.showAll) saveDeckCache(list);
-      await loadAllSessions();
+      Object.assign(listFreshness, freshness, { loading: false, error: freshness.serverStale ? listFreshness.error : '' });
+      clearTimeout(retryTimer); retryTimer = null;
+      if (freshness.serverStale) retryListSoon();
+      if (!showAll) saveDeckCache(list);
+      // The auxiliary hidden-row lookup must not delay painting the successful list.
+      loadAllSessions();
       if (evRC && evRC.readyState === 1) connection.offline = false;
       renderConnection();
       renderQuota();
       refreshSheetPulse();
     } catch (e) {
-      connection.error = e.message; connection.offline = true; renderConnection();
+      if (!current()) return;
+      listFreshness.loading = false;
+      listFreshness.error = e.message || 'Network request failed';
+      renderConnection();
+      // Retry manual failures too. Only a successful *list* fetch clears its error.
+      retryListSoon();
       if (userInitiated) throw e;
-      // Right after a resume the network may not be back yet: one quick retry
-      // instead of showing last night's rows for another refresh interval.
-      if (!retryTimer) retryTimer = setTimeout(() => { retryTimer = null; if (document.visibilityState === 'visible') loadSessions(false); }, 3000);
     }
     renderDeck();
     if (initial) deepLinkFromURL();
@@ -4176,6 +4209,7 @@
   function onProfileChange(name) {
     if (name === CURRENT_PROFILE) return;
     CURRENT_PROFILE = name;
+    Object.assign(listFreshness, { at: 0, cached: false, serverStale: false, loading: false, error: '' });
     localStorage.setItem(PROFILE_KEY, name);
     if ($('#sheet')) closeSheet(); // the open session belongs to the old profile
     state.sessions.clear();
@@ -4196,7 +4230,7 @@
   // seconds-long /api/rc/sessions round trip. Replaced as soon as the fresh list lands.
   const DECK_CACHE_KEY = 'dr-deck-cache';
   function saveDeckCache(list) {
-    try { localStorage.setItem(DECK_CACHE_KEY, JSON.stringify({ at: Date.now(), profile: CURRENT_PROFILE, view: state.view, sessions: list })); } catch (_) {}
+    try { localStorage.setItem(DECK_CACHE_KEY, JSON.stringify({ at: listFreshness.at, profile: CURRENT_PROFILE, view: state.view, sessions: list })); } catch (_) {}
   }
   function paintCachedDeck() {
     try {
@@ -4204,7 +4238,8 @@
       if (!c || !Array.isArray(c.sessions) || (c.profile || '') !== (CURRENT_PROFILE || '')) return false;
       c.sessions.forEach((s) => state.sessions.set(s.id, s));
       state.view = c.view || {};
-      connection.lastContact = c.at || 0;
+      listFreshness.at = Number.isFinite(c.at) && c.at > 0 && c.at <= Date.now() ? c.at : 0;
+      listFreshness.cached = true;
       renderConnection();
       renderDeck();
       return true;
@@ -4233,11 +4268,101 @@
     $('#versionBanner').hidden = true;
   });
 
+  // Recreate even a nominally OPEN SSE: iOS can resume with a zombie connection.
+  // Re-arm timers rather than depending on callbacks frozen while backgrounded.
+  function recoverConnection() {
+    clearTimeout(retryTimer); retryTimer = null;
+    connection.failures = 0; connection.attempt = 0; connection.nextRetry = 0;
+    startStreams();
+    startRefresh();
+    return resyncAll();
+  }
+  let recoveryWired = false;
+  function wireRecovery() {
+    if (recoveryWired) return;
+    recoveryWired = true;
+    let lastResume = 0;
+    function onResume() {
+      if (document.visibilityState !== 'visible') { lastResume = 0; return; }
+      if (!TOKEN) return;
+      applyViewport();
+      setTimeout(applyViewport, 300);
+      // pageshow/visibility/focus commonly arrive together; reconnect once per burst.
+      if (Date.now() - lastResume < 250) return;
+      lastResume = Date.now();
+      recoverConnection();
+      checkVersion();
+    }
+    document.addEventListener('visibilitychange', onResume);
+    ['pageshow', 'focus', 'online'].forEach(name => window.addEventListener(name, onResume));
+    window.addEventListener('pagehide', () => { lastResume = 0; });
+  }
+
+  const loadedAppURL = new URL($('script[src*="/app.js"]').src, location.href).href;
+  let appUpdatePending = false;
+  async function checkAppUpdate() {
+    const before = navigator.serviceWorker && navigator.serviceWorker.controller;
+    const workerCheck = (async () => {
+      if (!('serviceWorker' in navigator)) return false;
+      const reg = await navigator.serviceWorker.getRegistration();
+      return DeckRecovery.updateWorker(reg);
+    })();
+    const shellCheck = DeckNetwork.request(fetch, '/index.html', { cache: 'no-store' }, async res => {
+      if (!res.ok) throw new Error('App update check: HTTP ' + res.status);
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const script = doc.querySelector('script[src*="/app.js"]');
+      if (!script) throw new Error('App update check: invalid app shell');
+      return new URL(script.getAttribute('src'), location.href).href !== loadedAppURL;
+    });
+    const [workerChanged, shellChanged] = await Promise.all([workerCheck, shellCheck]);
+    appUpdatePending = appUpdatePending || workerChanged || shellChanged || !!before && before !== navigator.serviceWorker.controller;
+    return appUpdatePending;
+  }
+
+  $('#btnResync').addEventListener('click', async () => {
+    const button = $('#btnResync'), status = $('#resyncStatus');
+    button.disabled = true;
+    status.textContent = 'Resyncing list and connection; checking app updates…';
+    try {
+      // Allowlist derived list data only. Never clear all storage, unregister the
+      // worker (push pairing), or discard conversations, pending sends or drafts.
+      localStorage.removeItem(DECK_CACHE_KEY);
+      state.allSessions.clear();
+      state.lastWorking.clear();
+      state.quota = [];
+      renderQuota();
+      // Retain visible offline rows with their original age until replacement succeeds.
+      listFreshness.cached = true;
+      const results = await Promise.allSettled([recoverConnection(), checkAppUpdate()]);
+      if (results[0].status === 'rejected') throw results[0].reason;
+      const update = results[1];
+      if (update.status === 'rejected') throw update.reason;
+      if (update.value) {
+        // Session composers/photos and other open forms can be memory-only. A
+        // reload must not silently throw them away; persisted Tower drafts also stay.
+        const editing = $('#sheet') || $$('textarea').some(ta => ta.value) ||
+          $$('input').some(input => input.value !==
+            (['quietStart', 'quietEnd'].includes(input.id) ? prefs[input.id] : input.defaultValue));
+        if (editing) {
+          status.textContent = 'Update ready. Finish or save your open draft/form, then Resync again.';
+          return;
+        }
+        location.reload();
+        return;
+      }
+      status.textContent = listFreshness.error || listFreshness.loading || listFreshness.cached ? DeckRecovery.listFeedback(listFreshness) : 'Resynced. App is up to date.';
+    } catch (e) {
+      status.textContent = 'Resync incomplete: ' + e.message + (listFreshness.error ? ' · ' + DeckRecovery.listFeedback(listFreshness) : '');
+    } finally { button.disabled = false; }
+  });
+
   async function boot() {
     showTab('deck');
     registerSW();
     wirePresence();
     paintCachedDeck();
+    wireRecovery(); // register before any boot fetch can stall
+    startRefresh();
     startStreams();
     setInterval(renderConnection, 1000);
     // Everything below runs concurrently: the slow session list no longer gates
@@ -4249,7 +4374,6 @@
     initTower().then(() => { if (tower.enabled) loadTower(); });
     await Promise.all([loadProfiles(), loadSessions(true)]);
     if (CURRENT_PROFILE !== profile0) await loadSessions(true); // profile defaulted/reset by loadProfiles
-    startRefresh();
     // Deep links from a tapped notification on a cold start (the service worker
     // opens /?notif=<id>, or /?session=<id> for pushes from older servers).
     const params = new URL(location.href).searchParams;
@@ -4261,27 +4385,6 @@
     } else if (params.has('session')) {
       openSession(params.get('session'));
     }
-    // Re-pull on resume. iOS standalone PWAs resume from bfcache without a reload
-    // and don't reliably fire visibilitychange, so listen for pageshow too. On
-    // resume, refresh the deck (fresh activity/status is scraped server-side) and,
-    // if a sheet is open, immediately reconcile its transcript tail — otherwise the
-    // view is stuck on whatever it had when the app was last foregrounded.
-    // iOS can leave the EventSource CLOSED, or a zombie "open" socket that never
-    // delivers again, after a night in the background: reopen it on resume.
-    let hiddenAt = 0;
-    function onResume() {
-      if (document.visibilityState !== 'visible') { if (!hiddenAt) hiddenAt = Date.now(); return; }
-      const away = hiddenAt ? Date.now() - hiddenAt : 0;
-      hiddenAt = 0;
-      if (!evRC || evRC.readyState === 2 || away > 30000) startStreams();
-      applyViewport();
-      setTimeout(applyViewport, 300);
-      resyncAll();
-      checkVersion();
-    }
-    document.addEventListener('visibilitychange', onResume);
-    window.addEventListener('pageshow', onResume);
-    window.addEventListener('pagehide', () => { if (!hiddenAt) hiddenAt = Date.now(); }); // iOS may skip visibilitychange
     refreshPushUI();
     pushPrefsToServer(); // sync server-honored prefs once on launch
   }

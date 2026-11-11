@@ -34,7 +34,8 @@ function makeEnv(notifs, seenAt, routes) {
   const win = { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
   const fetch = async (url, opts) => {
     const u = String(url);
-    let body = u.includes('/api/rc/notifications') ? { notifications: notifs } : {};
+    let body = u.includes('/api/rc/notifications') ? { notifications: notifs } :
+      u.includes('/api/rc/sessions') ? { sessions: [] } : {};
     if (routes) { const r = await routes(u, opts || {}); if (r !== undefined) body = r; }
     return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body, body: null };
   };
@@ -44,7 +45,7 @@ function makeEnv(notifs, seenAt, routes) {
     navigator: { serviceWorker: { addEventListener() {}, register: async () => ({}), ready: new Promise(() => {}) }, clipboard: {} }, location: { href: 'http://x/', origin: 'http://x', search: '', hash: '', pathname: '/' },
     history: { replaceState() {} }, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
     URL, URLSearchParams, EventSource: function () { this.readyState = 1; this.close = () => { this.readyState = 2; }; Promise.resolve().then(() => { if (this.readyState === 1 && this.onopen) this.onopen(); }); }, WebSocket: function () { this.close = () => {}; },
-    DeckNetwork: require('./network.js'), DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), DeckDrafts: require('./towerdraft.js'), Notification: { permission: 'default' },
+    DeckRecovery: require('./recovery.js'), DeckNetwork: require('./network.js'), DeckGestures: { wireSwipeDismiss: () => () => {} }, DeckMarkdown: Object.assign({}, require('./markdown.js'), { render: (s) => String(s) }), DeckThread: {}, DeckPulse: require('./pulse.js'), DeckPair: require('./pair.js'), DeckVersion: require('./version.js'), DeckDrafts: require('./towerdraft.js'), Notification: { permission: 'default' },
     confirm: () => true, requestAnimationFrame: (f) => f(), AbortController, Date, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Error,
   };
   ctx.window = Object.assign(win, ctx);

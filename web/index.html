@@ -921,6 +921,13 @@ html[data-turns=block] .ts{margin-left:4px}
         <div class="set-row" id="quietRow" hidden><span class="gi">⏰</span><span class="lbl">From <input type="time" id="quietStart" value="22:00"> to <input type="time" id="quietEnd" value="07:00"></span></div>
       </div>
 
+      <div class="set-section">Recovery</div>
+      <div class="why">
+        <p>Refresh the session list, reconnect, and check for an app update. Pairing and reply drafts are kept.</p>
+        <button class="btn-enable" id="btnResync">Resync</button>
+        <p id="resyncStatus" role="status"></p>
+      </div>
+
       <div class="set-section">Deck</div>
       <div class="set-list">
         <div class="set-row"><span class="gi">↕</span><span class="lbl">Sort groups by activity<div class="rhint" style="font-size:12px;color:var(--muted);margin-top:2px">Working / most-recent groups float to the top</div></span><div class="toggle on" data-pref="sortGroupsByActivity"><div class="knob"></div></div></div>
@@ -1018,6 +1025,7 @@ html[data-turns=block] .ts{margin-left:4px}
 <script src="/photos.js?v=42"></script>
 <script src="/network.js?v=45"></script>
 <script src="/backlog.js?v=52"></script>
+<script src="/recovery.js?v=56"></script>
 <script src="/towerdraft.js?v=55"></script>
 <script src="/app.js?v=56"></script>
 </body>
