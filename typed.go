@@ -18,6 +18,7 @@ import "net/http"
 // typedPaths are deck-remote's own endpoints that type into a pane or answer a prompt.
 var typedPaths = []string{
 	"POST /api/rc/ask",
+	"POST /api/rc/ask/redeliver",
 	"POST /api/rc/slash",
 	"POST /api/rc/approve",
 	"POST /api/rc/attention/respond",

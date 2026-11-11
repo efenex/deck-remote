@@ -247,9 +247,11 @@ type server struct {
 	execTmux  atomic.Int64
 	tmux      *tmuxBudget // pacing, backoff and live-session set for every tmux exec (tmuxbudget.go)
 
-	typedOnce sync.Once // probes `session send --help` once (askqueue.go typedSendFlags)
-	typedOK   bool
-	imageOK   bool
+	typedMu     sync.Mutex // probes `session send --help` until it answers (askqueue.go typedSendFlags)
+	typedProbed bool
+	typedOK     bool
+	promptOK    bool // --require-input-prompt pins queued children to guarded tmux
+	imageOK     bool
 }
 
 func newServer(cfg config, upstream *url.URL) *server {
@@ -325,7 +327,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/reply", s.auth(http.HandlerFunc(s.handleReply)))
 	mux.Handle("GET /api/rc/history", s.auth(http.HandlerFunc(s.handleHistory)))
 	mux.Handle("GET /api/rc/status", s.auth(http.HandlerFunc(s.handleStatus)))
-	mux.Handle("POST /api/rc/ask", s.auth(s.authTyped(http.HandlerFunc(s.handleAsk))))     // typed input (typed.go)
+	mux.Handle("POST /api/rc/ask", s.auth(s.authTyped(http.HandlerFunc(s.handleAsk)))) // typed input (typed.go)
+	mux.Handle("POST /api/rc/ask/redeliver", s.auth(s.authTyped(http.HandlerFunc(s.handleRedeliver))))
 	mux.Handle("POST /api/rc/slash", s.auth(s.authTyped(http.HandlerFunc(s.handleSlash)))) // typed input (typed.go)
 	mux.Handle("GET /api/rc/permission", s.auth(http.HandlerFunc(s.handlePermission)))
 	mux.Handle("GET /api/rc/activity", s.auth(http.HandlerFunc(s.handleActivity)))

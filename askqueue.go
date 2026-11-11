@@ -30,6 +30,7 @@ import (
 
 const (
 	sendPollEvery = 3 * time.Second
+	sendLandedMax = 2 * time.Minute // no transcript proof is uncertainty, never permission to resend
 	// A queued send has a 30m delivery budget in agent-deck; give up polling a
 	// little after that rather than forever.
 	sendTrackMax = 40 * time.Minute
@@ -38,11 +39,18 @@ const (
 // queuedSend is the part of agent-deck's send record (`--queue --json` reply
 // and `send-status --json`) deck-remote reads.
 type queuedSend struct {
-	SendID      string `json:"send_id"`
-	State       string `json:"state"`
-	Reason      string `json:"reason"`
-	Settled     bool   `json:"settled"`
-	LandedRowID string `json:"landed_row_id"`
+	SendID       string    `json:"send_id"`
+	SessionID    string    `json:"session_id"`
+	State        string    `json:"state"`
+	Reason       string    `json:"reason"`
+	TargetStatus string    `json:"target_status"`
+	Attempts     int       `json:"attempts"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	SentAt       time.Time `json:"sent_at"`
+	LandedAt     time.Time `json:"landed_at"`
+	Settled      bool      `json:"settled"`
+	LandedRowID  string    `json:"landed_row_id"`
 }
 
 // enqueueSend hands text to agent-deck's durable queue and returns its record.
@@ -78,21 +86,33 @@ func (s *server) enqueueSend(ctx context.Context, id, text string, images ...str
 // the operator's typed input. With send_transport = "auto" in agent-deck's
 // config, a send goes over Claude Code's messaging socket, which frames it as
 // "Another Claude session sent a message" — wrong for the operator's own
-// phone. `--transport tmux` types it into the pane instead. Only sends the
-// operator wrote use this (tower actions keep the socket). An agent-deck
-// without the flag gets today's call; dr-band's echo claim (phonelog.go)
-// still files the socket form as the operator's row. Probed once per process:
-// install the new agent-deck before restarting deck-remote.
+// phone. Prefer --require-input-prompt: it persists through the queue into
+// the child, forces tmux and preserves occupied drafts. Older versions use
+// --transport tmux, or the legacy call when neither flag exists. Only phone
+// sends use this; tower actions keep the socket. Probed once per process.
 func (s *server) typedSendFlags(ctx context.Context) []string {
-	s.typedOnce.Do(func() {
+	// Probe until it yields help text. A timed-out or failed probe has no output
+	// and must not pin the process to the legacy socket path (peer-framed,
+	// unguarded sends whose landing the queue then misjudges) until restart.
+	s.typedMu.Lock()
+	if !s.typedProbed {
 		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
 		// Read the help even on a non-zero exit (flag.ContinueOnError).
 		out, _ := s.adeckIn(pctx, nil, "session", "send", "--help")
+		cancel()
 		s.typedOK = strings.Contains(string(out), "-transport")
+		s.promptOK = strings.Contains(string(out), "-require-input-prompt")
 		s.imageOK = strings.Contains(string(out), "-image")
-		log.Printf("send: agent-deck session send --transport supported=%v", s.typedOK)
-	})
+		s.typedProbed = strings.TrimSpace(string(out)) != ""
+		log.Printf("send: agent-deck --require-input-prompt supported=%v --transport supported=%v probed=%v", s.promptOK, s.typedOK, s.typedProbed)
+	}
+	s.typedMu.Unlock()
+	// Newer agent-deck removed --transport. Unlike the old outer-call flag,
+	// this guard is persisted in the queue record and inherited by its child;
+	// it both preserves an occupied draft and pins delivery to typed input.
+	if s.promptOK {
+		return []string{"--require-input-prompt"}
+	}
 	if s.typedOK {
 		return []string{"--transport", "tmux"}
 	}
@@ -108,34 +128,35 @@ func (s *server) sendStatus(ctx context.Context, sendID string) (queuedSend, err
 
 // uiSendState is one step of a phone message's life as the PWA shows it.
 type uiSendState struct {
-	State     string // queued | delivering | delivered | unconfirmed | failed
+	State     string // queued | delivering | sent | delivered (landed) | lost | failed
 	Final     bool
 	Retryable bool
 }
 
 // mapSendState translates an agent-deck send record into the PWA's states.
 //
-//	queued                       waiting for its turn (queued (n))
-//	typing / typed / submitted   being handed to the composer (delivering)
-//	landed                       the text is in the transcript (delivered)
-//	submitted+settled            submit confirmed, transcript never showed it
-//	typed+settled                typed but submit unproven: it may sit in the
-//	                             composer, so NOT retryable (unconfirmed)
-//	failed                       nothing was typed; resending is safe
+// Only landed is proof of transcript delivery. A settled typed/submitted
+// record is lost/unconfirmed, NOT delivered and NOT safe to blindly resend.
+// The durable queue remains the delivery authority; we do not re-enqueue text.
 func mapSendState(r queuedSend) uiSendState {
+	if (r.State == "typing" || r.State == "typed" || r.State == "submitted") && !r.SentAt.IsZero() && time.Since(r.SentAt) >= sendLandedMax {
+		return uiSendState{State: "lost", Final: r.Settled}
+	}
 	switch r.State {
 	case "landed":
 		return uiSendState{State: "delivered", Final: true}
 	case "failed":
 		return uiSendState{State: "failed", Final: true, Retryable: true}
+	case "cancelled":
+		return uiSendState{State: "failed", Final: true}
 	case "submitted":
 		if r.Settled {
-			return uiSendState{State: "delivered", Final: true}
+			return uiSendState{State: "lost", Final: true}
 		}
-		return uiSendState{State: "delivering"}
+		return uiSendState{State: "sent"}
 	case "typed":
 		if r.Settled {
-			return uiSendState{State: "unconfirmed", Final: true}
+			return uiSendState{State: "lost", Final: true}
 		}
 		return uiSendState{State: "delivering"}
 	case "typing":
@@ -147,15 +168,19 @@ func mapSendState(r queuedSend) uiSendState {
 
 // trackedSend is a queued phone message deck-remote is still following.
 type trackedSend struct {
-	RequestID string `json:"requestId"`
-	SessionID string `json:"sessionId"`
-	SendID    string `json:"sendId"`
-	Profile   string `json:"profile,omitempty"`
-	Images    int    `json:"images,omitempty"`
-	Created   int64  `json:"created"`
+	RequestID       string `json:"requestId"`
+	SessionID       string `json:"sessionId"`
+	SendID          string `json:"sendId"`
+	Profile         string `json:"profile,omitempty"`
+	Images          int    `json:"images,omitempty"`
+	Created         int64  `json:"created"`
+	AutoAttempts    int    `json:"autoAttempts,omitempty"`
+	LastAutoAttempt int64  `json:"lastAutoAttempt,omitempty"`
 
-	state string // last observed ui state (not persisted)
-	key   string // last published state+position, to publish only changes
+	lastProbe int64  // readiness-check backoff, guarded by sendTracker.mu
+	releasing bool   // guarded by sendTracker.mu; manual/automatic releases never overlap
+	state     string // last observed ui state (not persisted)
+	key       string // last published state+position, to publish only changes
 }
 
 // sendTracker follows queued sends until they finish, publishes each change on
@@ -178,9 +203,9 @@ func newSendTracker(dir string) *sendTracker {
 
 // saveLocked writes the open set atomically. The message text is deliberately
 // not stored — only ids.
-func (t *sendTracker) saveLocked() {
+func (t *sendTracker) saveLocked() error {
 	if t.path == "" {
-		return
+		return nil
 	}
 	list := make([]*trackedSend, 0, len(t.items))
 	for _, it := range t.items {
@@ -189,16 +214,18 @@ func (t *sendTracker) saveLocked() {
 	sort.Slice(list, func(i, j int) bool { return list[i].SendID < list[j].SendID })
 	b, err := json.Marshal(list)
 	if err != nil {
-		return
+		return err
 	}
 	tmp := t.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		log.Printf("ask: persist pending sends: %v", err)
-		return
+		return err
 	}
 	if err := os.Rename(tmp, t.path); err != nil {
 		log.Printf("ask: persist pending sends: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (t *sendTracker) load() {
@@ -257,7 +284,8 @@ func (s *server) observeSend(it *trackedSend, rec queuedSend) {
 	if st.State == "queued" {
 		pos = t.positionLocked(it)
 	}
-	key := fmt.Sprintf("%s/%d", st.State, pos)
+	reason := sendReason(rec)
+	key := fmt.Sprintf("%s/%d/%s/%s/%d/%s", st.State, pos, reason, rec.TargetStatus, rec.Attempts, rec.UpdatedAt)
 	changed := key != it.key
 	it.key, it.state = key, st.State
 	if st.Final {
@@ -268,19 +296,68 @@ func (s *server) observeSend(it *trackedSend, rec queuedSend) {
 	if !changed {
 		return
 	}
-	ev := map[string]any{
-		"type": "ask-state", "state": st.State, "requestId": it.RequestID,
-		"sessionId": it.SessionID, "sendId": it.SendID, "ts": time.Now().Unix(), "images": it.Images,
-	}
+	ev := sendStateEvent(it, rec)
 	if pos > 0 {
 		ev["position"] = pos
 	}
-	if st.State == "failed" {
-		ev["error"] = failReason(rec.Reason)
-		ev["retryable"] = st.Retryable && it.Images == 0
-	}
 	log.Printf("ask: send %s req=%s session=%s -> %s pos=%d %s", it.SendID, it.RequestID, it.SessionID, st.State, pos, rec.Reason)
 	s.hub.publish(ev)
+}
+
+// sendStateEvent is shared by SSE and explicit status/re-delivery checks, so a
+// missed SSE event can be recovered without creating a second send.
+func sendStateEvent(it *trackedSend, rec queuedSend) map[string]any {
+	st := mapSendState(rec)
+	at := rec.UpdatedAt
+	if st.State == "lost" && !rec.Settled && !rec.SentAt.IsZero() {
+		at = rec.SentAt.Add(sendLandedMax)
+	}
+	if st.State == "delivered" && !rec.LandedAt.IsZero() {
+		at = rec.LandedAt
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	ev := map[string]any{
+		"type": "ask-state", "state": st.State, "requestId": it.RequestID,
+		"sessionId": it.SessionID, "sendId": it.SendID, "ts": time.Now().Unix(),
+		"statusTs": at.Unix(), "images": it.Images, "reason": sendReason(rec),
+		"targetStatus": rec.TargetStatus, "attempts": rec.Attempts,
+		"landedRowId": rec.LandedRowID,
+		"retryable":   st.Retryable && it.Images == 0,
+	}
+	if st.State == "failed" {
+		ev["error"] = failReason(rec.Reason)
+	}
+	return ev
+}
+
+func sendReason(rec queuedSend) string {
+	reason := strings.TrimSpace(rec.Reason)
+	if reason == "" {
+		switch rec.State {
+		case "queued":
+			reason = "Waiting for the target to accept input"
+		case "typing":
+			reason = "Handing the message to the target composer"
+		case "typed":
+			reason = "Input attempted; submission not confirmed"
+		case "submitted":
+			reason = "Submission confirmed; waiting for transcript evidence"
+		case "landed":
+			reason = "Seen in the target transcript"
+		case "failed":
+			reason = "agent-deck gave up before typing"
+		case "cancelled":
+			reason = "Cancelled before typing"
+		}
+	}
+	if rec.Settled && (rec.State == "typed" || rec.State == "submitted") {
+		reason += "; no landed trace before agent-deck stopped watching — delivery is unconfirmed"
+	} else if mapSendState(rec).State == "lost" {
+		reason += "; no landed trace after 2 minutes — delivery is unconfirmed, still checking"
+	}
+	return reason
 }
 
 func failReason(r string) string {
@@ -329,11 +406,24 @@ func (s *server) pollSendsOnce() bool {
 		cancel()
 		if err != nil {
 			if time.Since(time.Unix(it.Created, 0)) > sendTrackMax {
-				s.observeSend(it, queuedSend{State: "typed", Settled: true})
+				s.observeSend(it, queuedSend{State: "typed", Settled: true, Reason: "Delivery status unavailable for 40 minutes; nothing re-sent"})
 			}
 			continue
 		}
 		s.observeSend(it, rec)
+		if rec.State == "queued" {
+			go func(it *trackedSend, rec queuedSend) {
+				ctx, cancel := context.WithTimeout(withProfile(context.Background(), it.Profile), 3*time.Minute+15*time.Second)
+				defer cancel()
+				updated, reason := s.maybeAutoRelease(ctx, it, rec)
+				if reason != "" {
+					s.observeSend(it, updated)
+					ev := sendStateEvent(it, updated)
+					ev["redeliveryReason"] = reason
+					s.hub.publish(ev)
+				}
+			}(it, rec)
+		}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()

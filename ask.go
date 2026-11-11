@@ -231,7 +231,11 @@ func (s *server) runTurn(se sessionInfo, text, reqID, prof string) {
 	rec, err := s.enqueueSend(ctx, se.ID, text)
 	if err != nil {
 		log.Printf("ask: runTurn ENQUEUE ERROR session=%s req=%s: %v", se.ID, reqID, err)
-		s.publishAskFailed(se, reqID, err)
+		if rec.SendID != "" && rec.State != "" {
+			s.trackSend(&trackedSend{RequestID: reqID, SessionID: se.ID, SendID: rec.SendID, Profile: prof}, rec)
+		} else {
+			s.publishAskFailed(se, reqID, err)
+		}
 		return
 	}
 	log.Printf("ask: runTurn QUEUED session=%s req=%s send=%s text=%q", se.ID, reqID, rec.SendID, text)
