@@ -3485,7 +3485,10 @@
   }
   const listFreshness = { at: 0, cached: false, serverStale: false, loading: false, error: '' };
   function renderConnection() {
-    const listStale = listFreshness.cached || listFreshness.error || !listFreshness.at;
+    // Visible polling runs every 20 s: a list older than 90 s means polling is not landing
+    // (frozen timers, hung request), so do not claim Live over it.
+    const listStale = listFreshness.cached || listFreshness.error || !listFreshness.at ||
+      (document.visibilityState === 'visible' && Date.now() - listFreshness.at > 90000);
     const networkText = connection.offline ? DeckNetwork.feedback(connection) : 'Live';
     setConn(networkText + (listStale ? ' · ' + DeckRecovery.listFeedback(listFreshness) : ''),
       connection.offline || listStale ? 'bad' : 'live');
@@ -4090,11 +4093,16 @@
   // ---------------------------------------------------------------------------
   let retryTimer = null;
   let listGeneration = 0;
+  // 3 s, 6 s, 12 s, 24 s, then 30 s: a persistently failing or server-stale list must
+  // not be hammered every 3 s forever. Reset by a fresh list, a resume or a profile change.
+  let listRetryAttempt = 0;
   function retryListSoon() {
-    if (!retryTimer) retryTimer = setTimeout(() => {
+    if (retryTimer) return;
+    const delay = Math.min(30000, 3000 * 2 ** Math.min(listRetryAttempt++, 4));
+    retryTimer = setTimeout(() => {
       retryTimer = null;
       if (document.visibilityState === 'visible') loadSessions(false);
-    }, 3000);
+    }, delay);
   }
   // While a synced view filter hides rows, also fetch the unfiltered list so
   // inbox/toast/sheet lookups still see the hidden sessions. Skipped when
@@ -4135,7 +4143,7 @@
       Array.from(state.sessions.keys()).forEach((id) => { if (!seen.has(id) && id !== state.openSheetId) state.sessions.delete(id); });
       Object.assign(listFreshness, freshness, { loading: false, error: freshness.serverStale ? listFreshness.error : '' });
       clearTimeout(retryTimer); retryTimer = null;
-      if (freshness.serverStale) retryListSoon();
+      if (freshness.serverStale) retryListSoon(); else listRetryAttempt = 0;
       if (!showAll) saveDeckCache(list);
       // The auxiliary hidden-row lookup must not delay painting the successful list.
       loadAllSessions();
@@ -4149,7 +4157,8 @@
       listFreshness.error = e.message || 'Network request failed';
       renderConnection();
       // Retry manual failures too. Only a successful *list* fetch clears its error.
-      retryListSoon();
+      // A rejected token will not fix itself: leave that to the 20 s poll / a resume.
+      if (e.status !== 401) retryListSoon();
       if (userInitiated) throw e;
     }
     renderDeck();
@@ -4210,6 +4219,7 @@
     if (name === CURRENT_PROFILE) return;
     CURRENT_PROFILE = name;
     Object.assign(listFreshness, { at: 0, cached: false, serverStale: false, loading: false, error: '' });
+    clearTimeout(retryTimer); retryTimer = null; listRetryAttempt = 0;
     localStorage.setItem(PROFILE_KEY, name);
     if ($('#sheet')) closeSheet(); // the open session belongs to the old profile
     state.sessions.clear();
@@ -4271,7 +4281,7 @@
   // Recreate even a nominally OPEN SSE: iOS can resume with a zombie connection.
   // Re-arm timers rather than depending on callbacks frozen while backgrounded.
   function recoverConnection() {
-    clearTimeout(retryTimer); retryTimer = null;
+    clearTimeout(retryTimer); retryTimer = null; listRetryAttempt = 0;
     connection.failures = 0; connection.attempt = 0; connection.nextRetry = 0;
     startStreams();
     startRefresh();

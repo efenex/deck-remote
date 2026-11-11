@@ -8,7 +8,7 @@ const rows = Array.from({ length: 17 }, (_, i) => ({
   working: true, state: 'working', lastActive: Math.floor(Date.now() / 1000),
 }));
 
-async function fixture(t, { stallProfiles = false } = {}) {
+async function fixture(t, { stallProfiles = false, initialStatus = 503 } = {}) {
   const base = await startMockApi(t);
   const browser = await launchChrome();
   t.after(() => browser.close());
@@ -39,7 +39,7 @@ async function fixture(t, { stallProfiles = false } = {}) {
       close() { this.readyState = 2; }
     };
   });
-  let status = 503, count = 0;
+  let status = initialStatus, count = 0;
   await page.route('**/api/rc/sessions*', route => {
     count++;
     return route.fulfill({ status, json: status === 200 ? { sessions: rows, view: { hidden: 0 } } : { error: 'fixture list unavailable' } });
@@ -171,4 +171,25 @@ test('HTTP 200 with stale server-cache headers keeps the real age visible and re
   // The 3 s retry (not a new manual action or 20 s poll) must fetch the rebuilt list.
   await page.waitForFunction(() => JSON.parse(localStorage.getItem('dr-deck-cache')).sessions.length === 17, null, { timeout: 8000 });
   assert.equal(await page.locator('#connStrip').evaluate(el => el.hidden), true);
+});
+
+test('a persistently failing list backs off instead of retrying every 3 s', { timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await f.page.waitForTimeout(1000); // let boot + pageshow recovery requests settle
+  const base = f.count();
+  await f.page.waitForTimeout(10000);
+  // Retries land ~3 s and ~9 s after the last failure; a fixed 3 s retry would make 3-4.
+  const n = f.count() - base;
+  assert.ok(n >= 1 && n <= 2, 'list retries in 10 s: ' + n);
+});
+
+test('a 401 keeps the credential and does not retry-loop the list', { timeout: 60000 }, async t => {
+  const f = await fixture(t, { initialStatus: 401 });
+  await f.page.waitForTimeout(1000);
+  const base = f.count();
+  await f.page.waitForTimeout(8000);
+  assert.equal(f.count() - base, 0, 'no 3 s retry on an authorization failure');
+  assert.match(await f.page.locator('#connText').innerText(), /Unauthorized/);
+  assert.equal(await f.page.evaluate(() => localStorage.getItem('deck_remote_token')), 'fixture-not-a-real-token');
+  assert.equal(await f.page.evaluate(() => localStorage.getItem('dr-tower-drafts') !== null), true);
 });
