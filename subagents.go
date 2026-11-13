@@ -173,6 +173,9 @@ func (s *server) childNative(ctx context.Context, se sessionInfo, now time.Time)
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		return native // do not pin a deadline-induced fallback for 60 s
+	}
 	c.bindings[key] = childBinding{now, se.ClaudeSessionID, native}
 	return native
 }
@@ -214,7 +217,12 @@ func (c *subagentCache) read(ctx context.Context, profile string, se sessionInfo
 		delete(c.entries, oldest)
 	}
 	list := readClaudeChildren(ctx, se, path, native, childToken(c.epoch, key), now)
-	c.entries[key] = childCacheEntry{now, list, files}
+	// A cancelled/expired request (phone abort, shared sessions deadline) is not
+	// evidence about the source. Caching it would pin "unavailable" for as long
+	// as the files stay unchanged, i.e. indefinitely for an idle parent.
+	if ctx.Err() == nil {
+		c.entries[key] = childCacheEntry{now, list, files}
+	}
 	return list
 }
 func ageChildList(list subagentList, now time.Time) subagentList {

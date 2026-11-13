@@ -457,3 +457,18 @@ func TestSubagentsIncompleteIdentityIsNotVerifiedZero(t *testing.T) {
 		t.Fatal("unreadable identity advertised verified zero")
 	}
 }
+func TestSubagentsCancelledReadIsNotCached(t *testing.T) {
+	f := newChildFixture(t)
+	var cache subagentCache
+	se := sessionInfo{ID: "root"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := cache.read(ctx, "one", se, f.parent, "parent-session", childTestNow); got.Availability != "unavailable" {
+		t.Fatalf("cancelled read reported %s", got.Availability)
+	}
+	// Unchanged files after the TTL must not resurrect the cancelled result.
+	got := cache.read(context.Background(), "one", se, f.parent, "parent-session", childTestNow.Add(childCacheTTL+time.Second))
+	if got.Availability != "available" || len(got.Children) != 1 {
+		t.Fatalf("cancelled read was cached: %+v", got)
+	}
+}
