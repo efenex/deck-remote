@@ -72,7 +72,7 @@ type subagentSummary struct {
 	ObservedAt   time.Time `json:"observedAt"`
 	FreshUntil   time.Time `json:"freshUntil"`
 	Availability string    `json:"availability"`
-	Complete     bool      `json:"complete"`
+	Complete     bool      `json:"complete"` // discovery coverage, independent of count freshness
 	Revision     string    `json:"revision"`
 }
 type subagentList struct {
@@ -120,6 +120,16 @@ func (s *server) readSubagents(ctx context.Context, se sessionInfo) subagentList
 		return reader.Subagents(ctx, se)
 	}
 	return emptyChildren(se, time.Now().UTC())
+}
+func (s *server) childSummary(ctx context.Context, se sessionInfo) *subagentSummary {
+	if !childCapabilities(se).Summary {
+		return nil
+	}
+	list := s.readSubagents(ctx, se)
+	if list.Segment == "" { // no readable parent transcript; no card evidence
+		return nil
+	}
+	return &list.subagentSummary
 }
 func (a claudeAdapter) Subagents(ctx context.Context, se sessionInfo) subagentList {
 	now := time.Now().UTC()

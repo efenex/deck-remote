@@ -197,10 +197,7 @@ func (s *server) buildSessions(ctx context.Context, all bool) ([]byte, string, e
 			}
 			sessions[i].Capabilities.Images = photoHarness(sessions[i].Tool) && sessions[i].SSHHost == ""
 			sessions[i].Capabilities.Subagents = childCapabilities(sessions[i])
-			if sessions[i].Tool == "claude" {
-				children := s.readSubagents(rctx, sessions[i])
-				sessions[i].Subagents = &children.subagentSummary
-			}
+			sessions[i].Subagents = s.childSummary(rctx, sessions[i])
 			attn, ok := s.attn.get(sessions[i].ID)
 			if !ok {
 				attn = snap.Attention

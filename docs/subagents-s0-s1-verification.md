@@ -1,5 +1,31 @@
 # S0 + S1 verification and handoff
 
+## Opus review fix round
+
+Recorded 2026-11-13T18:51:04Z (UTC). Fix-round base: `f68fd6a` on `feat/subagent-view-s0s1`; its cancelled-read/cache protection is retained. Changes are confined to this worktree. All new cases use synthetic structure and existing `[REDACTED]` fixtures; no private transcript was read or copied during this round.
+
+- **F1:** `complete` remains the discovery-coverage flag. Fresh available counts display independently, with a partial hint for bounded parent/discovery coverage. A normal 32 KiB child action tail lowers neither coverage nor freshness. Go regressions cover child files >32 KiB and parent files >2 MiB with a recent launch; JavaScript and browser coverage check that partial discovery still displays the running badge and expires locally.
+- **F6:** Verified child assistant activity participates in terminal ordering and can reopen the same child without another Agent launch/result. Regression cases cover success/failure/cancel notifications, handback and older finished metadata, subsequent staleness, and a newer completion followed by an older delivery. No additional invocation is invented.
+- **F2:** Unlinked terminal metadata retains `finished` and contributes no Unknown count, including after cache aging. The nonterminal unlinked control remains unknown.
+- **F3:** Session and activity summaries require `childCapabilities(se).Summary` and a readable parent transcript. Fixture tests cover local supported, remote unsupported, absent-transcript and unbound Claude sessions.
+- **F4/F7:** Optional cache-lock and native-resolver changes deferred; existing global ingestion lock and resolver ordering remain. No other fixes or refactors were included.
+- Shell, service worker asset URLs/cache name, and recovery test expectation are consistently **v59**.
+
+| UTC completion | Command/check | Result |
+|---|---|---|
+| 2026-11-13T18:46:43Z | New regression cases against pre-fix implementation | Expected failures reproduced F1/F6/F2/F3. Logs: `/tmp/dr-s0s1fix-red-go.log`, `/tmp/dr-s0s1fix-red-js.log`. |
+| 2026-11-13T18:47:27Z | Targeted `go test -run 'TestSubagents' ./...` and `node --test web/subagents.test.js` | PASS after fixes; changed JavaScript syntax checks passed. |
+| 2026-11-13T18:47:46Z | `GOCACHE=/tmp/deck-remote-go-cache go test -race -run 'Subagent\|Child\|Claude' ./...` | PASS. Log: `/tmp/dr-s0s1fix-race.log`. |
+| 2026-11-13T18:48:42Z | `GOCACHE=/tmp/deck-remote-go-cache make test` | PASS: Go suite and all 227 JavaScript tests. Log: `/tmp/dr-s0s1fix-test-approved.log`. |
+| 2026-11-13T18:49:17Z | `git diff --check`; JSON schema parse | PASS. |
+| 2026-11-13T18:50:33Z | `GOCACHE=/tmp/deck-remote-go-cache make e2e` | 19/21 PASS, including the partial-count subagent browser regression. Two failures: `phone photos: pick, preview, remove, failed upload, queued send and unsupported harness` (fixture asset connection resets followed by undefined `createStore`); `a 401 keeps the credential and does not retry-loop the list` (fixture startup `waitForFunction` timeout). Log: `/tmp/dr-s0s1fix-e2e-approved.log`. |
+| 2026-11-13T18:51:04Z | `GOCACHE=/tmp/deck-remote-go-cache node --test --test-concurrency=1 --test-name-pattern='phone photos:\|a 401 keeps' photos.e2e.mjs recovery.e2e.mjs` (in `e2e/`) | Required single rerun: 2/2 PASS. No photo/recovery behavior changed; recovery's shell-version assertion alone moved to v59. Log: `/tmp/dr-s0s1fix-e2e-rerun.log`. |
+| 2026-11-13T18:51:03Z | Final whitespace/protected-file/ancestry checks | PASS: `f68fd6a` remains an ancestor; OpenCode adapter, parent history/reply resolution and Makefile unchanged. |
+
+Initial sandboxed `make test` and `make e2e` attempts were blocked by localhost-bind `EPERM`; approved runs use temporary synthetic fixture servers and local Chrome only. No live-service authenticated API, restart, deployment, other-worktree change, push, merge or rebase was performed. Memory recall was unavailable (HTTP 500); repository/design evidence supplied context.
+
+## Original S0/S1 implementation verification
+
 Recorded 2026-11-13T18:31:01Z (UTC). Base: `e1a2b94c5b26b1855e24362bfecff81c167a9aad` (`origin/main`, Merge pull request #14 from efenex/fix/pwa-resync-1111). Branch: `feat/subagent-view-s0s1`.
 
 ## Results

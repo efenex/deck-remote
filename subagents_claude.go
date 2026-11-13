@@ -291,6 +291,8 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 			resultChildren[r.call] = r.child
 		}
 	}
+	// Latest launch/result OR verified child activity. A notification for an
+	// earlier run cannot close a resumed sidechain that has no new Agent call.
 	latest := map[string]time.Time{}
 	terminalAt := map[string]time.Time{}
 	get := func(id string) *childRun {
@@ -413,7 +415,9 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 					}
 					child.Label = childSafeName(meta.AgentType)
 				}
-				tail, _, tailTruncated, tailErr := readChildFile(childrenDir, stem+".jsonl", childTailBytes, true)
+				// The action tail is intentionally bounded; older child rows affect
+				// neither discovery coverage nor the freshness of retained evidence.
+				tail, _, _, tailErr := readChildFile(childrenDir, stem+".jsonl", childTailBytes, true)
 				if tailErr != nil {
 					list.Complete = false
 					continue
@@ -423,14 +427,13 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 				if !rowsOK {
 					list.Complete = false
 				}
-				if tailTruncated {
-					list.Truncated = true
-					list.Complete = false
-				}
 				handbacks := map[string]bool{}
 				for _, r := range rows {
 					if r.AgentID != id || r.SessionID != native || !r.Sidechain {
 						continue
+					}
+					if r.Type == "assistant" && r.Timestamp.After(latest[id]) {
+						latest[id] = r.Timestamp
 					}
 					for _, b := range childBlocks(r) {
 						if r.Type == "assistant" && b.Type == "tool_use" {
@@ -448,7 +451,7 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 							terminalAt[id] = r.Timestamp
 						}
 					}
-					if r.Type == "assistant" && r.Timestamp.After(child.EvidenceAt) && terminalAt[id].IsZero() && !r.Timestamp.Before(latest[id]) {
+					if r.Type == "assistant" && r.Timestamp.After(child.EvidenceAt) && r.Timestamp.After(terminalAt[id]) && !r.Timestamp.Before(latest[id]) {
 						child.Status = "running"
 						child.StateSource = "child-activity"
 						child.EvidenceAt = r.Timestamp
@@ -492,7 +495,7 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 	sort.Strings(ids)
 	for _, id := range ids {
 		child := byID[id]
-		if !child.Linked {
+		if !child.Linked && (child.Status == "running" || child.Status == "unknown") {
 			child.Status = "unknown"
 			child.StateSource = "unlinked"
 		}

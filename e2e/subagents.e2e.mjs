@@ -10,13 +10,13 @@ test('S1 child list stays read-only, escaped and stable across polls and resume'
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.addInitScript(() => { localStorage.setItem('deck_remote_token', 'fixture'); localStorage.setItem('deck_remote_profile', 'default'); });
   let calls = 0, phase = 0;
-  const summary = () => ({ availability: 'available', complete: true, running: 1, unknown: 0, observedAt: new Date().toISOString(), freshUntil: new Date(Date.now() + 1500).toISOString() });
+  const summary = () => ({ availability: 'available', complete: false, running: 1, unknown: 0, observedAt: new Date().toISOString(), freshUntil: new Date(Date.now() + 1500).toISOString() });
   const child = (id, status = 'running') => ({ id, label: '<img src=x onerror=alert(1)>', kind: 'agent', status, linked: true, freshness: 'fresh', evidenceAt: new Date().toISOString(), availability: 'available', lastAction: { name: 'Read' }, invocations: [], threadAvailable: false });
   await page.route('**/api/rc/sessions*', route => route.fulfill({ json: { sessions: [{ id: 's1', title: 'Idle parent', tool: 'claude', group: 'fixture', working: false, lastActivity: Date.now() / 1000, subagents: summary(), capabilities: { structured: true, history: true, subagents: { summary: true, thread: false, live: false } } }] } }));
   await page.route('**/api/rc/activity*', route => route.fulfill({ json: { working: false, lastActivity: Date.now() / 1000, subagents: summary() } }));
   await page.route('**/api/rc/subagents*', route => { calls++; return route.fulfill({ json: { ...summary(), segment: 'segment', revision: String(phase), children: [child('one', phase ? 'finished' : 'running'), child('two', 'unknown')] } }); });
   await openApp(page, base);
-  assert.match(await page.locator('.card-subagents').innerText(), /1 subagent running/);
+  assert.match(await page.locator('.card-subagents').innerText(), /1 subagent running · partial/);
   await page.waitForFunction(() => document.querySelector('.card-subagents')?.textContent.includes('status stale'));
   await page.click('.card[data-id="s1"]');
   await page.locator('#subagentPanel summary').click();

@@ -4,10 +4,12 @@ const assert = require('node:assert/strict');
 const { fresh, badge, rowText } = require('./subagents.js');
 const now = Date.parse('2026-11-11T09:00:10Z');
 const summary = { availability: 'available', complete: true, running: 1, unknown: 0, freshUntil: new Date(now + 2000).toISOString() };
-test('only fresh complete evidence announces a running count; expiry is local', () => {
+test('fresh available evidence announces a running count regardless of coverage; expiry is local', () => {
   assert.equal(badge(summary, now), '1 subagent running');
   assert.equal(badge(summary, now + 2000), '1 last seen active · status stale');
-  assert.equal(fresh({ ...summary, complete: false }, now), false);
+  assert.equal(fresh({ ...summary, complete: false }, now), true);
+  assert.equal(badge({ ...summary, complete: false }, now), '1 subagent running · partial');
+  assert.equal(badge({ ...summary, complete: false }, now + 2000), '1 last seen active · status stale');
   assert.doesNotMatch(badge({ ...summary, availability: 'unavailable' }, now), /running/);
   assert.equal(badge(null, now), '');
   assert.equal(badge({ ...summary, running: 0 }, now), '');

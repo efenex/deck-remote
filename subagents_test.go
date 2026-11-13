@@ -472,3 +472,129 @@ func TestSubagentsCancelledReadIsNotCached(t *testing.T) {
 		t.Fatalf("cancelled read was cached: %+v", got)
 	}
 }
+
+func TestSubagentsBoundedWindowsKeepFreshCounts(t *testing.T) {
+	for _, source := range []string{"child", "parent"} {
+		t.Run(source, func(t *testing.T) {
+			f := newChildFixture(t)
+			if source == "child" {
+				child := childFixtureText(t, "child.jsonl")
+				putChildFile(t, filepath.Join(f.dir, "agent-child-A.jsonl"), child+strings.Repeat("{\"type\":\"system\"}\n", childTailBytes/10)+child)
+			} else {
+				putChildFile(t, f.parent, strings.Repeat("{\"type\":\"system\"}\n", childParentBytes/10)+childFixtureText(t, "parent.jsonl"))
+			}
+			list := f.read(childTestNow)
+			c := assertChild(t, list, "running", 1)
+			if list.Availability != "available" || !list.FreshUntil.After(childTestNow) || c.Freshness != "fresh" {
+				t.Fatalf("bounded window lost fresh evidence: %+v", list)
+			}
+			if source == "child" && (!list.Complete || list.Truncated) {
+				t.Fatal("normal child tail reduced discovery coverage")
+			}
+			if source == "parent" && (list.Complete || !list.Truncated) {
+				t.Fatal("parent window omitted partial coverage hint")
+			}
+		})
+	}
+}
+
+func TestSubagentsChildActivityAfterTerminalReopensWithoutLaunch(t *testing.T) {
+	for _, outcome := range []string{"completed", "failed", "killed", "handback", "metadata"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newChildFixture(t)
+			child := childFixtureText(t, "child.jsonl")
+			notification := strings.ReplaceAll(childFixtureText(t, "completion.jsonl"), "completed", outcome)
+			switch outcome {
+			case "handback":
+				child += childFixtureText(t, "handback.jsonl")
+			case "metadata":
+				putChildFile(t, filepath.Join(f.dir, "agent-child-A.meta.json"), strings.Replace(childFixtureText(t, "meta.json"), "false", "true", 1))
+			default:
+				putChildFile(t, f.parent, childFixtureText(t, "parent.jsonl")+notification)
+			}
+			// A later assistant tool use resumes the same sidechain, with no new
+			// parent Agent launch/result. Everything is synthetic structural data.
+			resumed := `{"type":"assistant","isSidechain":true,"agentId":"child-A","sessionId":"parent-session","timestamp":"2026-11-11T09:00:11Z","message":{"content":[{"type":"tool_use","id":"resume-read","name":"Read"}]}}` + "\n"
+			putChildFile(t, filepath.Join(f.dir, "agent-child-A.jsonl"), child+resumed)
+			c := assertChild(t, f.read(childTestNow.Add(2*time.Second)), "running", 1)
+			if c.StateSource != "child-activity" || len(c.Invocations) != 1 {
+				t.Fatalf("resume lost activity or invented invocation: %+v", c)
+			}
+			assertChild(t, f.read(childTestNow.Add(time.Minute)), "unknown", 0)
+			// A subsequent real completion still closes the resumed child, even
+			// when an older delivery appears later in the parent file.
+			later := strings.ReplaceAll(strings.ReplaceAll(childFixtureText(t, "completion.jsonl"), "09:00:09", "09:00:13"), "delivery-A", "delivery-B")
+			putChildFile(t, f.parent, childFixtureText(t, "parent.jsonl")+later+notification)
+			assertChild(t, f.read(childTestNow.Add(4*time.Second)), "succeeded", 0)
+		})
+	}
+}
+
+func TestSubagentsUnlinkedFinishedMetadataIsNotUnknown(t *testing.T) {
+	f := newChildFixture(t)
+	putChildFile(t, f.parent, "{\"type\":\"system\"}\n")
+	list := f.read(childTestNow)
+	assertChild(t, list, "unknown", 0)
+	if list.Unknown != 1 {
+		t.Fatal("unlinked nonterminal child must remain unknown")
+	}
+	putChildFile(t, filepath.Join(f.dir, "agent-child-A.meta.json"), strings.Replace(childFixtureText(t, "meta.json"), "false", "true", 1))
+	list = f.read(childTestNow)
+	c := assertChild(t, list, "finished", 0)
+	if c.Linked || c.StateSource != "metadata-finished" || list.Unknown != 0 {
+		t.Fatalf("unlinked terminal metadata lost: %+v", list)
+	}
+	if aged := ageChildList(list, childTestNow.Add(time.Minute)); aged.Unknown != 0 || aged.Children[0].Status != "finished" {
+		t.Fatal("terminal metadata became unknown when aged")
+	}
+}
+
+func TestSubagentsSessionSummaryRequiresCapabilityAndTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	f := newChildFixture(t)
+	project := "/synthetic-project"
+	dir := filepath.Join(home, "projects", convertToClaudeDirName(project))
+	mustMkdir(t, filepath.Dir(dir))
+	if err := os.Rename(f.root, dir); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t, config{bin: "/usr/bin/false", homeDir: t.TempDir(), profile: "one"})
+	sessions := []sessionInfo{
+		{ID: "local", Tool: "claude", Path: project, ClaudeSessionID: "parent-session"},
+		{ID: "remote", Tool: "claude", Path: project, ClaudeSessionID: "parent-session", SSHHost: "fixture-remote"},
+		{ID: "missing", Tool: "claude", Path: project, ClaudeSessionID: "absent-session"},
+		{ID: "unbound", Tool: "claude", Path: project},
+	}
+	s.lists.m["one"] = listCacheEntry{at: time.Now(), sessions: sessions}
+	for _, se := range sessions {
+		s.acts.update(se.ID, activityInfo{})
+		s.replies.entry(se.ID).cliAt = time.Now() // fixture-only: no CLI or tmux access
+	}
+	body, _, err := s.buildSessions(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct{ Sessions []sessionInfo }
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != len(sessions) {
+		t.Fatalf("missing sessions: %s", body)
+	}
+	for _, se := range got.Sessions {
+		want := se.ID == "local"
+		if (se.Subagents != nil) != want {
+			t.Errorf("%s session summary present=%v want=%v", se.ID, se.Subagents != nil, want)
+		}
+		w := httptest.NewRecorder()
+		s.handleActivity(w, httptest.NewRequest("GET", "/api/rc/activity?id="+se.ID, nil))
+		var a activityWithAttention
+		if err := json.Unmarshal(w.Body.Bytes(), &a); err != nil {
+			t.Fatal(err)
+		}
+		if (a.Subagents != nil) != want {
+			t.Errorf("%s activity summary present=%v want=%v", se.ID, a.Subagents != nil, want)
+		}
+	}
+}

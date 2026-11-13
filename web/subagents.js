@@ -1,13 +1,14 @@
 /* Read-only child summaries. No delivery, permission, or navigation actions. */
 (function (root) {
   'use strict';
-  const fresh = (s, now = Date.now()) => s && s.availability === 'available' && s.complete &&
+  const fresh = (s, now = Date.now()) => s && s.availability === 'available' &&
     Number.isFinite(Date.parse(s.freshUntil)) && now < Date.parse(s.freshUntil);
   function badge(s, now = Date.now()) {
     if (!s) return '';
     if (!fresh(s, now)) return s.running > 0 ? `${s.running} last seen active · status stale` : 'Subagent status unavailable';
-    if (s.running > 0) return `${s.running} subagent${s.running === 1 ? '' : 's'} running`;
-    if (s.unknown > 0) return `${s.unknown} subagent${s.unknown === 1 ? '' : 's'} · status unknown`;
+    const coverage = s.complete ? '' : ' · partial';
+    if (s.running > 0) return `${s.running} subagent${s.running === 1 ? '' : 's'} running${coverage}`;
+    if (s.unknown > 0) return `${s.unknown} subagent${s.unknown === 1 ? '' : 's'} · status unknown${coverage}`;
     return ''; // verified zero is retained in data; unsupported has no data
   }
   function rowText(child, now = Date.now()) {

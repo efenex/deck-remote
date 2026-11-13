@@ -11,7 +11,7 @@
     "observedAt": {"type": "string", "format": "date-time"},
     "freshUntil": {"type": "string", "format": "date-time"},
     "availability": {"enum": ["available", "unavailable"]},
-    "complete": {"type": "boolean"},
+    "complete": {"type": "boolean", "description": "Discovery coverage, independent of count freshness. False for omitted parent launches, discovery caps or incomplete records; normal child action-tail truncation does not lower coverage."},
     "truncated": {"type": "boolean"},
     "reset": {"type": "boolean"},
     "running": {"type": "integer", "minimum": 0},
