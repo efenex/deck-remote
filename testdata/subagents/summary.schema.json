@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "deck-remote.subagents/v1 (S1)",
+  "type": "object",
+  "required": ["schema", "root", "segment", "revision", "observedAt", "freshUntil", "availability", "complete", "running", "waiting", "unknown", "children", "truncated"],
+  "properties": {
+    "schema": {"const": "deck-remote.subagents/v1"},
+    "root": {"type": "string"},
+    "segment": {"type": "string"},
+    "revision": {"type": "string"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "freshUntil": {"type": "string", "format": "date-time"},
+    "availability": {"enum": ["available", "unavailable"]},
+    "complete": {"type": "boolean"},
+    "truncated": {"type": "boolean"},
+    "reset": {"type": "boolean"},
+    "running": {"type": "integer", "minimum": 0},
+    "waiting": {"const": 0},
+    "unknown": {"type": "integer", "minimum": 0},
+    "nextCursor": {"type": "string"},
+    "children": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/child"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "child": {
+      "type": "object",
+      "required": ["id", "kind", "label", "status", "stateSource", "freshness", "evidenceAt", "availability", "linked", "invocations", "threadAvailable"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "kind": {"const": "agent"},
+        "label": {"type": "string", "maxLength": 128},
+        "status": {"enum": ["running", "unknown", "finished", "succeeded", "failed", "canceled"]},
+        "stateSource": {"enum": ["identity", "unlinked", "async-launch", "child-activity", "metadata-finished", "handback", "task-notification"]},
+        "freshness": {"enum": ["fresh", "stale"]},
+        "evidenceAt": {"type": "string", "format": "date-time"},
+        "availability": {"enum": ["available", "unavailable"]},
+        "linked": {"type": "boolean"},
+        "threadAvailable": {"const": false},
+        "lastAction": {
+          "type": "object", "required": ["kind", "name", "at"], "additionalProperties": false,
+          "properties": {"kind": {"const": "tool"}, "name": {"type": "string", "maxLength": 128}, "at": {"type": "string", "format": "date-time"}}
+        },
+        "invocations": {
+          "type": "array", "maxItems": 32,
+          "items": {
+            "type": "object", "required": ["id", "parentRowId", "parentToolCallId", "parentBlock", "startedAt"], "additionalProperties": false,
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+              "parentRowId": {"type": "string", "maxLength": 128},
+              "parentToolCallId": {"type": "string", "maxLength": 128},
+              "parentBlock": {"type": "integer", "minimum": 0},
+              "startedAt": {"type": "string", "format": "date-time"},
+              "outcome": {"enum": ["succeeded", "failed", "canceled"]}
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

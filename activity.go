@@ -32,8 +32,9 @@ type activityInfo struct {
 // activityWithAttention is the claude /api/rc/activity reply.
 type activityWithAttention struct {
 	activityInfo
-	AttentionID   string `json:"attentionId,omitempty"`
-	AttentionKind string `json:"attentionKind,omitempty"`
+	Subagents     *subagentSummary `json:"subagents,omitempty"`
+	AttentionID   string           `json:"attentionId,omitempty"`
+	AttentionKind string           `json:"attentionKind,omitempty"`
 }
 
 func codexPaneProgressKey(pane string) string {
@@ -181,6 +182,8 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		// The sheet polls this every 3 s: it also carries the pending request's id (from the
 		// sweep's cache, no exec), so a card that appears while the sheet is open is fetched.
 		a := activityWithAttention{activityInfo: s.liveActivity(ctx, se.ID)}
+		children := s.readSubagents(ctx, se)
+		a.Subagents = &children.subagentSummary
 		if attn, ok := s.attn.get(se.ID); ok && attn.Pending {
 			a.AttentionID, a.AttentionKind = attn.ID, attn.Kind
 		}
