@@ -11,11 +11,12 @@ import (
 
 type claudeAdapter struct{ s *server }
 
-func (a claudeAdapter) Capabilities(context.Context, sessionInfo) sessionCapabilities {
+func (a claudeAdapter) Capabilities(_ context.Context, se sessionInfo) sessionCapabilities {
 	return sessionCapabilities{
 		Structured: true, History: true, Replies: true, Activity: true, Ask: true,
 		Slash: true, Queue: true, Attention: true, Approvals: true,
 		SlashCommands: claudeSlashCapabilities,
+		Subagents:     childCapabilities(se),
 	}
 }
 

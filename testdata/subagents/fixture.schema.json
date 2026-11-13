@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Subagent provider fixture manifest (redacted structure only)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider", "version", "evidence", "files", "unsupported"],
+  "properties": {
+    "provider": {"enum": ["claude-jsonl", "opencode-2"]},
+    "version": {"type": "string"},
+    "evidence": {"type": "string"},
+    "files": {"type": "array", "items": {"type": "string", "pattern": "^[a-z-]+\\.(jsonl|json)$"}},
+    "unsupported": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -211,6 +211,7 @@ type server struct {
 	cfg        config
 	proxy      *httputil.ReverseProxy
 	hub        *sseHub
+	children   subagentCache
 	queue      *sessionQueues
 	push       *pushManager
 	recall     *recallStore   // Claude history from agent-deck recall rows/v2 (recall.go)
@@ -326,6 +327,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/sessions", s.auth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/rc/reply", s.auth(http.HandlerFunc(s.handleReply)))
 	mux.Handle("GET /api/rc/history", s.auth(http.HandlerFunc(s.handleHistory)))
+	mux.Handle("GET /api/rc/subagents", s.auth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/rc/status", s.auth(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("POST /api/rc/ask", s.auth(s.authTyped(http.HandlerFunc(s.handleAsk)))) // typed input (typed.go)
 	mux.Handle("POST /api/rc/ask/redeliver", s.auth(s.authTyped(http.HandlerFunc(s.handleRedeliver))))

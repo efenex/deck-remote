@@ -1,0 +1,2 @@
+{"type":"assistant","isSidechain":true,"agentId":"child-A","sessionId":"parent-session","uuid":"handback-message","timestamp":"2026-11-11T09:00:08Z","message":{"content":[{"type":"tool_use","id":"handback-call","name":"SubagentHandback","input":{"result":"[REDACTED]"}}]}}
+{"type":"user","isSidechain":true,"agentId":"child-A","sessionId":"parent-session","uuid":"handback-result","timestamp":"2026-11-11T09:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"handback-call","content":"[REDACTED]"}]},"toolUseResult":{"toolEndsTurn":true}}

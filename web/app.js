@@ -1872,6 +1872,12 @@
     if (ctxHTML) meta.insertAdjacentHTML('beforeend', ctxHTML);
     card.appendChild(meta);
 
+	if (s.subagents) {
+	  const badge = el('div', 'card-subagents', DeckSubagents.badge(s.subagents));
+	  badge.hidden = !badge.textContent;
+	  card.appendChild(badge);
+	}
+
     // Live activity takes over the hero detail while the agent is working;
     // otherwise we fall back to the dim one-line last-reply preview.
     if (s.working) {
@@ -2214,6 +2220,7 @@
     const approveMount = el('div', 'approve-dock');
     approveMount.id = 'approveMount';
     sheet.appendChild(approveMount);
+	if (s.capabilities?.subagents?.summary) sheet.appendChild(DeckSubagents.mount(document));
 
     // Back affordances (standalone PWA has no back gesture, and the full-screen
     // sheet covers the scrim — so an explicit control is required).
@@ -2568,8 +2575,28 @@
   function startActivityPoll(id) {
     stopActivityPoll();
     state.lastWorking.set(id, undefined); // unknown until the first probe lands
+	let childBusy = false, childData = null;
+	const childProfile = CURRENT_PROFILE;
+	async function probeChildren() {
+	  const panel = $('#subagentPanel');
+	  if (typeof DeckSubagents === 'undefined' || !panel || childBusy || document.visibilityState !== 'visible') return;
+	  childBusy = true;
+	  try {
+	    const data = await api('GET', '/api/rc/subagents?id=' + encodeURIComponent(id));
+	    if (state.openSheetId !== id || CURRENT_PROFILE !== childProfile || panel !== $('#subagentPanel')) return;
+	    childData = data;
+	    DeckSubagents.render(panel, data);
+	  } catch (_) {
+	    if (panel === $('#subagentPanel')) {
+	      DeckSubagents.render(panel, childData && { ...childData, availability: 'unavailable', complete: false,
+	        children: childData.children.map(child => ({ ...child, freshness: 'stale' })) });
+	      panel.querySelector('.subagent-note').textContent = 'Refresh failed · status stale';
+	    }
+	  } finally { childBusy = false; }
+	}
     async function probe() {
       if (state.openSheetId !== id) { stopActivityPoll(); return; }
+	  probeChildren();
       try {
         const a = await api('GET', '/api/rc/activity?id=' + encodeURIComponent(id));
         if (state.openSheetId !== id) return;
@@ -2581,6 +2608,7 @@
           s.activity = (a && a.activity) || '';
           s.currentTool = (a && a.currentTool) || '';
           s.stalled = !!(a && a.stalled);
+		  if (a?.subagents) s.subagents = a.subagents;
         }
         // Live thread sync (catch-all for turns NOT originated by this PWA — e.g.
         // prompts entered in the agent-deck TUI, or back-to-back turns where the
@@ -4374,7 +4402,15 @@
     wireRecovery(); // register before any boot fetch can stall
     startRefresh();
     startStreams();
-    setInterval(renderConnection, 1000);
+    setInterval(() => {
+      renderConnection();
+      if (document.visibilityState !== 'visible') return;
+      document.querySelectorAll('.card-subagents').forEach(badge => {
+        const session = state.sessions.get(badge.closest('.card').dataset.id);
+        badge.textContent = DeckSubagents.badge(session?.subagents);
+        badge.hidden = !badge.textContent;
+      });
+    }, 1000);
     // Everything below runs concurrently: the slow session list no longer gates
     // the profile list, the inbox or the tower tab.
     const profile0 = CURRENT_PROFILE;

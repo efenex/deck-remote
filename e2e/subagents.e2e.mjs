@@ -1,0 +1,43 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { launchChrome, startMockApi, withDefaults, openApp } from './harness.mjs';
+
+test('S1 child list stays read-only, escaped and stable across polls and resume', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
+  const browser = await launchChrome(); t.after(() => browser.close());
+  const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, serviceWorkers: 'block' }));
+  const page = await ctx.newPage();
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.addInitScript(() => { localStorage.setItem('deck_remote_token', 'fixture'); localStorage.setItem('deck_remote_profile', 'default'); });
+  let calls = 0, phase = 0;
+  const summary = () => ({ availability: 'available', complete: false, running: 1, unknown: 0, observedAt: new Date().toISOString(), freshUntil: new Date(Date.now() + 1500).toISOString() });
+  const child = (id, status = 'running') => ({ id, label: '<img src=x onerror=alert(1)>', kind: 'agent', status, linked: true, freshness: 'fresh', evidenceAt: new Date().toISOString(), availability: 'available', lastAction: { name: 'Read' }, invocations: [], threadAvailable: false });
+  await page.route('**/api/rc/sessions*', route => route.fulfill({ json: { sessions: [{ id: 's1', title: 'Idle parent', tool: 'claude', group: 'fixture', working: false, lastActivity: Date.now() / 1000, subagents: summary(), capabilities: { structured: true, history: true, subagents: { summary: true, thread: false, live: false } } }] } }));
+  await page.route('**/api/rc/activity*', route => route.fulfill({ json: { working: false, lastActivity: Date.now() / 1000, subagents: summary() } }));
+  await page.route('**/api/rc/subagents*', route => { calls++; return route.fulfill({ json: { ...summary(), segment: 'segment', revision: String(phase), children: [child('one', phase ? 'finished' : 'running'), child('two', 'unknown')] } }); });
+  await openApp(page, base);
+  assert.match(await page.locator('.card-subagents').innerText(), /1 subagent running · partial/);
+  await page.waitForFunction(() => document.querySelector('.card-subagents')?.textContent.includes('status stale'));
+  await page.click('.card[data-id="s1"]');
+  await page.locator('#subagentPanel summary').click();
+  await page.waitForFunction(() => document.querySelectorAll('.subagent-row').length === 2);
+  assert.equal(await page.locator('#subagentPanel img, #subagentPanel button, #subagentPanel input, #subagentPanel textarea, #subagentPanel a').count(), 0);
+  assert.match(await page.locator('.subagent-row').first().innerText(), /<img.*running.*Read/);
+  await page.evaluate(() => { window.firstChildRow = document.querySelector('.subagent-row'); window.parentScroll = document.querySelector('#convo').scrollTop; });
+  phase = 1;
+  await page.waitForFunction(() => document.querySelector('.subagent-row')?.textContent.includes('finished'));
+  assert.equal(await page.locator('.subagent-row').count(), 2);
+  assert.equal(await page.evaluate(() => window.firstChildRow === document.querySelector('.subagent-row')), true);
+  assert.equal(await page.locator('#subagentPanel').evaluate(e => e.open), true);
+  assert.equal(await page.locator('#convo').evaluate(e => e.scrollTop), await page.evaluate(() => window.parentScroll));
+  // Hidden documents do not poll children; foreground resumes via the normal 3s cadence.
+  await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }));
+  const before = calls;
+  await new Promise(r => setTimeout(r, 3500));
+  assert.equal(calls, before);
+  await page.evaluate(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }); document.dispatchEvent(new Event('visibilitychange')); });
+  await page.waitForFunction(n => document.querySelectorAll('.subagent-row').length === n, 2);
+  const deadline = Date.now() + 5000; while (calls === before && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+  assert.ok(calls > before);
+  assert.deepEqual(errors, []);
+});

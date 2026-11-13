@@ -128,7 +128,7 @@ test('Resync reloads for a new shell, preserving synthetic pairing and persisted
   const drafts = await page.evaluate(() => localStorage.getItem('dr-tower-drafts'));
   await page.route('**/index.html', async route => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: (await response.text()).replace('/app.js?v=57', '/app.js?v=next-fixture') });
+    await route.fulfill({ response, body: (await response.text()).replace('/app.js?v=59', '/app.js?v=next-fixture') });
   });
   await page.click('.tab[data-tab="settings"]');
   await Promise.all([page.waitForNavigation(), page.click('#btnResync')]);

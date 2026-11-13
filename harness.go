@@ -9,20 +9,21 @@ import (
 // the active harness. Structured=false means the terminal remains the only
 // trustworthy surface.
 type sessionCapabilities struct {
-	Structured    bool              `json:"structured"`
-	History       bool              `json:"history"`
-	Replies       bool              `json:"replies"`
-	Activity      bool              `json:"activity"`
-	Ask           bool              `json:"ask"`
-	Images        bool              `json:"images"`
-	Slash         bool              `json:"slash"`
-	Queue         bool              `json:"queue"`
-	Steer         bool              `json:"steer"`
-	Interrupt     bool              `json:"interrupt"`
-	Attention     bool              `json:"attention"`
-	Approvals     bool              `json:"approvals"`
-	Questions     bool              `json:"questions"`
-	SlashCommands []slashCapability `json:"slashCommands,omitempty"`
+	Subagents     subagentCapabilities `json:"subagents"`
+	Structured    bool                 `json:"structured"`
+	History       bool                 `json:"history"`
+	Replies       bool                 `json:"replies"`
+	Activity      bool                 `json:"activity"`
+	Ask           bool                 `json:"ask"`
+	Images        bool                 `json:"images"`
+	Slash         bool                 `json:"slash"`
+	Queue         bool                 `json:"queue"`
+	Steer         bool                 `json:"steer"`
+	Interrupt     bool                 `json:"interrupt"`
+	Attention     bool                 `json:"attention"`
+	Approvals     bool                 `json:"approvals"`
+	Questions     bool                 `json:"questions"`
+	SlashCommands []slashCapability    `json:"slashCommands,omitempty"`
 }
 
 type slashCapability struct {
