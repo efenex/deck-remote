@@ -1,0 +1,187 @@
+{
+ "session": {
+  "id": "ses_parent-session",
+  "parent_id": null,
+  "version": "2.0.30",
+  "idle_outcome": "succeeded",
+  "time_created": 0,
+  "time_updated": 12735,
+  "time_idle": 12738,
+  "time_suspended": null,
+  "fork_session_id": null
+ },
+ "messages": [
+  {
+   "id": "msg_parent-user-1",
+   "type": "user",
+   "seq": 5,
+   "time_created": 155,
+   "time_updated": 156,
+   "data": {
+    "time": {
+     "created": 155
+    },
+    "text": "[REDACTED]",
+    "files": []
+   }
+  },
+  {
+   "id": "msg_parent-assistant-2",
+   "type": "assistant",
+   "seq": 6,
+   "time_created": 173,
+   "time_updated": 9114,
+   "data": {
+    "time": {
+     "created": 173,
+     "streamed": 5504,
+     "completed": 9114
+    },
+    "agent": "build",
+    "model": {
+     "id": "[REDACTED]",
+     "providerID": "[REDACTED]",
+     "variant": "[REDACTED]"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "[REDACTED]",
+      "state": {
+       "reasoningField": "[REDACTED]"
+      },
+      "time": {
+       "created": 3248,
+       "completed": 5500
+      }
+     },
+     {
+      "type": "tool",
+      "id": "tool-call-1",
+      "name": "subagent",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "agent": "general",
+        "description": "[REDACTED]",
+        "prompt": "[REDACTED]"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "[REDACTED]"
+        }
+       ],
+       "metadata": {
+        "sessionID": "ses_child-session",
+        "status": "completed",
+        "truncated": false
+       }
+      },
+      "time": {
+       "created": 4772,
+       "ran": 5503,
+       "completed": 9112
+      }
+     }
+    ],
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0,
+    "tokens": {
+     "input": 8257,
+     "output": 68,
+     "reasoning": 126,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "msg_parent-system-3",
+   "type": "system",
+   "seq": 15,
+   "time_created": 9120,
+   "time_updated": 9120,
+   "data": {
+    "metadata": {
+     "notice": "instructions",
+     "instructionSources": [
+      "[REDACTED]",
+      "[REDACTED]"
+     ]
+    },
+    "time": {
+     "created": 9120
+    },
+    "text": "[REDACTED]",
+    "description": "[REDACTED]"
+   }
+  },
+  {
+   "id": "msg_parent-assistant-4",
+   "type": "assistant",
+   "seq": 16,
+   "time_created": 9133,
+   "time_updated": 12736,
+   "data": {
+    "time": {
+     "created": 9133,
+     "streamed": 12733,
+     "completed": 12735
+    },
+    "agent": "build",
+    "model": {
+     "id": "[REDACTED]",
+     "providerID": "[REDACTED]",
+     "variant": "[REDACTED]"
+    },
+    "content": [
+     {
+      "type": "reasoning",
+      "text": "[REDACTED]",
+      "state": {
+       "reasoningField": "[REDACTED]"
+      },
+      "time": {
+       "created": 10332,
+       "completed": 12728
+      }
+     },
+     {
+      "type": "text",
+      "text": "[REDACTED]"
+     }
+    ],
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0,
+    "tokens": {
+     "input": 11589,
+     "output": 17,
+     "reasoning": 151,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "msg_parent-idle-5",
+   "type": "idle",
+   "seq": 23,
+   "time_created": 12738,
+   "time_updated": 12738,
+   "data": {
+    "time": {
+     "created": 12738
+    },
+    "outcome": "succeeded"
+   }
+  }
+ ]
+}

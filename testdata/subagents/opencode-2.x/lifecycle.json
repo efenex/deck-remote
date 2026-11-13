@@ -1,0 +1,58 @@
+{
+ "sampling": "session.active polled ~1 Hz via CLI; sample_offset_ms = poll wall-clock (whole seconds, UTC) minus parent session_v2.time_created, so +-1000 ms resolution",
+ "active_set_transitions": [
+  {
+   "sample_offset_ms": -130,
+   "active": []
+  },
+  {
+   "sample_offset_ms": 870,
+   "active": [
+    {
+     "id": "ses_parent-session",
+     "type": "running"
+    }
+   ]
+  },
+  {
+   "sample_offset_ms": 5870,
+   "active": [
+    {
+     "id": "ses_parent-session",
+     "type": "running"
+    },
+    {
+     "id": "ses_child-session",
+     "type": "running"
+    }
+   ]
+  },
+  {
+   "sample_offset_ms": 9870,
+   "active": [
+    {
+     "id": "ses_parent-session",
+     "type": "running"
+    }
+   ]
+  }
+ ],
+ "child_row_first_seen_offset_ms": 5870,
+ "events_retained": 0,
+ "job_background_kv_rows": 0,
+ "idle_markers": {
+  "parent": [
+   {
+    "message": "msg_parent-idle-5",
+    "outcome": "succeeded"
+   }
+  ],
+  "child": [
+   {
+    "message": "msg_child-idle-3",
+    "outcome": "succeeded"
+   }
+  ]
+ },
+ "ephemeral_progress_captured": false
+}
