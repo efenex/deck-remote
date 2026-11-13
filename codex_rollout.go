@@ -577,10 +577,14 @@ func cleanCodexHome(path, home string) string {
 }
 
 func (s *server) tmuxEnvironment(ctx context.Context, target, name string) (string, error) {
-	if s.tmux.gone("", target) {
+	return s.tmuxEnvironmentOnSocket(ctx, "", target, name)
+}
+
+func (s *server) tmuxEnvironmentOnSocket(ctx context.Context, socket, target, name string) (string, error) {
+	if s.tmux.gone(socket, target) {
 		return "", fs.ErrNotExist // not in the last list-panes: nothing to read
 	}
-	out, err := s.tmuxExec(ctx, "", "show-environment", "-t", target, name)
+	out, err := s.tmuxExec(ctx, socket, "show-environment", "-t", target, name)
 	if err != nil {
 		return "", err
 	}
