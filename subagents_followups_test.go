@@ -251,15 +251,28 @@ func TestSubagentsResumeTaskNotifications(t *testing.T) {
 		{"foreign-task", "foreign-child", "13", "failed", "finished"},
 		{"unverified-launch", "child-A", "13", "failed", "failed"},
 		{"foreign-launch", "child-A", "13", "failed", "finished"},
-		{"older-terminal", "child-A", "11", "failed", "finished"},
-		{"equal-terminal", "child-A", "12", "failed", "finished"},
+		// Real meta.json mtimes trail the same run's notification by a few ms.
+		{"meta-after-notification", "child-A", "11", "failed", "failed"},
+		{"meta-same-time", "child-A", "12", "failed", "failed"},
+		// An outcome-bearing terminal state newer than the notification wins.
+		{"older-than-handback", "child-A", "13", "failed", "finished"},
+		{"equal-to-handback", "child-A", "14", "failed", "finished"},
+		{"after-handback", "child-A", "15", "failed", "failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newChildFixture(t)
 			child := childFixtureText(t, "child.jsonl") + `{"type":"assistant","isSidechain":true,"agentId":"child-A","sessionId":"parent-session","timestamp":"2026-11-11T09:00:11Z","message":{"content":[{"type":"tool_use","id":"resume-read","name":"Read"}]}}` + "\n"
+			handback := strings.Contains(tc.name, "handback")
+			if handback {
+				child += strings.NewReplacer("09:00:08", "09:00:12", "09:00:09", "09:00:14").Replace(childFixtureText(t, "handback.jsonl"))
+			}
 			putChildFile(t, filepath.Join(f.dir, "agent-child-A.jsonl"), child)
 			meta := filepath.Join(f.dir, "agent-child-A.meta.json")
-			putChildFile(t, meta, strings.Replace(childFixtureText(t, "meta.json"), "false", "true", 1))
+			if handback { // unfinished metadata: the handback is the last terminal state
+				putChildFile(t, meta, childFixtureText(t, "meta.json"))
+			} else {
+				putChildFile(t, meta, strings.Replace(childFixtureText(t, "meta.json"), "false", "true", 1))
+			}
 			terminalTime := childTestNow.Add(2 * time.Second)
 			if err := os.Chtimes(meta, terminalTime, terminalTime); err != nil {
 				t.Fatal(err)
@@ -284,6 +297,9 @@ func TestSubagentsResumeTaskNotifications(t *testing.T) {
 			c := assertChild(t, list, tc.want, 0)
 			if len(c.Invocations) != 1 || c.Invocations[0].Outcome != "" {
 				t.Fatal("resume notification invented or completed an invocation")
+			}
+			if handback && tc.want == "finished" && c.StateSource != "handback" {
+				t.Fatal("older resume notification displaced a newer handback", c.StateSource)
 			}
 			if tc.want != "finished" && c.StateSource != "task-notification" {
 				t.Fatal("resume outcome missing structural source")

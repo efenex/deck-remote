@@ -490,7 +490,9 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 		// notification already identifies this linked child by task id; accept an
 		// unknown call only when it advances terminal state. Never attach it to an
 		// invocation or accept a call verified as another child's invocation.
-		if _, verifiedCall := invocationChildren[n.call]; !matched && !verifiedCall && n.at.After(terminalAt[n.child]) {
+		// Outcome-less metadata "finished" does not block it: real meta.json writes
+		// land a few ms after the same run's notification (as on the verified path).
+		if _, verifiedCall := invocationChildren[n.call]; !matched && !verifiedCall && (n.at.After(terminalAt[n.child]) || child.StateSource == "metadata-finished") {
 			matched = true
 		}
 		if matched && (child.StateSource == "metadata-finished" || !n.at.Before(terminalAt[n.child])) {
