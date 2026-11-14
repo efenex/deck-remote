@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -204,7 +205,10 @@ type ocForm struct {
 // agent-deck's own binding when it has one, else the newest root session in
 // the instance's directory created since the instance was (agent-deck's
 // 2.x discovery can lag or miss, e.g. through a /tmp → /private/tmp symlink).
-// Sessions agent-deck has bound to other instances are never taken.
+// Sessions agent-deck has bound to other instances are never taken. When
+// instances share the directory, the session each TUI says it is showing (its
+// terminal title, see paneSessionTitle) decides, and only when that names one
+// session; otherwise the timing rules apply and ambiguity is refused.
 func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string, error) {
 	if se.OpenCodeSessionID != "" {
 		return se.OpenCodeSessionID, nil
@@ -229,7 +233,7 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 		return "", err
 	}
 	taken := map[string]bool{}
-	sameDir := 0
+	sameDir, shared := 0, 0
 	if all, err := a.s.listSessions(ctx); err == nil {
 		for _, o := range all {
 			if o.Tool != "opencode" || o.ID == se.ID {
@@ -237,17 +241,39 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 			}
 			if o.OpenCodeSessionID != "" {
 				taken[o.OpenCodeSessionID] = true
-			} else if sameDirectory(o.Path, se.Path) {
-				sameDir++
+			}
+			if sameDirectory(o.Path, se.Path) {
+				shared++
+				if o.OpenCodeSessionID == "" {
+					sameDir++
+				}
+			}
+		}
+	}
+	// Root sessions in this directory that no other instance owns.
+	var roots []ocSession
+	for _, s := range list.Data {
+		if s.ParentID == "" && !taken[s.ID] && sameDirectory(s.Location.Directory, dir) {
+			roots = append(roots, s)
+		}
+	}
+	// Instances sharing a directory cannot be told apart by timing, but each
+	// TUI names the session it is showing in its terminal title.
+	paneTitle := ""
+	if shared > 0 {
+		var ok bool
+		if paneTitle, ok = a.paneSessionTitle(ctx, se); ok {
+			if m := matchPaneTitle(paneTitle, roots); len(m) == 1 {
+				c.mu.Lock()
+				c.binding[se.ID] = ocBinding{sessionID: m[0].ID, at: time.Now()}
+				c.mu.Unlock()
+				return m[0].ID, nil
 			}
 		}
 	}
 	created := instanceCreated(se.ID)
 	var cands []ocSession
-	for _, s := range list.Data {
-		if s.ParentID != "" || taken[s.ID] || !sameDirectory(s.Location.Directory, dir) {
-			continue
-		}
+	for _, s := range roots {
 		if !created.IsZero() && time.UnixMilli(int64(s.Time.Created)).Before(created.Add(-2*time.Minute)) {
 			continue
 		}
@@ -259,13 +285,96 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 	// Another unbound instance in this directory could own the lone candidate
 	// just as well: bind it only when it demonstrably belongs to this instance.
 	if sameDir > 0 && (len(cands) > 1 || !ocOwnsSession(se, created, cands[0])) {
-		return "", fmt.Errorf("ambiguous opencode session: %d agent-deck instances share %s", sameDir+1, se.Path)
+		return "", ambiguousOpencode(se, sameDir+1, paneTitle, cands)
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].Time.Updated > cands[j].Time.Updated })
 	c.mu.Lock()
 	c.binding[se.ID] = ocBinding{sessionID: cands[0].ID, at: time.Now()}
 	c.mu.Unlock()
 	return cands[0].ID, nil
+}
+
+// ocPaneTitlePrefix starts the terminal title the opencode 2.x TUI sets for
+// the session it is showing: "OC | <session title>". The title follows the
+// TUI's current session, so a /new or a switch is picked up on the next bind.
+const ocPaneTitlePrefix = "OC | "
+
+// paneSessionTitle reads the title of the TUI pane of se's tmux session. ok is
+// false when there is no such pane or it does not carry an opencode title.
+func (a opencodeAdapter) paneSessionTitle(ctx context.Context, se sessionInfo) (string, bool) {
+	if se.TmuxSession == "" || a.s.tmux == nil {
+		return "", false
+	}
+	out, err := a.s.tmuxExec(ctx, se.TmuxSocket, "display-message", "-p", "-t", se.TmuxSession+":^", "#{pane_title}")
+	if err != nil {
+		return "", false
+	}
+	t := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(t, ocPaneTitlePrefix) {
+		return "", false
+	}
+	t = strings.TrimSpace(strings.TrimPrefix(t, ocPaneTitlePrefix))
+	return t, t != ""
+}
+
+// ocMinTitlePrefix is the shortest truncated pane title taken as evidence.
+const ocMinTitlePrefix = 8
+
+// matchPaneTitle returns the sessions whose title is what the TUI shows: an
+// exact match, else (the TUI truncates long titles, and tmux renders its "…" as
+// "_") the sessions the truncated title is a prefix of. Callers act only on a
+// single match.
+func matchPaneTitle(pane string, sessions []ocSession) []ocSession {
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return nil
+	}
+	var exact, prefix []ocSession
+	trunc := ""
+	for _, suf := range []string{"…", "...", "_"} {
+		if strings.HasSuffix(pane, suf) {
+			trunc = strings.TrimSpace(strings.TrimSuffix(pane, suf))
+			break
+		}
+	}
+	for _, s := range sessions {
+		t := strings.TrimSpace(s.Title)
+		switch {
+		case strings.EqualFold(t, pane):
+			exact = append(exact, s)
+		case len(trunc) >= ocMinTitlePrefix && len(t) > len(trunc) && strings.HasPrefix(strings.ToLower(t), strings.ToLower(trunc)):
+			prefix = append(prefix, s)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return prefix
+}
+
+// ambiguousOpencode is the refusal for an instance whose session cannot be
+// told from its siblings': it names what was tried and the candidates, so the
+// operator can see which conversation is which.
+func ambiguousOpencode(se sessionInfo, n int, paneTitle string, cands []ocSession) error {
+	msg := fmt.Sprintf("ambiguous opencode session: %d agent-deck instances share %s", n, se.Path)
+	if paneTitle != "" {
+		msg += fmt.Sprintf("; the TUI title %q does not single out one session", paneTitle)
+	} else {
+		msg += "; the TUI title is not readable"
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].Time.Updated > cands[j].Time.Updated })
+	var parts []string
+	for i, c := range cands {
+		if i == 3 {
+			parts = append(parts, fmt.Sprintf("+%d more", len(cands)-i))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s %q", c.ID, preview(c.Title, 40)))
+	}
+	if len(parts) > 0 {
+		msg += "; candidates: " + strings.Join(parts, ", ")
+	}
+	return errors.New(msg)
 }
 
 // ocStartWindow is how close to its instance's creation an opencode session

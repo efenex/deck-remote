@@ -287,3 +287,172 @@ func mkOcSession(id, dir string, created time.Time) ocSession {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// newOpencodeTmuxServer is newOpencodeTestServer plus a fake tmux whose panes
+// report the terminal titles in titles (tmux session name -> pane_title; a
+// missing name is a tmux failure).
+func newOpencodeTmuxServer(t *testing.T, f *fakeOpencode, sessions []sessionInfo, titles map[string]string) *server {
+	t.Helper()
+	s := newOpencodeTestServer(t, f, sessions)
+	body := "case \"$*\" in\n"
+	for name, title := range titles {
+		body += "  *display-message*" + name + ":^*) echo '" + title + "';;\n"
+	}
+	body += "  *) exit 1;;\nesac"
+	bin, _ := fakeTmux(t, body)
+	s.cfg = config{tmuxBin: bin}
+	s.tmux = newTmuxBudget()
+	s.tmux.interval = 0
+	return s
+}
+
+func mkTitled(id, title, dir string, created time.Time) ocSession {
+	s := mkOcSession(id, dir, created)
+	s.Title = title
+	return s
+}
+
+func resolveOC(t *testing.T, s *server, se sessionInfo) (string, error) {
+	t.Helper()
+	return opencodeAdapter{s: s}.sessionID(context.Background(), se)
+}
+
+// Two unbound instances in one directory each resolve to the session their own
+// TUI shows, whatever the creation times (the operator's gb-og / gb-threejs).
+func TestOpencodeSharedDirectoryResolvesByTUITitle(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-48 * time.Hour)
+	a1 := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, Title: "gb-threejs", TmuxSession: "ad_a1"}
+	a2 := sessionInfo{ID: "b-" + itoa(start.Add(40*time.Hour).Unix()), Tool: "opencode", Path: dir, Title: "gb-og", TmuxSession: "ad_a2"}
+	f := &fakeOpencode{sessions: []ocSession{
+		mkTitled("ses_plan", "gunbound-ng plan 08 fidelity sign-off checklist", dir, start.Add(30*time.Hour)),
+		mkTitled("ses_handoff", "Continue from HANDOFF.md", dir, start.Add(41*time.Hour)),
+		mkTitled("ses_child", "Continue from HANDOFF.md", dir, start.Add(41*time.Hour)),
+	}}
+	f.sessions[2].ParentID = "ses_handoff"
+	s := newOpencodeTmuxServer(t, f, []sessionInfo{a1, a2}, map[string]string{
+		"ad_a1": "OC | gunbound-ng plan 08 fidelity sign-off_", // tmux renders the TUI's "…" as "_"
+		"ad_a2": "OC | Continue from HANDOFF.md",
+	})
+	for _, tc := range []struct {
+		se   sessionInfo
+		want string
+	}{{a1, "ses_plan"}, {a2, "ses_handoff"}} {
+		got, err := resolveOC(t, s, tc.se)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s: got %q, %v; want %q", tc.se.Title, got, err, tc.want)
+		}
+	}
+}
+
+func TestOpencodeSharedDirectoryOneBoundOneUnbound(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	bound := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, OpenCodeSessionID: "ses_1", TmuxSession: "ad_a"}
+	free := sessionInfo{ID: "b-" + itoa(start.Unix()), Tool: "opencode", Path: dir, TmuxSession: "ad_b"}
+	f := &fakeOpencode{sessions: []ocSession{
+		mkTitled("ses_1", "first", dir, start.Add(time.Minute)),
+		mkTitled("ses_2", "second task", dir, start.Add(time.Minute)),
+	}}
+	list := []sessionInfo{bound, free}
+	// Its own title picks ses_2.
+	s := newOpencodeTmuxServer(t, f, list, map[string]string{"ad_b": "OC | second task"})
+	if got, err := resolveOC(t, s, free); err != nil || got != "ses_2" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	// Without a readable pane the old rule stands: the newest session no
+	// other instance owns (the sibling is bound, so nothing is ambiguous).
+	s = newOpencodeTmuxServer(t, f, list, nil)
+	if got, err := resolveOC(t, s, free); err != nil || got != "ses_2" {
+		t.Fatalf("no pane: got %q, %v", got, err)
+	}
+	// The bound instance never consults the pane.
+	if got, err := resolveOC(t, s, bound); err != nil || got != "ses_1" {
+		t.Fatalf("bound: got %q, %v", got, err)
+	}
+}
+
+func TestOpencodeSharedDirectoryThreeInstances(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	mk := func(p string) sessionInfo {
+		return sessionInfo{ID: p + "-" + itoa(start.Unix()), Tool: "opencode", Path: dir, TmuxSession: "ad_" + p}
+	}
+	a, b, c := mk("a"), mk("b"), mk("c")
+	f := &fakeOpencode{sessions: []ocSession{
+		mkTitled("ses_x", "refactor the parser", dir, start.Add(time.Minute)),
+		mkTitled("ses_y1", "Continue plan", dir, start.Add(2*time.Minute)),
+		mkTitled("ses_y2", "Continue plan", dir, start.Add(3*time.Minute)),
+		mkTitled("ses_z", "fix the build", dir, start.Add(4*time.Minute)),
+	}}
+	s := newOpencodeTmuxServer(t, f, []sessionInfo{a, b, c}, map[string]string{
+		"ad_a": "OC | refactor the parser",
+		"ad_b": "OC | Continue plan", // two sessions carry this title
+		// c: tmux fails
+	})
+	if got, err := resolveOC(t, s, a); err != nil || got != "ses_x" {
+		t.Fatalf("a: got %q, %v", got, err)
+	}
+	for _, se := range []sessionInfo{b, c} {
+		got, err := resolveOC(t, s, se)
+		if err == nil || got != "" {
+			t.Fatalf("%s: got %q, %v; want refusal", se.ID, got, err)
+		}
+		// The refusal is actionable: instances, directory and the candidates.
+		for _, want := range []string{"3 agent-deck instances share " + dir, "ses_z", `"fix the build"`, "+1 more"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s: refusal %q lacks %q", se.ID, err, want)
+			}
+		}
+	}
+	if _, err := resolveOC(t, s, b); !strings.Contains(err.Error(), `"Continue plan"`) {
+		t.Fatalf("refusal should quote the TUI title: %v", err)
+	}
+}
+
+// A TUI may show a session older than its instance (picked from the session
+// list); the title still binds it, where timing would have dropped it.
+func TestOpencodeSharedDirectoryTitleBeatsCreationWindow(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	a1 := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, TmuxSession: "ad_a"}
+	a2 := sessionInfo{ID: "b-" + itoa(start.Unix()), Tool: "opencode", Path: dir}
+	f := &fakeOpencode{sessions: []ocSession{mkTitled("ses_old", "ancient work", dir, start.Add(-72*time.Hour))}}
+	s := newOpencodeTmuxServer(t, f, []sessionInfo{a1, a2}, map[string]string{"ad_a": "OC | ancient work"})
+	if got, err := resolveOC(t, s, a1); err != nil || got != "ses_old" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	// a2 has no pane at all: nothing to go on, nothing bound.
+	if got, err := resolveOC(t, s, a2); err != nil || got != "" {
+		t.Fatalf("a2: got %q, %v", got, err)
+	}
+}
+
+func TestMatchPaneTitle(t *testing.T) {
+	ss := []ocSession{
+		{ID: "1", Title: "gunbound-ng plan 08 fidelity sign-off checklist"},
+		{ID: "2", Title: "gunbound-ng plan 08 fidelity review"},
+		{ID: "3", Title: "short"},
+		{ID: "4", Title: "Short"},
+	}
+	ids := func(m []ocSession) string {
+		var out []string
+		for _, s := range m {
+			out = append(out, s.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, tc := range []struct{ pane, want string }{
+		{"gunbound-ng plan 08 fidelity sign-off_", "1"},
+		{"gunbound-ng plan 08 fidelity sign-off…", "1"},
+		{"gunbound-ng plan 08 fidelity_", "1,2"}, // not unique: the caller refuses
+		{"short", "3,4"},                         // not unique: the caller refuses
+		{"sho_", ""},                             // too short to be evidence
+		{"", ""},
+		{"unrelated", ""},
+	} {
+		if got := ids(matchPaneTitle(tc.pane, ss)); got != tc.want {
+			t.Errorf("matchPaneTitle(%q) = %q, want %q", tc.pane, got, tc.want)
+		}
+	}
+}
