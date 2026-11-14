@@ -96,11 +96,13 @@ type subagentCache struct {
 	mu       sync.Mutex
 	entries  map[string]childCacheEntry
 	bindings map[string]childBinding
+	busy     map[string]chan struct{} // active keys only; never evicted while in use
 	epoch    string
 }
 type childBinding struct {
 	at             time.Time
 	listed, native string
+	envID          string
 }
 type childCacheEntry struct {
 	at    time.Time
@@ -150,16 +152,41 @@ func (a claudeAdapter) Subagents(ctx context.Context, se sessionInfo) subagentLi
 }
 func (s *server) childNative(ctx context.Context, se sessionInfo, now time.Time) string {
 	c := &s.children
+	key := strings.Join([]string{profileFrom(ctx, s.cfg.profile), se.ID, se.Path, se.SSHHost, se.TmuxSocket, se.TmuxSession}, "\x00")
+	unlock, ok := c.lockKey(ctx, "binding\x00"+key)
+	if !ok {
+		return ""
+	}
+	defer unlock()
+	c.mu.Lock()
+	b, cached := c.bindings[key]
+	c.mu.Unlock()
+	if !cached || b.listed != se.ClaudeSessionID || now.Sub(b.at) >= envRecheckEvery {
+		if se.TmuxSession != "" && se.SSHHost == "" {
+			if id, err := s.tmuxEnvironmentOnSocket(ctx, se.TmuxSocket, se.TmuxSession, "CLAUDE_SESSION_ID"); err == nil && id != "" {
+				b.envID = id
+			}
+		}
+		b.at, b.listed = now, se.ClaudeSessionID
+	}
+	// Same order as claudeReply, but confirmation belongs to this scoped root,
+	// never the reply cache (which is keyed only by Deck ID).
+	native := ""
+	for _, id := range []string{b.envID, b.native, se.ClaudeSessionID} {
+		if childNativeID.MatchString(id) && findTranscript(id, se.Path) != "" {
+			native, b.native = id, id
+			break
+		}
+	}
+	if ctx.Err() != nil {
+		return native // do not pin a deadline-induced fallback for 60 s
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := strings.Join([]string{profileFrom(ctx, s.cfg.profile), se.ID, se.Path, se.SSHHost, se.TmuxSocket, se.TmuxSession}, "\x00")
 	if c.bindings == nil {
 		c.bindings = map[string]childBinding{}
 	}
-	if b, ok := c.bindings[key]; ok && b.listed == se.ClaudeSessionID && now.Sub(b.at) < envRecheckEvery {
-		return b.native
-	}
-	if len(c.bindings) >= childMaxRoots {
+	if _, exists := c.bindings[key]; !exists && len(c.bindings) >= childMaxRoots {
 		for k, b := range c.bindings {
 			if now.Sub(b.at) >= envRecheckEvery {
 				delete(c.bindings, k)
@@ -172,51 +199,86 @@ func (s *server) childNative(ctx context.Context, se sessionInfo, now time.Time)
 			}
 		}
 	}
-	native := se.ClaudeSessionID
-	if se.TmuxSession != "" && se.SSHHost == "" {
-		// Same pacing gate and refresh cadence as the parent reply resolver,
-		// but explicitly scoped to this root's socket and profile.
-		if out, err := s.tmuxExec(ctx, se.TmuxSocket, "show-environment", "-t", se.TmuxSession, "CLAUDE_SESSION_ID"); err == nil {
-			line := strings.TrimSpace(string(out))
-			if strings.HasPrefix(line, "CLAUDE_SESSION_ID=") {
-				native = strings.TrimPrefix(line, "CLAUDE_SESSION_ID=")
-			}
-		}
-	}
-	if ctx.Err() != nil {
-		return native // do not pin a deadline-induced fallback for 60 s
-	}
-	c.bindings[key] = childBinding{now, se.ClaudeSessionID, native}
+	c.bindings[key] = b
 	return native
 }
+
+// Serialize work only for the same scoped key. The global mutex protects maps,
+// never tmux, filesystem IO or parsing. Waiters may abandon a canceled request;
+// an owner keeps its key until publication even if cache entries are evicted.
+func (c *subagentCache) lockKey(ctx context.Context, key string) (func(), bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, false
+		default:
+		}
+		c.mu.Lock()
+		if c.busy == nil {
+			c.busy = make(map[string]chan struct{})
+		}
+		if done := c.busy[key]; done != nil {
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, false
+			case <-done:
+				continue
+			}
+		}
+		done := make(chan struct{})
+		c.busy[key] = done
+		c.mu.Unlock()
+		return func() {
+			c.mu.Lock()
+			delete(c.busy, key)
+			close(done)
+			c.mu.Unlock()
+		}, true
+	}
+}
+
 func (c *subagentCache) read(ctx context.Context, profile string, se sessionInfo, path, native string, now time.Time) subagentList {
-	// Single-flight ingestion shared by all phones. No persistent file handles,
-	// goroutines, or detailed thread buffers; each bounded scan expires after 6s.
+	// Per-key ingestion shared by all phones; different roots can scan in parallel.
+	key := strings.Join([]string{profile, se.SSHHost, se.ID, path, native}, "\x00")
+	unlock, ok := c.lockKey(ctx, "read\x00"+key)
+	if !ok {
+		return emptyChildren(se, now)
+	}
+	defer unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[string]childCacheEntry)
 		var seed [32]byte
 		_, _ = rand.Read(seed[:])
 		c.epoch = hex.EncodeToString(seed[:])
 	}
-	key := strings.Join([]string{profile, se.SSHHost, se.ID, path, native}, "\x00")
-	if e, ok := c.entries[key]; ok && now.Sub(e.at) < childCacheTTL {
+	e, cached := c.entries[key]
+	scope := childToken(c.epoch, key)
+	c.mu.Unlock()
+	if cached && now.Sub(e.at) < childCacheTTL {
 		return ageChildList(e.list, now)
 	}
 	files := childSourceFiles(path, native)
-	if e, ok := c.entries[key]; ok && sameChildFiles(e.files, files) {
-		list := ageChildList(e.list, now)
+	var list subagentList
+	if cached && sameChildFiles(e.files, files) {
+		list = ageChildList(e.list, now)
 		list.ObservedAt = now
-		c.entries[key] = childCacheEntry{now, list, files}
+	} else {
+		list = readClaudeChildren(ctx, se, path, native, scope, now)
+	}
+	// Cancellation is not source evidence: never cache an interrupted scan.
+	if ctx.Err() != nil {
 		return list
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for k, e := range c.entries {
 		if now.Sub(e.at) > time.Minute {
 			delete(c.entries, k)
 		}
 	}
-	if len(c.entries) >= childMaxRoots { // bounded LRU eviction, no live readers to close
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= childMaxRoots { // bounded LRU eviction
 		var oldest string
 		var at time.Time
 		for k, e := range c.entries {
@@ -226,13 +288,7 @@ func (c *subagentCache) read(ctx context.Context, profile string, se sessionInfo
 		}
 		delete(c.entries, oldest)
 	}
-	list := readClaudeChildren(ctx, se, path, native, childToken(c.epoch, key), now)
-	// A cancelled/expired request (phone abort, shared sessions deadline) is not
-	// evidence about the source. Caching it would pin "unavailable" for as long
-	// as the files stay unchanged, i.e. indefinitely for an idle parent.
-	if ctx.Err() == nil {
-		c.entries[key] = childCacheEntry{now, list, files}
-	}
+	c.entries[key] = childCacheEntry{now, list, files}
 	return list
 }
 func ageChildList(list subagentList, now time.Time) subagentList {

@@ -367,8 +367,16 @@ func TestSubagentsMetadataOutcomeAndContinuation(t *testing.T) {
 	assertChild(t, f.read(childTestNow.Add(10*time.Second)), "running", 1)
 }
 func TestSubagentsCurrentRootBindingAndClear(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	project := filepath.Join(home, "project")
+	dir := filepath.Join(home, "projects", convertToClaudeDirName(project))
+	mustMkdir(t, dir)
+	for _, id := range []string{"native-one", "native-two"} {
+		putChildFile(t, filepath.Join(dir, id+".jsonl"), "{\"type\":\"system\"}\n")
+	}
 	s := testServer(t, config{token: "fixture", homeDir: t.TempDir(), profile: "one"})
-	se := sessionInfo{ID: "same-id", Path: "/fixture", ClaudeSessionID: "native-one"}
+	se := sessionInfo{ID: "same-id", Path: project, ClaudeSessionID: "native-one"}
 	if got := s.childNative(withProfile(context.Background(), "one"), se, childTestNow); got != "native-one" {
 		t.Fatal(got)
 	}
@@ -376,8 +384,14 @@ func TestSubagentsCurrentRootBindingAndClear(t *testing.T) {
 	if got := s.childNative(withProfile(context.Background(), "two"), se, childTestNow); got != "native-two" {
 		t.Fatal("cross-profile binding", got)
 	}
+	if got := s.childNative(withProfile(context.Background(), "one"), se, childTestNow); got != "native-one" {
+		t.Fatal("confirmed id lost precedence over list id", got)
+	}
+	if err := os.Remove(filepath.Join(dir, "native-one.jsonl")); err != nil {
+		t.Fatal(err)
+	}
 	if got := s.childNative(withProfile(context.Background(), "one"), se, childTestNow); got != "native-two" {
-		t.Fatal("clear kept previous native segment", got)
+		t.Fatal("missing confirmed transcript prevented list fallback", got)
 	}
 }
 func TestSubagentsClaudeEndpointAndActivity(t *testing.T) {

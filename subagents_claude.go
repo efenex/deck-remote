@@ -295,6 +295,7 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 	// earlier run cannot close a resumed sidechain that has no new Agent call.
 	latest := map[string]time.Time{}
 	terminalAt := map[string]time.Time{}
+	invocationChildren := map[string]string{}
 	get := func(id string) *childRun {
 		if child := byID[id]; child != nil {
 			return child
@@ -321,6 +322,7 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 			return
 		}
 		child.Invocations = append(child.Invocations, childInvocation{ID: childToken(scope, native, id, l.row, l.call), ParentRowID: l.row, ParentToolCallID: l.call, ParentBlock: l.block, StartedAt: l.at})
+		invocationChildren[l.call] = id
 		if l.at.After(latest[id]) {
 			latest[id] = l.at
 		}
@@ -469,6 +471,9 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 		list.Complete = false
 		list.Availability = "unavailable"
 	}
+	// File order need not be delivery order. Resolve earlier terminal states
+	// first so a resume notification must advance the child's last terminal time.
+	sort.SliceStable(terminals, func(i, j int) bool { return terminals[i].at.Before(terminals[j].at) })
 	for _, n := range terminals {
 		child := byID[n.child]
 		if child == nil || !child.Linked || n.at.Before(latest[n.child]) || n.at.IsZero() {
@@ -480,6 +485,15 @@ func readClaudeChildren(ctx context.Context, se sessionInfo, path, native, scope
 				matched = true
 				child.Invocations[i].Outcome = n.status
 			}
+		}
+		// Resume calls need not be Agent invocations. The structural session-task
+		// notification already identifies this linked child by task id; accept an
+		// unknown call only when it advances terminal state. Never attach it to an
+		// invocation or accept a call verified as another child's invocation.
+		// Outcome-less metadata "finished" does not block it: real meta.json writes
+		// land a few ms after the same run's notification (as on the verified path).
+		if _, verifiedCall := invocationChildren[n.call]; !matched && !verifiedCall && (n.at.After(terminalAt[n.child]) || child.StateSource == "metadata-finished") {
+			matched = true
 		}
 		if matched && (child.StateSource == "metadata-finished" || !n.at.Before(terminalAt[n.child])) {
 			child.Status = n.status
