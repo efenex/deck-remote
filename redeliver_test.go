@@ -21,8 +21,14 @@ func releaseTestServer(t *testing.T) (*server, string, *trackedSend) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> '` + dir + `/calls'
 case "$*" in
-*"session send-status"*) cat '` + dir + `/status';;
+*"session send-status"*)
+  if test -f '` + dir + `/status-error'; then cat '` + dir + `/status-error'; exit 2; fi
+  cat '` + dir + `/status';;
 *"session show"*) cat '` + dir + `/show';;
+*"session redeliver"*)
+  if test -f '` + dir + `/cli-error'; then cat '` + dir + `/cli-error' >&2; exit 2; fi
+  key=$(printf '%s' "$*" | sed 's/.*--request-id \([^ ]*\).*/\1/')
+  sed "s/TAP_KEY/$key/g" '` + dir + `/redeliver';;
 *"session queue release"*) cat '` + dir + `/release';;
 *) exit 3;;
 esac
@@ -34,11 +40,13 @@ esac
 		t.Fatalf("shell validation: %s: %v", out, err)
 	}
 	s := askTestServer(t, bin)
+	s.sends.running = true // tests drive polling synchronously
 	it := &trackedSend{RequestID: "req1", SendID: "send1", SessionID: "s1", Profile: "phone", Created: time.Now().Add(-time.Minute).Unix()}
 	s.sends.items[it.RequestID] = it
 	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"queued","reason":"composer occupied","attempts":1,"updated_at":"2026-11-10T20:04:00Z"}`)
 	putFixture(t, dir, "show", `{"id":"s1","status":"waiting","hook_status":"waiting","hook_status_fresh":true,"substate":"idle-at-empty-prompt"}`)
 	putFixture(t, dir, "release", `{"send_id":"send1","session_id":"s1","state":"queued","outcome":"refused","reason":"composer occupied; nothing typed","attempts":1}`)
+	putFixture(t, dir, "redeliver", `{"send_id":"send1","request_id":"TAP_KEY","outcome":"refused","reason":"composer_occupied","snapshot":{"session_id":"s1","state":"queued","attempts":1}}`)
 	return s, dir, it
 }
 
@@ -107,35 +115,92 @@ func TestNoLandedTraceAfterTwoMinutesIsNotProofOfLoss(t *testing.T) {
 	}
 }
 
-func TestReleaseNeverReenqueuesUncertainOrFinishedMessages(t *testing.T) {
-	s, dir, _ := releaseTestServer(t)
-	for _, state := range []string{"typing", "typed", "submitted", "landed", "failed", "cancelled"} {
-		r := queuedSend{SendID: "send1", SessionID: "s1", State: state, Settled: true}
-		got, why := s.releaseSend(context.Background(), r)
-		if got.State != state || why == "" {
-			t.Fatalf("%s: %+v %s", state, got, why)
-		}
-	}
-	if calls := releaseCalls(t, dir); calls != "" {
-		t.Fatalf("unsafe CLI call: %s", calls)
+func TestRedeliverEveryDecisionUsesOriginalID(t *testing.T) {
+	for _, tc := range []struct{ outcome, state, want, reason string }{
+		{"blocked_unknown", "typed", "blocked_unknown", "may have landed; not re-sent · check again"},
+		{"unsupported", "submitted", "unsupported", "unverifiable"},
+		{"already_landed", "landed", "delivered", "landed"},
+		{"landed", "landed", "delivered", "landed"},
+		{"pending", "queued", "pending", "in progress"},
+		{"pending", "failed", "pending", "in progress"},
+		{"conflict", "typed", "refused", "conflict"},
+		{"not_found", "", "refused", "not found"},
+		{"refused", "cancelled", "refused", "refused"},
+		{"refused", "failed", "refused", "refused"},
+	} {
+		t.Run(tc.outcome+tc.state, func(t *testing.T) {
+			s, dir, _ := releaseTestServer(t)
+			result := map[string]any{"send_id": "send1", "request_id": "TAP_KEY", "outcome": tc.outcome, "reason": "fixture_reason"}
+			if tc.state != "" {
+				result["snapshot"] = map[string]any{"session_id": "s1", "state": tc.state, "landed_row_id": "row1"}
+			}
+			putFixture(t, dir, "redeliver", mustJSON(t, result))
+			w := postRedeliver(s, retryBody)
+			var ev map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &ev); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != 200 || ev["state"] != tc.want || !strings.Contains(ev["redeliveryReason"].(string), tc.reason) || ev["operationId"] != "tap1" {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			calls := releaseCalls(t, dir)
+			if calls != "-p phone session redeliver send1 --request-id tap1 --json\n" {
+				t.Fatal(calls)
+			}
+			if tc.state == "landed" && ev["landedRowId"] != "row1" {
+				t.Fatal(ev)
+			}
+		})
 	}
 }
 
-func TestReleaseUsesOriginalIDAndDoesNotTrustOutcomeDelivered(t *testing.T) {
+func TestRedeliverUnknownCommandNeverFallsBack(t *testing.T) {
+	for _, message := range []string{"unknown command: redeliver", "unknown session command: redeliver"} {
+		for _, state := range []string{"typed", "submitted", "failed", "queued"} {
+			s, dir, _ := releaseTestServer(t)
+			putFixture(t, dir, "cli-error", message)
+			rec, reason, err := s.releaseSend(context.Background(), queuedSend{SendID: "send1", SessionID: "s1", State: state, Settled: true}, "tap1")
+			if err != nil || mapSendState(rec).State != "unsupported" || !strings.Contains(reason, "unverifiable") {
+				t.Fatalf("%+v %s %v", rec, reason, err)
+			}
+			if calls := releaseCalls(t, dir); strings.Count(calls, "session redeliver") != 1 || strings.Contains(calls, "queue release") || strings.Contains(calls, "session send ") {
+				t.Fatal(calls)
+			}
+		}
+	}
+}
+
+func TestRedeliverRejectsMismatchedAndUncertainReceipts(t *testing.T) {
+	for _, result := range []string{
+		`{}`, `not-json`,
+		`{"send_id":"wrong","request_id":"TAP_KEY","outcome":"landed"}`,
+		`{"send_id":"send1","request_id":"wrong","outcome":"landed"}`,
+		`{"send_id":"send1","request_id":"TAP_KEY","outcome":"landed"}`,
+		`{"send_id":"send1","request_id":"TAP_KEY","outcome":"pending","snapshot":{"session_id":"wrong","state":"queued"}}`,
+		`{"send_id":"send1","request_id":"TAP_KEY","outcome":"future_value"}`,
+	} {
+		s, dir, _ := releaseTestServer(t)
+		putFixture(t, dir, "redeliver", result)
+		if w := postRedeliver(s, retryBody); w.Code != 502 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+	}
 	s, dir, _ := releaseTestServer(t)
-	putFixture(t, dir, "release", `{"send_id":"send1","session_id":"s1","state":"submitted","outcome":"delivered"}`)
-	r, why := s.releaseSend(withProfile(context.Background(), "phone"), queuedSend{SendID: "send1", SessionID: "s1", State: "queued"})
-	if mapSendState(r).State != "sent" || !strings.Contains(why, "submitted; transcript landing not yet confirmed") {
-		t.Fatalf("%+v %s", r, why)
+	putFixture(t, dir, "cli-error", "connection interrupted")
+	if w := postRedeliver(s, retryBody); w.Code != 502 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	calls := releaseCalls(t, dir)
-	if !strings.Contains(calls, "session queue release send1 --json") || !strings.Contains(calls, "phone") || strings.Contains(calls, "session send ") {
-		t.Fatalf("calls: %s", calls)
+}
+
+func TestRedeliverCurrentLandedSnapshotWinsOverStickyDecision(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	putFixture(t, dir, "redeliver", `{"send_id":"send1","request_id":"TAP_KEY","outcome":"blocked_unknown","replayed":true,"snapshot":{"session_id":"s1","state":"landed","landed_row_id":"row1"}}`)
+	if w := postRedeliver(s, retryBody); w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"delivered"`) {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	putFixture(t, dir, "release", `{"send_id":"different","session_id":"s1","state":"landed","outcome":"delivered"}`)
-	r, why = s.releaseSend(context.Background(), queuedSend{SendID: "send1", SessionID: "s1", State: "queued"})
-	if r.State != "queued" || !strings.Contains(why, "no matching") {
-		t.Fatalf("%+v %s", r, why)
+	putFixture(t, dir, "redeliver", `{"outcome":"unsupported","reason":"remote_redeliver_unavailable"}`)
+	if w := postRedeliver(s, retryBody); w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"unsupported"`) {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -145,27 +210,42 @@ func postRedeliver(s *server, body string) *httptest.ResponseRecorder {
 	return w
 }
 
-const retryBody = `{"requestId":"req1","sessionId":"s1","sendId":"send1","profile":"phone"}`
+const retryBody = `{"operationId":"tap1","requestId":"req1","sessionId":"s1","sendId":"send1","profile":"phone"}`
 
-func TestManualRedeliveryChecksOwnershipAndDedupesBySendID(t *testing.T) {
+func TestManualRedeliveryChecksOwnershipAndReusesOperation(t *testing.T) {
 	s, dir, _ := releaseTestServer(t)
-	w := postRedeliver(s, retryBody)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "refused") || !strings.Contains(w.Body.String(), "composer occupied") {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+	for i := 0; i < 2; i++ {
+		if w := postRedeliver(s, retryBody); w.Code != 200 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
 	}
-	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"landed","landed_row_id":"row1"}`)
-	w = postRedeliver(s, retryBody)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"delivered"`) {
-		t.Fatalf("%d %s", w.Code, w.Body.String())
+	if w := postRedeliver(s, strings.Replace(retryBody, "tap1", "tap2", 1)); w.Code != 200 {
+		t.Fatal(w.Code)
 	}
-	if calls := releaseCalls(t, dir); strings.Count(calls, "queue release") != 1 || strings.Contains(calls, "session send ") {
+	calls := releaseCalls(t, dir)
+	if strings.Count(calls, "--request-id tap1") != 2 || strings.Count(calls, "--request-id tap2") != 1 {
 		t.Fatal(calls)
 	}
-	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"other","state":"queued"}`)
-	if w = postRedeliver(s, retryBody); w.Code != 409 {
+	for _, body := range []string{strings.Replace(retryBody, "s1", "other", 1), strings.Replace(retryBody, "phone", "other", 1)} {
+		if w := postRedeliver(s, body); w.Code != 409 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+	}
+	// Settled receipts leave the tracker; read-only status verifies their owner.
+	delete(s.sends.items, "req1")
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"failed"}`)
+	if w := postRedeliver(s, retryBody); w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
-	if w = postRedeliver(s, `{}`); w.Code != 400 {
+	if !strings.Contains(releaseCalls(t, dir), "send-status send1 --no-resume --json") {
+		t.Fatal(releaseCalls(t, dir))
+	}
+	delete(s.sends.items, "req1")
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"other","state":"queued"}`)
+	if w := postRedeliver(s, retryBody); w.Code != 409 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if w := postRedeliver(s, `{}`); w.Code != 400 {
 		t.Fatal(w.Code)
 	}
 }
@@ -323,7 +403,7 @@ func TestRedeliverSurvivesClientDisconnect(t *testing.T) {
 	cancel()
 	w := httptest.NewRecorder()
 	s.handleRedeliver(w, httptest.NewRequest("POST", "/api/rc/ask/redeliver", strings.NewReader(retryBody)).WithContext(ctx))
-	if w.Code != 200 || strings.Count(releaseCalls(t, dir), "queue release") != 1 {
+	if w.Code != 200 || strings.Count(releaseCalls(t, dir), "session redeliver") != 1 {
 		t.Fatalf("%d %s calls=%s", w.Code, w.Body.String(), releaseCalls(t, dir))
 	}
 }
@@ -344,5 +424,113 @@ func TestCapabilityProbeRetriesUntilItAnswers(t *testing.T) {
 	s.typedSendFlags(context.Background())
 	if strings.Count(readFile(t, argv), "--help") != before {
 		t.Fatal("a successful probe must be cached")
+	}
+}
+
+func TestStatusReadsNeverResumeAndUnsupportedToolsNeverSayLost(t *testing.T) {
+	for _, tool := range []string{"opencode", "shell", "ssh"} {
+		for _, state := range []string{"typing", "typed", "submitted"} {
+			s, dir, _ := releaseTestServer(t)
+			putFixture(t, dir, "status", mustJSON(t, queuedSend{SendID: "send1", SessionID: "s1", State: state, Tool: tool, Settled: true, SentAt: time.Now().Add(-time.Hour)}))
+			w := httptest.NewRecorder()
+			s.handleSendStatus(w, httptest.NewRequest("GET", "/api/rc/ask/status?requestId=req1&sendId=send1&sessionId=s1&profile=phone", nil))
+			if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"unsupported"`) || strings.Contains(w.Body.String(), "lost") {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			if calls := releaseCalls(t, dir); calls != "-p phone session send-status send1 --no-resume --json\n" {
+				t.Fatal(calls)
+			}
+		}
+	}
+}
+
+func TestUntrackedOldCLIAndPrunedReceiptsAreShortRefusals(t *testing.T) {
+	for _, tc := range []struct{ message, outcome string }{
+		{"flag provided but not defined: -no-resume", "unsupported"},
+		{`{"error":"send send1: sendqueue: unknown send id","code":"NOT_FOUND"}`, "not_found"},
+	} {
+		s, dir, _ := releaseTestServer(t)
+		delete(s.sends.items, "req1")
+		putFixture(t, dir, "status-error", tc.message)
+		w := postRedeliver(s, retryBody)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"redeliveryOutcome":"`+tc.outcome+`"`) {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+		if calls := releaseCalls(t, dir); strings.Contains(calls, "queue release") || strings.Contains(calls, "session redeliver") || strings.Count(calls, "--no-resume") != 1 {
+			t.Fatal(calls)
+		}
+	}
+}
+
+func TestReopenedSendIsFollowedAgain(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	delete(s.sends.items, "req1")
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"failed"}`)
+	putFixture(t, dir, "redeliver", `{"send_id":"send1","request_id":"TAP_KEY","outcome":"pending","reason":"reopened","snapshot":{"session_id":"s1","state":"queued"}}`)
+	if w := postRedeliver(s, retryBody); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if s.sends.items["req1"] == nil {
+		t.Fatal("reopened send not tracked")
+	}
+	saved := newSendTracker(filepath.Dir(s.sends.path))
+	saved.load()
+	if saved.items["req1"] == nil {
+		t.Fatal("reopened receipt not persisted")
+	}
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"landed","landed_row_id":"row1"}`)
+	if s.pollSendsOnce() {
+		t.Fatal("landed send still open")
+	}
+}
+
+func TestRedeliverRequiresValidTapKeyBeforeCLI(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	for _, key := range []string{"", "--help", "../key", strings.Repeat("k", 65)} {
+		if w := postRedeliver(s, strings.Replace(retryBody, "tap1", key, 1)); w.Code != 400 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+	}
+	if calls := releaseCalls(t, dir); calls != "" {
+		t.Fatal(calls)
+	}
+}
+
+func TestSSHPlaceholderUsesUnverifiableEvenWithClaudeTool(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	s.lists.m["phone"] = listCacheEntry{sessions: []sessionInfo{{ID: "s1", Tool: "claude", SSHHost: "fixture-owner"}}}
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","tool":"claude","state":"typed","settled":true}`)
+	rec, err := s.sendStatus(withProfile(context.Background(), "phone"), "send1")
+	if err != nil || mapSendState(rec).State != "unsupported" {
+		t.Fatalf("%+v %v", rec, err)
+	}
+	if calls := releaseCalls(t, dir); strings.Count(calls, "\n") != 1 {
+		t.Fatal(calls)
+	}
+}
+
+func TestDeliveryStatusIsReadCapableButRedeliverStillNeedsAct(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	_, token, err := s.tokens.mint("fixture-reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := s.routes()
+	req := httptest.NewRequest("GET", "/api/rc/ask/status?requestId=req1&sendId=send1&sessionId=s1&profile=phone", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest("POST", "/api/rc/ask/redeliver", strings.NewReader(retryBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if calls := releaseCalls(t, dir); strings.Contains(calls, "redeliver") || !strings.Contains(calls, "--no-resume") {
+		t.Fatal(calls)
 	}
 }

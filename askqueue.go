@@ -39,18 +39,20 @@ const (
 // queuedSend is the part of agent-deck's send record (`--queue --json` reply
 // and `send-status --json`) deck-remote reads.
 type queuedSend struct {
-	SendID       string    `json:"send_id"`
-	SessionID    string    `json:"session_id"`
-	State        string    `json:"state"`
-	Reason       string    `json:"reason"`
-	TargetStatus string    `json:"target_status"`
-	Attempts     int       `json:"attempts"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	SentAt       time.Time `json:"sent_at"`
-	LandedAt     time.Time `json:"landed_at"`
-	Settled      bool      `json:"settled"`
-	LandedRowID  string    `json:"landed_row_id"`
+	SendID            string    `json:"send_id"`
+	SessionID         string    `json:"session_id"`
+	State             string    `json:"state"`
+	Reason            string    `json:"reason"`
+	TargetStatus      string    `json:"target_status"`
+	Attempts          int       `json:"attempts"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	SentAt            time.Time `json:"sent_at"`
+	LandedAt          time.Time `json:"landed_at"`
+	Settled           bool      `json:"settled"`
+	LandedRowID       string    `json:"landed_row_id"`
+	Tool              string    `json:"tool"`
+	RedeliveryOutcome string    `json:"-"`
 }
 
 // enqueueSend hands text to agent-deck's durable queue and returns its record.
@@ -120,9 +122,41 @@ func (s *server) typedSendFlags(ctx context.Context) []string {
 }
 
 // sendStatus reads a queued send's current record.
+var errSendNotFound = errors.New("original send not found")
+var errSendStatusUnsupported = errors.New("agent-deck cannot read status without resuming")
+
 func (s *server) sendStatus(ctx context.Context, sendID string) (queuedSend, error) {
 	var rec queuedSend
-	err := s.adeckJSON(ctx, &rec, "session", "send-status", sendID, "--json")
+	out, err := s.adeck(ctx, "session", "send-status", sendID, "--no-resume", "--json")
+	if err != nil {
+		message := strings.ToLower(string(out) + err.Error())
+		if strings.Contains(message, "sendqueue: unknown send id") {
+			return rec, errSendNotFound
+		}
+		if unknownRedeliver(message) || strings.Contains(message, "flag provided but not defined: -no-resume") {
+			return rec, errSendStatusUnsupported
+		}
+		return rec, err
+	}
+	err = json.Unmarshal(out, &rec)
+	if err == nil {
+		// Queue records identify the tool but omit SSH-placeholder metadata.
+		// Reuse the session list already loaded for the deck, without issuing a
+		// second CLI command or implementing owner forwarding here.
+		s.lists.mu.Lock()
+		for _, se := range s.lists.m[profileFrom(ctx, s.cfg.profile)].sessions {
+			if se.ID == rec.SessionID {
+				if rec.Tool == "" {
+					rec.Tool = se.Tool
+				}
+				if se.SSHHost != "" {
+					rec.RedeliveryOutcome = "unsupported"
+				}
+				break
+			}
+		}
+		s.lists.mu.Unlock()
+	}
 	return rec, err
 }
 
@@ -139,6 +173,21 @@ type uiSendState struct {
 // record is lost/unconfirmed, NOT delivered and NOT safe to blindly resend.
 // The durable queue remains the delivery authority; we do not re-enqueue text.
 func mapSendState(r queuedSend) uiSendState {
+	if r.State == "landed" {
+		return uiSendState{State: "delivered", Final: true}
+	}
+	if r.State != "landed" && (r.RedeliveryOutcome == "unsupported" ||
+		((r.State == "typed" || r.State == "submitted" || r.State == "typing") && r.Tool != "" && r.Tool != "claude" && r.Tool != "codex")) {
+		return uiSendState{State: "unsupported", Final: r.Settled}
+	}
+	switch r.RedeliveryOutcome {
+	case "blocked_unknown":
+		return uiSendState{State: "blocked_unknown", Final: r.Settled}
+	case "pending":
+		return uiSendState{State: "pending"}
+	case "not_found", "conflict", "refused":
+		return uiSendState{State: "refused", Final: true}
+	}
 	if (r.State == "typing" || r.State == "typed" || r.State == "submitted") && !r.SentAt.IsZero() && time.Since(r.SentAt) >= sendLandedMax {
 		return uiSendState{State: "lost", Final: r.Settled}
 	}
@@ -178,7 +227,7 @@ type trackedSend struct {
 	LastAutoAttempt int64  `json:"lastAutoAttempt,omitempty"`
 
 	lastProbe int64  // readiness-check backoff, guarded by sendTracker.mu
-	releasing bool   // guarded by sendTracker.mu; manual/automatic releases never overlap
+	releasing bool   // guarded by sendTracker.mu; automatic probes/releases serialize
 	state     string // last observed ui state (not persisted)
 	key       string // last published state+position, to publish only changes
 }
@@ -323,8 +372,9 @@ func sendStateEvent(it *trackedSend, rec queuedSend) map[string]any {
 		"sessionId": it.SessionID, "sendId": it.SendID, "ts": time.Now().Unix(),
 		"statusTs": at.Unix(), "images": it.Images, "reason": sendReason(rec),
 		"targetStatus": rec.TargetStatus, "attempts": rec.Attempts,
-		"landedRowId": rec.LandedRowID,
-		"retryable":   st.Retryable && it.Images == 0,
+		"landedRowId":       rec.LandedRowID,
+		"redeliveryOutcome": rec.RedeliveryOutcome,
+		"retryable":         st.Retryable && it.Images == 0,
 	}
 	if st.State == "failed" {
 		ev["error"] = failReason(rec.Reason)
@@ -333,6 +383,12 @@ func sendStateEvent(it *trackedSend, rec queuedSend) map[string]any {
 }
 
 func sendReason(rec queuedSend) string {
+	if mapSendState(rec).State == "unsupported" {
+		return "unverifiable"
+	}
+	if rec.RedeliveryOutcome != "" && rec.Reason != "" {
+		return rec.Reason
+	}
 	reason := strings.TrimSpace(rec.Reason)
 	if reason == "" {
 		switch rec.State {

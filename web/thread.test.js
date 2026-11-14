@@ -191,12 +191,12 @@ test('a reply clearing queued silences a stale in-flight label', () => {
   assert.strictEqual(sendStatusLabel(e), '');
 });
 
-test('the transcript showing a bubble promotes it to delivered, even after "unconfirmed"', () => {
+test('content alone is seen (unverified), even after "unconfirmed"', () => {
   const conv = [me('ship it', { requestId: 'r1', status: 'unconfirmed', queued: false, ts: 1000 })];
   assert.strictEqual(promoteDelivered(conv, [h('me', 'ship it', 1010)]), 1);
-  assert.strictEqual(sendStatusLabel(conv[0]), 'landed');
-  // a late agent-deck verdict cannot take it back
-  applyAskState(conv, { requestId: 'r1', state: 'unconfirmed' });
+  assert.strictEqual(sendStatusLabel(conv[0]), 'seen (unverified)');
+  // Positive agent-deck proof upgrades content-only attribution.
+  applyAskState(conv, { requestId: 'r1', state: 'delivered', landedRowId: 'proof' });
   assert.strictEqual(conv[0].status, 'delivered');
 });
 
@@ -204,7 +204,7 @@ test('promotion is one-for-one and an older identical row proves nothing', () =>
   const conv = [me('yes', { ts: 1000 }), me('yes', { ts: 1001 })];
   assert.strictEqual(promoteDelivered(conv, [h('me', 'yes', 10)]), 0); // from long ago
   assert.strictEqual(promoteDelivered(conv, [h('me', 'yes', 1005)]), 1); // one row, one bubble
-  assert.deepStrictEqual(conv.map((e) => e.status), ['delivered', 'sent']);
+  assert.deepStrictEqual(conv.map((e) => e.status), ['seen', 'sent']);
   assert.strictEqual(promoteDelivered([me('a', { ts: 1 })], [h('reply', 'a', 5)]), 0); // only user rows count
 });
 
@@ -326,20 +326,20 @@ test('imagesLabel pluralises', () => {
   assert.match(imagesLabel(3), /3 images$/);
 });
 
-test('a phone send the target filed as a peer message is one row, delivered', () => {
+test('a phone send attributed by content is one row, seen but unverified', () => {
   // tower 2026-10-21: the bubble went "unconfirmed" at 10:17:03 though the text
   // had landed at 10:15:01 as a peer message; the server now serves that row as
   // the operator's (origin "phone", mapped to a delivered 'me' row).
-  const text = 'one thing dr needs is a context/quota view, ie like pulse in cc';
+  const text = '[REDACTED]';
   const sent = 1792577696, landed = 1792577701;
   const conv = [me(text, { requestId: 'req-1', status: 'unconfirmed', queued: false, ts: sent })];
-  const row = { ...h('me', text, landed), origin: 'phone', status: 'delivered' };
+  const row = { ...h('me', text, landed), origin: 'phone', status: 'seen' };
   assert.strictEqual(promoteDelivered(conv, [row]), 1);
   assert.strictEqual(newTailTurns(conv, [row]).length, 0); // not appended a second time
-  assert.strictEqual(sendStatusLabel(conv[0]), 'you (phone) · landed');
+  assert.strictEqual(sendStatusLabel(conv[0]), 'seen (unverified)');
   const merged = mergeFreshHistory([row], conv);
   assert.strictEqual(merged.length, 1);
-  assert.strictEqual(sendStatusLabel(merged[0]), 'you (phone) · landed');
+  assert.strictEqual(sendStatusLabel(merged[0]), 'seen (unverified)');
 });
 
 const { attentionChipLabel, answerProgressLabel, answerFailureLabel } = require('./thread.js');

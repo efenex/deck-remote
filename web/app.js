@@ -2650,7 +2650,11 @@
   }
 
   function ensureConvo(id) {
-    if (!state.convos.has(id)) state.convos.set(id, []);
+    if (!state.convos.has(id)) {
+      let pending = [];
+      try { pending = DeckThread.pendingRedeliveries(localStorage, CURRENT_PROFILE, id); } catch (_) {}
+      state.convos.set(id, pending);
+    }
     return state.convos.get(id);
   }
 
@@ -2698,9 +2702,9 @@
     const images = m.images || (role === 'me' ? DeckThread.photoCount(content) : 0);
     // A phone send the target filed as a peer message (server: claimEchoes):
     // the transcript holding it is the proof it landed.
-    if (m.origin === 'phone') return { role, content, ts: m.ts, kind: '', hist: true, images, origin: 'phone', status: 'delivered' };
+    if (m.origin === 'phone') return { role, content, id: m.id, ts: m.ts, kind: '', hist: true, images, origin: 'phone', status: 'seen' };
     // hist: from the transcript, so a fresh history page may replace it.
-    return { role, content, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images };
+    return { role, content, id: m.id, ts: m.ts, kind: m.role === 'commentary' ? 'commentary' : '', hist: true, images };
   }
 
   // Open-load: fetch the most recent history window and seed the convo with it.
@@ -2928,14 +2932,14 @@
           const ts = el('div', 'ts' + (e.status === 'failed' || e.status === 'lost' ? ' failed' : ''), fmtTime(at) + (label ? ' · ' + label : ''));
           if (at) ts.title = new Date(at * 1000).toISOString();
           if (DeckThread.canRetry(e)) {
-            const retry = el('button', 'retry', 'Re-deliver');
+            const retry = el('button', 'retry', DeckThread.retryLabel(e));
             retry.type = 'button';
             retry.title = 'Check the original send and retry only if agent-deck can do so safely';
             retry.addEventListener('click', () => retrySend(id, e));
             ts.appendChild(retry);
           }
           convo.appendChild(ts);
-          const details = [e.reason, e.targetStatus ? 'target: ' + e.targetStatus : '', e.attempts ? 'attempts: ' + e.attempts : '', e.redelivering ? 'Checking re-delivery…' : e.redeliveryReason].filter(Boolean);
+          const details = [...new Set([e.reason, e.targetStatus ? 'target: ' + e.targetStatus : '', e.attempts ? 'attempts: ' + e.attempts : '', e.redelivering ? 'Checking re-delivery…' : e.redeliveryReason].filter(Boolean))];
           if (details.length) convo.appendChild(el('div', 'ts delivery-reason', details.join(' · ')));
         }
       } else if (e.role === 'peer' || e.role === 'slash') {
@@ -3120,13 +3124,21 @@
     if (!DeckThread.canRetry(entry)) return;
     entry.redelivering = true;
     renderConvo(id);
+    const profile = CURRENT_PROFILE;
+    let operationId = '';
     try {
+      operationId = DeckThread.beginRedelivery(localStorage, profile, id, entry, () => crypto.randomUUID());
+      entry.redeliveryOperationId = operationId;
       const event = await api('POST', '/api/rc/ask/redeliver', {
-        sessionId: id, requestId: entry.requestId, sendId: entry.sendId, profile: CURRENT_PROFILE,
+        sessionId: id, requestId: entry.requestId, sendId: entry.sendId, profile, operationId,
       }, false, 195000);
-      DeckThread.applyAskState(ensureConvo(id), event);
+      if (!event || event.operationId !== operationId || !event.redeliveryOutcome) throw new Error('No matching check receipt');
+      DeckThread.finishRedelivery(localStorage, profile, id, entry, operationId);
+      delete entry.redeliveryOperationId;
+      if (CURRENT_PROFILE === profile) DeckThread.applyAskState(ensureConvo(id), event);
     } catch (err) {
-      entry.redeliveryReason = 'Re-delivery not confirmed: ' + err.message;
+      // SSE may have acknowledged the operation while its HTTP response was lost.
+      if (!operationId || entry.redeliveryOperationId === operationId) entry.redeliveryReason = 'Re-delivery not confirmed: ' + err.message;
     } finally {
       entry.redelivering = false;
       renderConvo(id);
@@ -3137,16 +3149,14 @@
   // on reconnect; never release them as a side effect of refreshing the UI.
   function refreshDeliveryStates(id) {
     ensureConvo(id).forEach(async entry => {
-      // 'failed' is final (nothing typed) and cannot change; others re-checked at most every 30 s.
-      if (!DeckThread.canRetry(entry) || entry.status === 'failed' || entry.checkingDelivery ||
+      // Read-only recovery, including failed sends reopened by another client.
+      if (!DeckThread.canRetry(entry) || entry.checkingDelivery ||
           (entry.checkedAt && Date.now() - entry.checkedAt < 30000)) return;
       entry.checkingDelivery = true;
       entry.checkedAt = Date.now();
       try {
-        const event = await api('POST', '/api/rc/ask/redeliver', {
-          sessionId: id, requestId: entry.requestId, sendId: entry.sendId,
-          profile: CURRENT_PROFILE, checkOnly: true,
-        });
+        const query = new URLSearchParams({ sessionId: id, requestId: entry.requestId, sendId: entry.sendId });
+        const event = await api('GET', '/api/rc/ask/status?' + query);
         DeckThread.applyAskState(ensureConvo(id), event);
       } catch (err) {
         entry.redeliveryReason = 'Delivery status unavailable: ' + err.message;
@@ -3597,19 +3607,26 @@
       return;
     }
     const id = ev.sessionId;
+    if (ev.operationId && ev.profile !== undefined && ev.profile !== CURRENT_PROFILE) return;
     if (ev.type === 'ask-state' && ((ev.state === 'sent' && !ev.sendId) || ev.state === 'steered')) {
       // already reflected locally on send; ensure pending exists
       if (ev.state === 'sent') DeckThread.applyAskState(ensureConvo(id), ev);
       if (id && !state.pending.has(id)) state.pending.set(id, { ctx: 'thinking', requestId: ev.requestId });
       renderConvo(id);
       if (ev.state === 'steered' && id && state.openSheetId === id) toast('Steered', 'Injected into the current Codex turn.');
-    } else if (ev.type === 'ask-state' && ['sent', 'queued', 'delivering', 'delivered', 'unconfirmed', 'lost', 'failed'].includes(ev.state)) {
+    } else if (ev.type === 'ask-state' && ['sent', 'queued', 'delivering', 'delivered', 'unconfirmed', 'lost', 'failed', 'blocked_unknown', 'unsupported', 'pending', 'refused'].includes(ev.state)) {
       // Delivery progress of a queued send (agent-deck's durable queue). The
       // reply arrives through the transcript reconcile / reply push, never as
       // a per-request "reply" event, so drop the per-message "thinking"
       // spinner; the bubble itself carries the status (queued (n) / delivered
       // / failed + Retry).
       const bubble = DeckThread.applyAskState(ensureConvo(id), ev);
+      if (bubble && ev.operationId && ev.redeliveryOutcome && ev.profile === CURRENT_PROFILE) {
+        try {
+          DeckThread.finishRedelivery(localStorage, CURRENT_PROFILE, id, bubble, ev.operationId);
+          if (bubble.redeliveryOperationId === ev.operationId) delete bubble.redeliveryOperationId;
+        } catch (_) { /* Retain the key if storage is unavailable; replay is safe. */ }
+      }
       state.pending.delete(id);
       renderConvo(id);
       renderDeck();

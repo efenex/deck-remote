@@ -330,6 +330,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/rc/subagents", s.auth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/rc/status", s.auth(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("POST /api/rc/ask", s.auth(s.authTyped(http.HandlerFunc(s.handleAsk)))) // typed input (typed.go)
+	mux.Handle("GET /api/rc/ask/status", s.auth(http.HandlerFunc(s.handleSendStatus)))
 	mux.Handle("POST /api/rc/ask/redeliver", s.auth(s.authTyped(http.HandlerFunc(s.handleRedeliver))))
 	mux.Handle("POST /api/rc/slash", s.auth(s.authTyped(http.HandlerFunc(s.handleSlash)))) // typed input (typed.go)
 	mux.Handle("GET /api/rc/permission", s.auth(http.HandlerFunc(s.handlePermission)))
