@@ -107,7 +107,7 @@ func (s *server) handleSendStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(withProfile(r.Context(), reqProfile(r)), 15*time.Second)
 	defer cancel()
-	rec, err := s.sendStatus(ctx, q.Get("sendId"))
+	rec, err := s.sendStatus(ctx, q.Get("sendId"), false)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, "Delivery status unavailable: "+err.Error())
 		return
@@ -162,7 +162,7 @@ func (s *server) handleRedeliver(w http.ResponseWriter, r *http.Request) {
 	if it == nil {
 		// Settled sends leave the tracker. Verify ownership without resuming them.
 		var err error
-		rec, err = s.sendStatus(ctx, req.SendID)
+		rec, err = s.sendStatus(ctx, req.SendID, false)
 		if err != nil {
 			outcome, reason := "", ""
 			if errors.Is(err, errSendNotFound) {

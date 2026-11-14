@@ -500,12 +500,43 @@ func TestSSHPlaceholderUsesUnverifiableEvenWithClaudeTool(t *testing.T) {
 	s, dir, _ := releaseTestServer(t)
 	s.lists.m["phone"] = listCacheEntry{sessions: []sessionInfo{{ID: "s1", Tool: "claude", SSHHost: "fixture-owner"}}}
 	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","tool":"claude","state":"typed","settled":true}`)
-	rec, err := s.sendStatus(withProfile(context.Background(), "phone"), "send1")
+	rec, err := s.sendStatus(withProfile(context.Background(), "phone"), "send1", false)
 	if err != nil || mapSendState(rec).State != "unsupported" {
 		t.Fatalf("%+v %v", rec, err)
 	}
 	if calls := releaseCalls(t, dir); strings.Count(calls, "\n") != 1 {
 		t.Fatal(calls)
+	}
+	// Unverifiable is about landing proof only. A queued SSH send is still
+	// queued; a failed/cancelled one is final and must leave the tracker.
+	for _, tc := range []struct{ state, want string }{{"queued", "queued"}, {"failed", "failed"}, {"cancelled", "failed"}} {
+		putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","tool":"claude","state":"`+tc.state+`"}`)
+		rec, err := s.sendStatus(withProfile(context.Background(), "phone"), "send1", false)
+		st := mapSendState(rec)
+		if err != nil || st.State != tc.want || st.Final != (tc.state != "queued") {
+			t.Fatalf("%s: %+v %+v %v", tc.state, st, rec, err)
+		}
+	}
+}
+
+// The server's own poller keeps pre-R0 worker resumption: a plain send-status
+// restarts a dead queue worker, so a queued phone send is not stranded after a
+// reboot. Phone-triggered reads stay --no-resume. A pre-R0 agent-deck without
+// --no-resume must not blind the poller either.
+func TestPollerResumesWorkersButPhoneReadsDoNot(t *testing.T) {
+	s, dir, _ := releaseTestServer(t)
+	putFixture(t, dir, "status", `{"send_id":"send1","session_id":"s1","state":"failed","reason":"target not running"}`)
+	ch := s.hub.subscribe()
+	s.pollSendsOnce()
+	if calls := releaseCalls(t, dir); calls != "-p phone session send-status send1 --json\n" {
+		t.Fatalf("poller call: %q", calls)
+	}
+	var ev map[string]any
+	if err := json.Unmarshal(<-ch, &ev); err != nil || ev["state"] != "failed" {
+		t.Fatalf("%v %+v", err, ev)
+	}
+	if _, ok := s.sends.items["req1"]; ok {
+		t.Fatal("final failed send must leave the tracker")
 	}
 }
 

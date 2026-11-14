@@ -53,6 +53,7 @@ type queuedSend struct {
 	LandedRowID       string    `json:"landed_row_id"`
 	Tool              string    `json:"tool"`
 	RedeliveryOutcome string    `json:"-"`
+	SSH               bool      `json:"-"` // SSH placeholder target: landing is unverifiable
 }
 
 // enqueueSend hands text to agent-deck's durable queue and returns its record.
@@ -121,13 +122,21 @@ func (s *server) typedSendFlags(ctx context.Context) []string {
 	return nil
 }
 
-// sendStatus reads a queued send's current record.
 var errSendNotFound = errors.New("original send not found")
 var errSendStatusUnsupported = errors.New("agent-deck cannot read status without resuming")
 
-func (s *server) sendStatus(ctx context.Context, sendID string) (queuedSend, error) {
+// sendStatus reads a queued send's current record. Phone-triggered reads pass
+// resume=false (`--no-resume`: never starts a worker). The server's own poller
+// passes resume=true, as before R0: a status read restarts a queue worker that
+// died (reboot, kill) for a non-final record, which agent-deck documents as the
+// way a queued send resumes. It never re-types a typed or settled send.
+func (s *server) sendStatus(ctx context.Context, sendID string, resume bool) (queuedSend, error) {
 	var rec queuedSend
-	out, err := s.adeck(ctx, "session", "send-status", sendID, "--no-resume", "--json")
+	args := []string{"session", "send-status", sendID, "--no-resume", "--json"}
+	if resume {
+		args = []string{"session", "send-status", sendID, "--json"}
+	}
+	out, err := s.adeck(ctx, args...)
 	if err != nil {
 		message := strings.ToLower(string(out) + err.Error())
 		if strings.Contains(message, "sendqueue: unknown send id") {
@@ -149,9 +158,7 @@ func (s *server) sendStatus(ctx context.Context, sendID string) (queuedSend, err
 				if rec.Tool == "" {
 					rec.Tool = se.Tool
 				}
-				if se.SSHHost != "" {
-					rec.RedeliveryOutcome = "unsupported"
-				}
+				rec.SSH = se.SSHHost != ""
 				break
 			}
 		}
@@ -176,8 +183,10 @@ func mapSendState(r queuedSend) uiSendState {
 	if r.State == "landed" {
 		return uiSendState{State: "delivered", Final: true}
 	}
+	// Unverifiable is about landing proof only: a queued, failed or cancelled
+	// SSH-placeholder send keeps its real state (and leaves the tracker when final).
 	if r.State != "landed" && (r.RedeliveryOutcome == "unsupported" ||
-		((r.State == "typed" || r.State == "submitted" || r.State == "typing") && r.Tool != "" && r.Tool != "claude" && r.Tool != "codex")) {
+		((r.State == "typed" || r.State == "submitted" || r.State == "typing") && (r.SSH || (r.Tool != "" && r.Tool != "claude" && r.Tool != "codex")))) {
 		return uiSendState{State: "unsupported", Final: r.Settled}
 	}
 	switch r.RedeliveryOutcome {
@@ -458,7 +467,7 @@ func (s *server) pollSendsOnce() bool {
 	sort.Slice(open, func(i, j int) bool { return open[i].SendID < open[j].SendID })
 	for _, it := range open {
 		ctx, cancel := context.WithTimeout(withProfile(context.Background(), it.Profile), 15*time.Second)
-		rec, err := s.sendStatus(ctx, it.SendID)
+		rec, err := s.sendStatus(ctx, it.SendID, true)
 		cancel()
 		if err != nil {
 			if time.Since(time.Unix(it.Created, 0)) > sendTrackMax {
