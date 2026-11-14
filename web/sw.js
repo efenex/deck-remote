@@ -10,28 +10,28 @@
  */
 
 // Bump with the ?v= on index.html's script tags.
-const CACHE = 'deck-remote-v59';
+const CACHE = 'deck-remote-v60';
 const SHELL_NET_TIMEOUT = 1500; // ms before the shell is served from cache
 const SHELL = [
   '/',
   '/index.html',
-  '/theme.js?v=59',
-  '/version.js?v=59',
-  '/viewport.js?v=59',
-  '/pulse.js?v=59',
-  '/runbang.js?v=59',
-  '/runner.js?v=59',
-  '/pair.js?v=59',
-  '/thread.js?v=59',
-  '/subagents.js?v=59',
-  '/markdown.js?v=59',
-  '/gestures.js?v=59',
-  '/network.js?v=59',
-  '/photos.js?v=59',
-  '/backlog.js?v=59',
-  '/towerdraft.js?v=59',
-  '/recovery.js?v=59',
-  '/app.js?v=59',
+  '/theme.js?v=60',
+  '/version.js?v=60',
+  '/viewport.js?v=60',
+  '/pulse.js?v=60',
+  '/runbang.js?v=60',
+  '/runner.js?v=60',
+  '/pair.js?v=60',
+  '/thread.js?v=60',
+  '/subagents.js?v=60',
+  '/markdown.js?v=60',
+  '/gestures.js?v=60',
+  '/network.js?v=60',
+  '/photos.js?v=60',
+  '/backlog.js?v=60',
+  '/towerdraft.js?v=60',
+  '/recovery.js?v=60',
+  '/app.js?v=60',
   '/manifest.webmanifest',
   // Embedded terminal page + its vendored (offline) xterm assets, so the
   // escape-hatch terminal works without a network round-trip to a CDN.

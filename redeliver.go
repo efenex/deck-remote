@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -18,78 +20,135 @@ const (
 	autoReleaseDelay = 30 * time.Second
 )
 
-// A release operates on the ORIGINAL durable send ID. Never implement it as a
-// second session send: a missing landed row is not evidence that nothing landed.
-// In particular, installed agent-deck can miss socket-envelope transcript rows.
+// The owner is the only delivery authority, including remote targets. Never
+// fall back to queue release or session send on an unsupported/uncertain result.
 type releaseResult struct {
-	queuedSend
-	Outcome string `json:"outcome"`
+	SendID    string      `json:"send_id"`
+	RequestID string      `json:"request_id"`
+	Outcome   string      `json:"outcome"`
+	Reason    string      `json:"reason"`
+	Snapshot  *queuedSend `json:"snapshot"`
 }
 
-func (s *server) releaseSend(ctx context.Context, rec queuedSend) (queuedSend, string) {
-	switch rec.State {
-	case "landed":
-		return rec, "Already seen in the target transcript; nothing re-sent"
-	case "failed", "cancelled":
-		return rec, "Re-delivery unavailable: agent-deck cannot reopen this send ID; no new message was created"
-	case "queued":
-		// agent-deck rechecks under its per-target lock. If it landed after our
-		// status read, release returns already_sent without typing again.
-	default:
-		return rec, "Re-delivery blocked: this message may already have reached the target; agent-deck cannot safely retry this send ID"
+func (s *server) releaseSend(ctx context.Context, rec queuedSend, key string) (queuedSend, string, error) {
+	out, err := s.adeck(ctx, "session", "redeliver", rec.SendID, "--request-id", key, "--json")
+	if err != nil {
+		if unknownRedeliver(string(out) + err.Error()) {
+			rec.RedeliveryOutcome = "unsupported"
+			return rec, "unverifiable: agent-deck does not support re-delivery", nil
+		}
+		return rec, "", fmt.Errorf("re-delivery outcome unavailable; retry this check: %w", err)
 	}
 	var result releaseResult
-	if err := s.adeckJSON(ctx, &result, "session", "queue", "release", rec.SendID, "--json"); err != nil {
-		return rec, "Re-delivery outcome unavailable: " + err.Error() + "; no new message was created"
+	if json.Unmarshal(out, &result) != nil {
+		return rec, "", fmt.Errorf("re-delivery returned invalid JSON; retry this check")
 	}
-	if result.SendID != rec.SendID || result.SessionID != rec.SessionID || result.State == "" {
-		return rec, "Re-delivery returned no matching queue receipt; check delivery before trying again"
+	// agent-deck's remote compatibility response deliberately omits IDs.
+	if result.Outcome == "unsupported" && result.Reason == "remote_redeliver_unavailable" && result.SendID == "" && result.RequestID == "" && result.Snapshot == nil {
+		rec.RedeliveryOutcome = "unsupported"
+		return rec, "unverifiable: remote agent-deck does not support re-delivery", nil
 	}
-	// Exit 0 includes refusals. Even outcome=delivered means only submitted,
-	// unless STATE is landed; always map the record, never the outcome alone.
-	note := "Re-delivery: " + result.Outcome
-	if result.Outcome == "delivered" {
-		if result.State == "landed" {
-			note = "Re-delivery landed in the target transcript"
-		} else {
-			note = "Re-delivery submitted; transcript landing not yet confirmed"
+	if result.SendID != rec.SendID || result.RequestID != key {
+		return rec, "", fmt.Errorf("re-delivery returned no matching operation receipt; retry this check")
+	}
+	if result.Snapshot != nil {
+		if result.Snapshot.SessionID != rec.SessionID || result.Snapshot.State == "" {
+			return rec, "", fmt.Errorf("re-delivery returned no matching session snapshot; retry this check")
 		}
-	} else if result.Outcome == "" {
-		note = "Re-delivery returned no outcome; check the original send before trying again"
+		snap := result.Snapshot
+		rec.State, rec.Settled, rec.Attempts = snap.State, snap.Settled, snap.Attempts
+		rec.LandedRowID, rec.LandedAt = snap.LandedRowID, snap.LandedAt
 	}
-	return result.queuedSend, note
+	var note string
+	switch result.Outcome {
+	case "already_landed", "landed":
+		if result.Snapshot == nil || rec.State != "landed" {
+			return rec, "", fmt.Errorf("re-delivery returned no landed snapshot; retry this check")
+		}
+		note = "landed"
+	case "blocked_unknown":
+		note = "may have landed; not re-sent · check again"
+	case "unsupported":
+		note = "unverifiable"
+	case "pending":
+		note = "in progress"
+	case "conflict", "not_found", "refused":
+		note = strings.ReplaceAll(result.Outcome, "_", " ")
+	default:
+		return rec, "", fmt.Errorf("re-delivery returned an unknown outcome; retry this check")
+	}
+	// A replay's immutable decision can be older than its current snapshot.
+	if rec.State == "landed" {
+		note = "landed"
+	} else if result.Reason != "" && result.Outcome != "blocked_unknown" {
+		reason := strings.Join(strings.Fields(strings.ReplaceAll(result.Reason, "_", " ")), " ")
+		if len(reason) > 160 {
+			reason = reason[:160]
+		}
+		note += ": " + reason
+	}
+	rec.RedeliveryOutcome = result.Outcome
+	rec.Reason = note
+	rec.UpdatedAt = time.Now()
+	return rec, note, nil
 }
 
-// POST /api/rc/ask/redeliver, behind the same typed-input gate as /ask.
-// send-status can restart an unfinished queue worker, so even a check-only
-// request belongs behind this gate, not on a read-capable GET endpoint.
-func (s *server) handleRedeliver(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RequestID string `json:"requestId"`
-		SendID    string `json:"sendId"`
-		SessionID string `json:"sessionId"`
-		Profile   string `json:"profile"`
-		CheckOnly bool   `json:"checkOnly"`
-	}
-	if json.NewDecoder(r.Body).Decode(&req) != nil || !sendIDRE.MatchString(req.SendID) || req.RequestID == "" || req.SessionID == "" {
+func unknownRedeliver(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "unknown command") || strings.Contains(message, "unknown session command")
+}
+
+// Status recovery is read-capable: --no-resume never starts a queue worker.
+func (s *server) handleSendStatus(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if !sendIDRE.MatchString(q.Get("sendId")) || q.Get("requestId") == "" || q.Get("sessionId") == "" {
 		httpError(w, http.StatusBadRequest, "requestId, sendId and sessionId required")
 		return
 	}
-	// Detached from the request: a phone that backgrounds mid-release must not
-	// kill `queue release` after it filed its control request, which would leave
-	// an orphaned control/result pair upstream and block every later release.
-	// The outcome still reaches the phone over SSE (publish below).
-	ctx, cancel := context.WithTimeout(withProfile(context.WithoutCancel(r.Context()), req.Profile), 3*time.Minute+15*time.Second)
+	ctx, cancel := context.WithTimeout(withProfile(r.Context(), reqProfile(r)), 15*time.Second)
 	defer cancel()
-	rec, err := s.sendStatus(ctx, req.SendID)
+	rec, err := s.sendStatus(ctx, q.Get("sendId"), false)
 	if err != nil {
-		httpError(w, http.StatusBadGateway, "Cannot verify delivery; nothing re-sent: "+err.Error())
+		httpError(w, http.StatusBadGateway, "Delivery status unavailable: "+err.Error())
 		return
 	}
-	if rec.SendID != req.SendID || rec.SessionID != req.SessionID {
+	if rec.SendID != q.Get("sendId") || rec.SessionID != q.Get("sessionId") {
 		httpError(w, http.StatusConflict, "send does not belong to this session")
 		return
 	}
+	it := &trackedSend{RequestID: q.Get("requestId"), SendID: rec.SendID, SessionID: rec.SessionID}
+	writeJSON(w, http.StatusOK, sendStateEvent(it, rec))
+}
+
+// POST /api/rc/ask/redeliver remains behind the typed-input gate. operationId
+// identifies a persisted user tap; requestId still identifies the phone bubble.
+func (s *server) handleRedeliver(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RequestID   string `json:"requestId"`
+		OperationID string `json:"operationId"`
+		SendID      string `json:"sendId"`
+		SessionID   string `json:"sessionId"`
+		Profile     string `json:"profile"`
+		CheckOnly   bool   `json:"checkOnly"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || !sendIDRE.MatchString(req.SendID) || req.RequestID == "" || req.SessionID == "" ||
+		(!req.CheckOnly && !sendIDRE.MatchString(req.OperationID)) {
+		httpError(w, http.StatusBadRequest, "requestId, operationId, sendId and sessionId required")
+		return
+	}
+	// Compatibility for older pages; the new UI uses the read-only GET route.
+	if req.CheckOnly {
+		q := r.URL.Query()
+		q.Set("requestId", req.RequestID)
+		q.Set("sendId", req.SendID)
+		q.Set("sessionId", req.SessionID)
+		q.Set("profile", req.Profile)
+		r.URL.RawQuery = q.Encode()
+		s.handleSendStatus(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(withProfile(context.WithoutCancel(r.Context()), req.Profile), 3*time.Minute+15*time.Second)
+	defer cancel()
 	t := s.sends
 	t.mu.Lock()
 	it := t.items[req.RequestID]
@@ -98,38 +157,59 @@ func (s *server) handleRedeliver(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, "send does not match the phone request")
 		return
 	}
-	if req.CheckOnly {
-		t.mu.Unlock()
-		if it == nil {
-			it = &trackedSend{RequestID: req.RequestID, SessionID: req.SessionID, SendID: req.SendID, Profile: req.Profile}
-		}
-		writeJSON(w, http.StatusOK, sendStateEvent(it, rec))
-		return
-	}
-	if it != nil && it.releasing {
-		t.mu.Unlock()
-		httpError(w, http.StatusConflict, "Re-delivery is already being checked")
-		return
-	}
-	if it != nil {
-		it.releasing = true
-	}
 	t.mu.Unlock()
-	if it != nil {
-		defer func() { t.mu.Lock(); it.releasing = false; t.mu.Unlock() }()
-	} else {
-		// Completed records have left our open set. They may still be checked,
-		// but a queued record without its original phone receipt is not released.
-		if rec.State == "queued" {
-			httpError(w, http.StatusConflict, "Original phone request is unavailable; nothing re-sent")
+	rec := queuedSend{SendID: req.SendID, SessionID: req.SessionID}
+	if it == nil {
+		// Settled sends leave the tracker. Verify ownership without resuming them.
+		var err error
+		rec, err = s.sendStatus(ctx, req.SendID, false)
+		if err != nil {
+			outcome, reason := "", ""
+			if errors.Is(err, errSendNotFound) {
+				outcome, reason = "not_found", "Original send not found"
+			}
+			if errors.Is(err, errSendStatusUnsupported) {
+				outcome, reason = "unsupported", "unverifiable: agent-deck lacks read-only status"
+			}
+			if outcome != "" {
+				it = &trackedSend{RequestID: req.RequestID, SessionID: req.SessionID, SendID: req.SendID}
+				ev := sendStateEvent(it, queuedSend{RedeliveryOutcome: outcome, Reason: reason})
+				ev["redeliveryReason"], ev["operationId"] = reason, req.OperationID
+				writeJSON(w, http.StatusOK, ev)
+				return
+			}
+			httpError(w, http.StatusBadGateway, "Cannot verify original send: "+err.Error())
+			return
+		}
+		if rec.SendID != req.SendID || rec.SessionID != req.SessionID {
+			httpError(w, http.StatusConflict, "send does not belong to this session")
 			return
 		}
 		it = &trackedSend{RequestID: req.RequestID, SessionID: req.SessionID, SendID: req.SendID, Profile: req.Profile}
 	}
-	rec, reason := s.releaseSend(ctx, rec)
+	// Idempotency and concurrent actions are serialized by agent-deck's key and
+	// record locks. Do not reject a replay just because the first HTTP call lives.
+	rec, reason, err := s.releaseSend(ctx, rec, req.OperationID)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	ev := sendStateEvent(it, rec)
-	ev["redeliveryReason"] = reason
+	ev["redeliveryReason"], ev["operationId"] = reason, req.OperationID
+	ev["profile"] = req.Profile
 	s.hub.publish(ev)
+	if !rec.Settled && (rec.State == "queued" || rec.State == "typing" || rec.State == "typed" || rec.State == "submitted") {
+		// A failed send left the open set. Follow the reopened same ID so its
+		// eventual landing reaches the phone without another tap/reconnect.
+		t.mu.Lock()
+		if t.items[it.RequestID] == nil {
+			it.Created = time.Now().Unix()
+			t.items[it.RequestID] = it
+			_ = t.saveLocked()
+		}
+		t.mu.Unlock()
+		s.startSendPoller()
+	}
 	writeJSON(w, http.StatusOK, ev)
 }
 
@@ -185,6 +265,18 @@ func (s *server) maybeAutoRelease(ctx context.Context, it *trackedSend, rec queu
 	if err != nil {
 		return rec, "Automatic re-delivery blocked: could not persist the attempt budget"
 	}
-	rec, reason := s.releaseSend(ctx, rec)
+	// Keep automatic nudges queue-only. An atomic redeliver here could reopen
+	// a send that failed AFTER the queued snapshot, without a deliberate tap.
+	// This is the pre-existing automatic control path, never a manual fallback.
+	var result struct {
+		queuedSend
+		Outcome string `json:"outcome"`
+	}
+	reason := "Automatic queue release outcome unavailable; check again"
+	if err := s.adeckJSON(ctx, &result, "session", "queue", "release", rec.SendID, "--json"); err == nil &&
+		result.SendID == rec.SendID && result.SessionID == rec.SessionID && result.State != "" {
+		rec = result.queuedSend
+		reason = "Queue release: " + result.Outcome
+	}
 	return rec, fmt.Sprintf("Automatic re-delivery check %d/%d: %s", attempt, maxAutoReleases, reason)
 }

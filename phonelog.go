@@ -75,7 +75,7 @@ func (p *phoneLog) tap(ev any) {
 		return // e.g. the interrupt's "stopping" has no request
 	}
 	rec := map[string]any{"ts": time.Now().UTC().Format(time.RFC3339), "requestId": req}
-	for _, k := range []string{"sessionId", "sendId", "state", "position", "error", "retryable", "slash", "reason", "statusTs", "targetStatus", "attempts", "landedRowId", "redeliveryReason"} {
+	for _, k := range []string{"sessionId", "sendId", "state", "position", "error", "retryable", "slash", "reason", "statusTs", "targetStatus", "attempts", "landedRowId", "redeliveryReason", "redeliveryOutcome", "operationId"} {
 		if v, ok := m[k]; ok && v != nil && v != "" && v != false {
 			rec[k] = v
 		}

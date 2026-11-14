@@ -91,23 +91,46 @@
   // SSE replies, notes, errors) are kept after it unless the transcript has
   // caught up with them. Matching is one-for-one and time-bounded, so an old
   // "yes" in the transcript does not swallow a new "yes" still in flight.
+  // Row IDs deck-remote and agent-deck share are native ones (Claude line
+  // uuid, Codex item id). Each side synthesizes its own for queue-absorbed
+  // Claude prompts (queue:<ts>:<hash>, different ts and hash) and id-less rows
+  // (codex:/line: here, none in deck-remote's Codex history), so those never
+  // compare: a proven bubble then falls back to the time-bounded content match
+  // (it stays delivered: the owner proved it), instead of showing twice.
+  function nativeRowId(id) { return !!id && !/^(queue|codex|line):/.test(id); }
+  function rowMatch(e, f, exact) {
+    if (exact) return f.id === e.landedRowId;
+    if (e.landedRowId && nativeRowId(e.landedRowId) && nativeRowId(f.id)) return false;
+    return sameEcho(e, f);
+  }
+
   function mergeFreshHistory(fresh, current) {
     const used = new Set();
+    const claimed = new Map(current.filter(e => e.landedRowId).map(e => [e.landedRowId, e]));
     const first = fresh.find((e) => e.ts);
     const kept = current.filter((e) => {
-      if (e.hist) return false;
+      if (e.hist && !e.sendId) return false;
       // A delivered echo can have missed tail reconciliation (sheet closed),
       // or predate the hist promotion fix. Once outside this history window it
       // belongs on an older page, not after the newest reply. Keep unresolved
       // sends regardless of age so queued/failed messages remain actionable.
-      if (e.role === 'me' && e.status === 'delivered' && first && e.ts &&
-          e.ts < first.ts - SAME_TURN_SECS) return false;
+      if (e.role === 'me' && (e.status === 'delivered' || e.hist) && first && e.ts &&
+          e.ts < first.ts - SAME_TURN_SECS &&
+          (!e.landedRowId || !fresh.some(f => f.id === e.landedRowId))) return false;
       if (e.role !== 'me' && e.role !== 'reply') return true;
+      const exact = !!e.landedRowId && fresh.some(f => f.id === e.landedRowId);
       for (let i = fresh.length - 1; i >= 0; i--) {
         const f = fresh[i];
-        if (used.has(i) || !sameEcho(e, f)) continue;
-        if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
+        if (claimed.has(f.id) && claimed.get(f.id) !== e) continue;
+        if (used.has(i) || !rowMatch(e, f, exact)) continue;
+        if (!exact && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
+        if (e.sendId) {
+          Object.assign(f, e, { hist: true, ts: f.ts, id: f.id, content: f.content,
+            status: e.status === 'delivered' ? 'delivered' : 'seen', queued: false,
+            reason: e.status === 'delivered' ? 'Seen in the target transcript' : 'Content seen; delivery attribution is unverified',
+            redeliveryReason: '', error: '', statusTs: f.ts || e.statusTs });
+        }
         return false;
       }
       return true;
@@ -155,7 +178,7 @@
   // A bubble the operator sent from the phone walks sent (server accepted) ->
   // queued (n) (waiting its turn in agent-deck's queue) -> delivering ->
   // delivered (in the session's transcript), or failed / unconfirmed.
-  const IN_FLIGHT = { sent: 1, queued: 1, delivering: 1 };
+  const IN_FLIGHT = { sent: 1, queued: 1, delivering: 1, pending: 1 };
 
   // Apply an `ask-state` SSE event to the matching 'me' bubble. The bubble is
   // matched by requestId; the first event of a send (state "sent") can beat the
@@ -173,19 +196,27 @@
       if (e) e.requestId = ev.requestId;
     }
     if (!e) return null;
-    // The transcript already proved delivery (promoteDelivered): agent-deck's
-    // later, weaker verdict ("unconfirmed") must not take it back.
-    if (e.status === 'delivered') return e;
+    // Positive agent-deck proof is monotonic. A later landed receipt may add
+    // the row ID, but a weaker status must not take delivery back.
+    if (e.status === 'delivered' && ev.state !== 'delivered') return e;
     // An older poll or the initial acceptance event can arrive after a newer
     // receipt. Never let it erase delivery diagnostics or regress the state.
     if (e.sendId && !ev.sendId && ev.state === 'sent') return e;
-    if (ev.state !== 'delivered' && ev.statusTs && e.statusTs && ev.statusTs < e.statusTs) return e;
+    const recordTs = e.recordStatusTs ?? e.statusTs;
+    if (!ev.operationId && ev.state !== 'delivered' && ev.statusTs && recordTs && ev.statusTs < recordTs) return e;
     if (ev.sendId) e.sendId = ev.sendId;
-    if (ev.statusTs) e.statusTs = ev.statusTs;
+    if (ev.statusTs) {
+      // Operation time is not the queue record's revision. A fresh status
+      // read may reveal a terminal snapshot older than the tap's decision.
+      if (!ev.operationId) e.recordStatusTs = ev.statusTs;
+      else if (e.recordStatusTs === undefined) e.recordStatusTs = e.statusTs || 0;
+      e.statusTs = ev.statusTs;
+    }
     if (ev.reason !== undefined) e.reason = ev.reason;
     if (ev.targetStatus !== undefined) e.targetStatus = ev.targetStatus;
     if (ev.attempts !== undefined) e.attempts = ev.attempts;
     if (ev.redeliveryReason !== undefined) e.redeliveryReason = ev.redeliveryReason;
+    if (ev.redeliveryOutcome) e.redeliveryOutcome = ev.redeliveryOutcome;
     if (ev.landedRowId) e.landedRowId = ev.landedRowId;
     if (ev.images) e.images = ev.images;
     e.status = ev.state;
@@ -197,29 +228,28 @@
     return e;
   }
 
-  // The session's transcript is the ground truth for "delivered": agent-deck's
-  // own landed detection gives up after 2 minutes, so a message that waited out
-  // a long turn can settle "unconfirmed" while its text is plainly in the
-  // transcript. Promote each phone bubble that has a not-older matching 'me'
-  // row in the tail (one-for-one, time-bounded like mergeFreshHistory so an old
-  // identical "yes" proves nothing). Adopt the transcript timestamp and hist
-  // ownership too: otherwise reopening a newer page re-appends this old echo.
+  // Prefer the owner's landed row ID. Content-only matches are one-for-one,
+  // time-bounded and labelled seen (unverified), since a human may have typed
+  // the same text. Adopt history ownership to avoid re-appending old echoes.
   // Returns how many bubbles changed, including already-delivered SSE echoes.
   function promoteDelivered(conv, tail) {
     const used = new Set();
     const photos = [];
+    const claimed = new Map(conv.filter(e => e.landedRowId).map(e => [e.landedRowId, e]));
     let n = 0;
     conv.forEach((e) => {
       if (e.role !== 'me' || (!e.hist && !e.status)) return;
+      const exact = !!e.landedRowId && tail.some(f => f.role === 'me' && f.id === e.landedRowId);
       for (let i = 0; i < tail.length; i++) {
         const f = tail[i];
-        if (used.has(i) || f.role !== 'me' || !sameEcho(e, f)) continue;
+        if (used.has(i) || f.role !== 'me' || (claimed.has(f.id) && claimed.get(f.id) !== e)) continue;
+        if (!rowMatch(e, f, exact)) continue;
         // Reserve rows already reconciled on an earlier poll, so the same
         // transcript "yes" cannot deliver another queued "yes" next time.
-        if (e.hist && e.ts !== f.ts) continue;
-        if (f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
+        if (!exact && e.hist && e.ts !== f.ts) continue;
+        if (!exact && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
-        if (e.hist) return;
+        if (e.hist && (!exact || e.id === f.id)) return;
         if (e.images) {
           // Keep the canonical references for later polls, without losing the
           // image chip when this transcript represents attachments as text only.
@@ -227,10 +257,11 @@
           e.images = f.images || photoCount(f.content) || e.images;
           photos.push(e);
         }
-        e.status = 'delivered'; e.queued = false; e.error = ''; e.retryable = false;
-        e.reason = 'Seen in the target transcript'; e.redeliveryReason = '';
+        e.status = e.landedRowId || e.status === 'delivered' ? 'delivered' : 'seen'; e.queued = false; e.error = ''; e.retryable = false;
+        e.reason = e.status === 'delivered' ? 'Seen in the target transcript' : 'Content seen; delivery attribution is unverified'; e.redeliveryReason = '';
         if (f.ts) e.statusTs = f.ts;
         e.hist = true;
+        if (f.id) e.id = f.id;
         if (f.ts) e.ts = f.ts;
         if (f.origin) e.origin = f.origin;
         n++;
@@ -255,19 +286,65 @@
       case 'queued': return e.position ? 'queued (' + e.position + ')' : 'queued';
       case 'delivering': return 'delivering…';
       case 'delivered': return e.origin === 'phone' ? 'you (phone) · landed' : 'landed';
-      case 'lost': return 'lost / unconfirmed';
+      case 'lost':
+      case 'blocked_unknown': return 'may have landed; not re-sent · check again';
+      case 'unsupported': return 'unverifiable';
+      case 'seen': return 'seen (unverified)';
+      case 'pending': return 'in progress';
       case 'unconfirmed': return 'unconfirmed — check the terminal before resending';
       case 'failed': return 'failed' + (e.error ? ': ' + e.error : '');
+      case 'refused': return 're-delivery unavailable';
       case 'sent': return 'sent';
       default: return e.queued ? 'sent' : '';
     }
   }
 
   // This action checks/releases the ORIGINAL durable ID, never copies the
-  // text into /ask. The server refuses uncertain or already-landed sends.
+  // text into /ask. agent-deck reconciles uncertain and already-landed sends.
   function canRetry(e) {
     return !!e.sendId && !!e.requestId && !e.redelivering &&
-      ['queued', 'delivering', 'sent', 'failed', 'lost', 'unconfirmed'].includes(e.status);
+      ['queued', 'delivering', 'sent', 'failed', 'lost', 'unconfirmed', 'blocked_unknown', 'unsupported', 'pending', 'seen', 'refused'].includes(e.status);
+  }
+
+  // Only receipt IDs are persisted, never message text. An unfinished operation
+  // survives a reload; completing it removes the key so the next tap is new.
+  const REDELIVERY_PREFIX = 'deck.redelivery.';
+  function operationSlot(profile, sessionId, sendId) {
+    return REDELIVERY_PREFIX + JSON.stringify([profile, sessionId, sendId]);
+  }
+  function beginRedelivery(storage, profile, sessionId, entry, uuid) {
+    const slot = operationSlot(profile, sessionId, entry.sendId);
+    const old = JSON.parse(storage.getItem(slot) || 'null');
+    if (old) {
+      if (old.requestId !== entry.requestId || !old.operationId) throw new Error('Original check receipt does not match');
+      return old.operationId;
+    }
+    const op = { profile, sessionId, sendId: entry.sendId, requestId: entry.requestId, operationId: uuid(), ts: entry.ts };
+    storage.setItem(slot, JSON.stringify(op)); // failure must prevent the POST
+    return op.operationId;
+  }
+  function finishRedelivery(storage, profile, sessionId, entry, operationId) {
+    const slot = operationSlot(profile, sessionId, entry.sendId);
+    const op = JSON.parse(storage.getItem(slot) || 'null');
+    if (op && op.operationId === operationId) storage.removeItem(slot);
+  }
+  function pendingRedeliveries(storage, profile, sessionId) {
+    const pending = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (!key.startsWith(REDELIVERY_PREFIX)) continue;
+      const op = JSON.parse(storage.getItem(key));
+      if (op.profile === profile && op.sessionId === sessionId) pending.push({
+        role: 'me', content: 'Original message · delivery check pending',
+        requestId: op.requestId, sendId: op.sendId, ts: op.ts, redeliveryOperationId: op.operationId,
+        status: 'unconfirmed', reason: 'Previous check has no confirmed response; retry to recover it',
+      });
+    }
+    return pending;
+  }
+  function retryLabel(e) {
+    if (e.redeliveryOperationId) return 'Retry check';
+    return ['lost', 'blocked_unknown', 'unsupported', 'seen', 'unconfirmed'].includes(e.status) ? 'Check again' : 'Re-deliver';
   }
 
   // Live fields the server drops from a session row when they are falsy
@@ -338,7 +415,7 @@
     return 'Not sent: ' + (e.message || 'unknown error');
   }
 
-  const api = { attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, photoCount, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  const api = { beginRedelivery, finishRedelivery, pendingRedeliveries, retryLabel, attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, photoCount, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);
