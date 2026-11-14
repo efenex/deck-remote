@@ -146,3 +146,30 @@ test('late proof corrects a content-only row and survives a far-later history pa
   assert.equal(e.ts,10000);
   assert.equal(promoteDelivered([e], [proof]),0);
 });
+
+// agent-deck and deck-remote share native row IDs (Claude line uuid), but each
+// synthesizes its own for queue-absorbed Claude prompts (enqueue vs absorb
+// time) and id-less Codex user rows. A proven bubble must still reconcile with
+// its transcript row by content there, or it shows twice.
+test('a landed row ID in a synthesized scheme falls back to content and does not duplicate', () => {
+  const thread = require('./thread.js');
+  for (const [landed, rowId] of [['queue:2026-11-14T08:00:00.000Z:aaaa', 'queue:2026-11-14T08:00:05Z:bbbbbbbbbbbb'], ['codex:2026-11-14T08:00:00Z:cccc', undefined]]) {
+    const proven = () => ({ role: 'me', content: '[REDACTED]', ts: 100, sendId: 's1', requestId: 'r1', landedRowId: landed, status: 'delivered' });
+    const row = () => ({ role: 'me', content: '[REDACTED]', ts: 105, id: rowId, hist: true });
+    const merged = thread.mergeFreshHistory([row()], [proven()]);
+    assert.equal(merged.length, 1, landed);
+    assert.equal(merged[0].status, 'delivered');
+    assert.equal(merged[0].sendId, 's1');
+    const conv = [proven()];
+    assert.equal(promoteDelivered(conv, [row()]), 1, landed);
+    assert.equal(conv[0].hist, true);
+    assert.equal(conv[0].status, 'delivered');
+  }
+});
+
+test('an old content-only (seen) bubble outside a fresh window is not re-appended last', () => {
+  const thread = require('./thread.js');
+  const seen = { role: 'me', content: '[REDACTED]', ts: 100, sendId: 's1', requestId: 'r1', status: 'seen', hist: true, id: 'old' };
+  const merged = thread.mergeFreshHistory([{ role: 'reply', content: 'later', ts: 5000, hist: true }], [seen]);
+  assert.deepEqual(merged.map(e => e.role), ['reply']);
+});

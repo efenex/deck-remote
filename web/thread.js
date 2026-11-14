@@ -91,6 +91,19 @@
   // SSE replies, notes, errors) are kept after it unless the transcript has
   // caught up with them. Matching is one-for-one and time-bounded, so an old
   // "yes" in the transcript does not swallow a new "yes" still in flight.
+  // Row IDs deck-remote and agent-deck share are native ones (Claude line
+  // uuid, Codex item id). Each side synthesizes its own for queue-absorbed
+  // Claude prompts (queue:<ts>:<hash>, different ts and hash) and id-less rows
+  // (codex:/line: here, none in deck-remote's Codex history), so those never
+  // compare: a proven bubble then falls back to the time-bounded content match
+  // (it stays delivered: the owner proved it), instead of showing twice.
+  function nativeRowId(id) { return !!id && !/^(queue|codex|line):/.test(id); }
+  function rowMatch(e, f, exact) {
+    if (exact) return f.id === e.landedRowId;
+    if (e.landedRowId && nativeRowId(e.landedRowId) && nativeRowId(f.id)) return false;
+    return sameEcho(e, f);
+  }
+
   function mergeFreshHistory(fresh, current) {
     const used = new Set();
     const claimed = new Map(current.filter(e => e.landedRowId).map(e => [e.landedRowId, e]));
@@ -101,15 +114,16 @@
       // or predate the hist promotion fix. Once outside this history window it
       // belongs on an older page, not after the newest reply. Keep unresolved
       // sends regardless of age so queued/failed messages remain actionable.
-      if (e.role === 'me' && e.status === 'delivered' && first && e.ts &&
+      if (e.role === 'me' && (e.status === 'delivered' || e.hist) && first && e.ts &&
           e.ts < first.ts - SAME_TURN_SECS &&
           (!e.landedRowId || !fresh.some(f => f.id === e.landedRowId))) return false;
       if (e.role !== 'me' && e.role !== 'reply') return true;
+      const exact = !!e.landedRowId && fresh.some(f => f.id === e.landedRowId);
       for (let i = fresh.length - 1; i >= 0; i--) {
         const f = fresh[i];
         if (claimed.has(f.id) && claimed.get(f.id) !== e) continue;
-        if (used.has(i) || (e.landedRowId ? f.id !== e.landedRowId : !sameEcho(e, f))) continue;
-        if (!e.landedRowId && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
+        if (used.has(i) || !rowMatch(e, f, exact)) continue;
+        if (!exact && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
         if (e.sendId) {
           Object.assign(f, e, { hist: true, ts: f.ts, id: f.id, content: f.content,
@@ -225,16 +239,17 @@
     let n = 0;
     conv.forEach((e) => {
       if (e.role !== 'me' || (!e.hist && !e.status)) return;
+      const exact = !!e.landedRowId && tail.some(f => f.role === 'me' && f.id === e.landedRowId);
       for (let i = 0; i < tail.length; i++) {
         const f = tail[i];
         if (used.has(i) || f.role !== 'me' || (claimed.has(f.id) && claimed.get(f.id) !== e)) continue;
-        if (e.landedRowId ? f.id !== e.landedRowId : !sameEcho(e, f)) continue;
+        if (!rowMatch(e, f, exact)) continue;
         // Reserve rows already reconciled on an earlier poll, so the same
         // transcript "yes" cannot deliver another queued "yes" next time.
-        if (!e.landedRowId && e.hist && e.ts !== f.ts) continue;
-        if (!e.landedRowId && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
+        if (!exact && e.hist && e.ts !== f.ts) continue;
+        if (!exact && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
-        if (e.hist && (!e.landedRowId || e.id === f.id)) return;
+        if (e.hist && (!exact || e.id === f.id)) return;
         if (e.images) {
           // Keep the canonical references for later polls, without losing the
           // image chip when this transcript represents attachments as text only.
