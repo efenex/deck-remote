@@ -210,7 +210,22 @@ type ocForm struct {
 // terminal title, see paneSessionTitle) decides, and only when that names one
 // session; otherwise the timing rules apply and ambiguity is refused.
 func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string, error) {
-	if se.OpenCodeSessionID != "" {
+	// agent-deck's 2.x discovery is timing-based too and can hand one session
+	// to several instances sharing a directory; such a claim proves nothing.
+	var others []sessionInfo
+	claims := map[string]int{}
+	if all, err := a.s.listSessions(ctx); err == nil {
+		for _, o := range all {
+			if o.Tool == "opencode" && o.ID != se.ID {
+				others = append(others, o)
+				if o.OpenCodeSessionID != "" {
+					claims[o.OpenCodeSessionID]++
+				}
+			}
+		}
+	}
+	contested := se.OpenCodeSessionID != "" && claims[se.OpenCodeSessionID] > 0
+	if se.OpenCodeSessionID != "" && !contested {
 		return se.OpenCodeSessionID, nil
 	}
 	c := a.s.oc
@@ -225,34 +240,26 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 	if real, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = real
 	}
-	var list struct {
-		Data []ocSession `json:"data"`
-	}
-	q := url.Values{"directory": {dir}, "limit": {"50"}}
-	if err := c.do(ctx, http.MethodGet, "/api/session?"+q.Encode(), nil, &list); err != nil {
+	data, err := a.directorySessions(ctx, dir)
+	if err != nil {
 		return "", err
 	}
 	taken := map[string]bool{}
 	sameDir, shared := 0, 0
-	if all, err := a.s.listSessions(ctx); err == nil {
-		for _, o := range all {
-			if o.Tool != "opencode" || o.ID == se.ID {
-				continue
-			}
-			if o.OpenCodeSessionID != "" {
-				taken[o.OpenCodeSessionID] = true
-			}
-			if sameDirectory(o.Path, se.Path) {
-				shared++
-				if o.OpenCodeSessionID == "" {
-					sameDir++
-				}
+	for _, o := range others {
+		if o.OpenCodeSessionID != "" && !(contested && o.OpenCodeSessionID == se.OpenCodeSessionID) {
+			taken[o.OpenCodeSessionID] = true
+		}
+		if sameDirectory(o.Path, se.Path) {
+			shared++
+			if o.OpenCodeSessionID == "" {
+				sameDir++
 			}
 		}
 	}
 	// Root sessions in this directory that no other instance owns.
 	var roots []ocSession
-	for _, s := range list.Data {
+	for _, s := range data {
 		if s.ParentID == "" && !taken[s.ID] && sameDirectory(s.Location.Directory, dir) {
 			roots = append(roots, s)
 		}
@@ -270,6 +277,9 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 				return m[0].ID, nil
 			}
 		}
+	}
+	if contested {
+		return "", ambiguousOpencode(se, shared+1, paneTitle, roots)
 	}
 	created := instanceCreated(se.ID)
 	var cands []ocSession
@@ -294,6 +304,38 @@ func (a opencodeAdapter) sessionID(ctx context.Context, se sessionInfo) (string,
 	return cands[0].ID, nil
 }
 
+// ocSessionPage is the session-list page size; a directory with more sessions
+// is paged through, since a title is only unique if every root was seen.
+var ocSessionPage = 100
+
+// ocMaxSessionPages bounds the paging (ocSessionPage × this many sessions).
+const ocMaxSessionPages = 20
+
+// directorySessions lists every session (roots and children) in dir, newest
+// first, following the service's cursor.
+func (a opencodeAdapter) directorySessions(ctx context.Context, dir string) ([]ocSession, error) {
+	var out []ocSession
+	q := url.Values{"directory": {dir}, "limit": {strconv.Itoa(ocSessionPage)}}
+	for page := 0; page < ocMaxSessionPages; page++ {
+		var resp struct {
+			Data   []ocSession `json:"data"`
+			Cursor struct {
+				Next string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := a.s.oc.do(ctx, http.MethodGet, "/api/session?"+q.Encode(), nil, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Data...)
+		if len(resp.Data) < ocSessionPage || resp.Cursor.Next == "" {
+			break
+		}
+		// The cursor carries the directory and order; the service rejects them beside it.
+		q = url.Values{"cursor": {resp.Cursor.Next}, "limit": {strconv.Itoa(ocSessionPage)}}
+	}
+	return out, nil
+}
+
 // ocPaneTitlePrefix starts the terminal title the opencode 2.x TUI sets for
 // the session it is showing: "OC | <session title>". The title follows the
 // TUI's current session, so a /new or a switch is picked up on the next bind.
@@ -302,7 +344,7 @@ const ocPaneTitlePrefix = "OC | "
 // paneSessionTitle reads the title of the TUI pane of se's tmux session. ok is
 // false when there is no such pane or it does not carry an opencode title.
 func (a opencodeAdapter) paneSessionTitle(ctx context.Context, se sessionInfo) (string, bool) {
-	if se.TmuxSession == "" || a.s.tmux == nil {
+	if se.TmuxSession == "" || a.s.tmux == nil || a.s.tmux.gone(se.TmuxSocket, se.TmuxSession) {
 		return "", false
 	}
 	out, err := a.s.tmuxExec(ctx, se.TmuxSocket, "display-message", "-p", "-t", se.TmuxSession+":^", "#{pane_title}")

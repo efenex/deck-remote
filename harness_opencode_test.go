@@ -135,7 +135,20 @@ func (f *fakeOpencode) handler(t *testing.T) http.Handler {
 		}
 		switch {
 		case path == "/api/session":
-			json.NewEncoder(w).Encode(map[string]any{"data": f.sessions})
+			// limit/cursor page like the service (the cursor is an offset here).
+			page, next := f.sessions, ""
+			if lim, _ := strconv.Atoi(r.URL.Query().Get("limit")); lim > 0 {
+				off, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+				if off > len(page) {
+					off = len(page)
+				}
+				end := off + lim
+				if end > len(page) {
+					end = len(page)
+				}
+				page, next = page[off:end], strconv.Itoa(end)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"data": page, "cursor": map[string]string{"next": next}})
 		case path == "/api/session/active":
 			act := map[string]any{}
 			if f.active {
@@ -454,5 +467,58 @@ func TestMatchPaneTitle(t *testing.T) {
 		if got := ids(matchPaneTitle(tc.pane, ss)); got != tc.want {
 			t.Errorf("matchPaneTitle(%q) = %q, want %q", tc.pane, got, tc.want)
 		}
+	}
+}
+
+// A title is only unique if every root session was seen: the twin on a later
+// page of the session list must refuse the match, not be missed.
+func TestOpencodeSharedDirectoryTitleTwinOnLaterPage(t *testing.T) {
+	old := ocSessionPage
+	ocSessionPage = 2
+	t.Cleanup(func() { ocSessionPage = old })
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	a1 := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, TmuxSession: "ad_a"}
+	a2 := sessionInfo{ID: "b-" + itoa(start.Unix()), Tool: "opencode", Path: dir}
+	mk := func(id, title string, off int) ocSession {
+		return mkTitled(id, title, dir, start.Add(time.Duration(off)*time.Minute))
+	}
+	f := &fakeOpencode{sessions: []ocSession{mk("s1", "alpha work", 5), mk("s2", "beta work", 4), mk("s3", "gamma work", 3), mk("s4", "alpha work", 2)}}
+	s := newOpencodeTmuxServer(t, f, []sessionInfo{a1, a2}, map[string]string{"ad_a": "OC | alpha work"})
+	if got, err := resolveOC(t, s, a1); err == nil || got != "" || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("got %q, %v; want refusal", got, err)
+	}
+	// Unique across all pages (a title found only on the last page) binds.
+	f.sessions[3].Title = "delta work"
+	s = newOpencodeTmuxServer(t, f, []sessionInfo{a1, a2}, map[string]string{"ad_a": "OC | delta work"})
+	if got, err := resolveOC(t, s, a1); err != nil || got != "s4" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// agent-deck's discovery can hand one session to several instances (griffin,
+// 2026-11-14: both gb-* panes bound to the same id). That claim is void: each
+// instance resolves by its own TUI, and with no pane to read the answer is a
+// refusal, never the shared id.
+func TestOpencodeContestedBindingFallsToTUITitle(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Now().Add(-time.Hour)
+	a1 := sessionInfo{ID: "a-" + itoa(start.Unix()), Tool: "opencode", Path: dir, OpenCodeSessionID: "ses_1", TmuxSession: "ad_a"}
+	a2 := sessionInfo{ID: "b-" + itoa(start.Unix()), Tool: "opencode", Path: dir, OpenCodeSessionID: "ses_1", TmuxSession: "ad_b"}
+	f := &fakeOpencode{sessions: []ocSession{
+		mkTitled("ses_1", "first task", dir, start.Add(time.Minute)),
+		mkTitled("ses_2", "second task", dir, start.Add(2*time.Minute)),
+	}}
+	list := []sessionInfo{a1, a2}
+	s := newOpencodeTmuxServer(t, f, list, map[string]string{"ad_a": "OC | second task", "ad_b": "OC | first task"})
+	if got, err := resolveOC(t, s, a1); err != nil || got != "ses_2" {
+		t.Fatalf("a1: got %q, %v", got, err)
+	}
+	if got, err := resolveOC(t, s, a2); err != nil || got != "ses_1" {
+		t.Fatalf("a2: got %q, %v", got, err)
+	}
+	s = newOpencodeTmuxServer(t, f, list, nil)
+	if got, err := resolveOC(t, s, a1); err == nil || got != "" {
+		t.Fatalf("no pane: got %q, %v; want refusal", got, err)
 	}
 }
