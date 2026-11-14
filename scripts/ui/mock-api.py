@@ -73,4 +73,8 @@ class H(SimpleHTTPRequestHandler):
         if p.startswith("/api/"): return s.j({})
         return super().do_GET()
 
+# Chrome opens the shell's scripts concurrently. The stdlib backlog of five
+# can reset asset connections during a burst, leaving a partially loaded app.
+# Keep this disposable fixture's accept queue large enough for the whole shell.
+ThreadingHTTPServer.request_queue_size = 128
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
