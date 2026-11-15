@@ -2764,11 +2764,10 @@
     const hs = state.history.get(id);
     if (!hs || !hs.hasMore || hs.loading) return;
     hs.loading = true;
-    renderConvo(id); // surface the "Loading…" affordance at the top
-
     const convo = $('#convo');
     const beforeH = convo ? convo.scrollHeight : 0;
     const beforeT = convo ? convo.scrollTop : 0;
+    renderConvo(id); // surface the "Loading…" affordance at the top (keeps the offset)
 
     let r;
     try {
@@ -2905,6 +2904,9 @@
     if (!convo) return;
     const conv = ensureConvo(id);
 
+    // Measure before the rebuild clears the list: a reader scrolled back in time keeps
+    // their place unless the caller says otherwise (opts.stick) or they were at the tail.
+    const before = { top: convo.scrollTop, wasNear: DeckThread.nearBottom(convo.scrollHeight, convo.scrollTop, convo.clientHeight) };
     convo.innerHTML = '';
 
     // Scroll-back affordance at the very top: a "Loading…" spinner while a page
@@ -3034,8 +3036,13 @@
     }
 
     // Older-paging re-renders restore scroll position themselves (the caller
-    // anchors on inserted height); everything else sticks to the bottom.
-    if (!(opts && opts.keepScroll)) { convo.scrollTop = convo.scrollHeight; hideNewPill(); }
+    // anchors on inserted height); otherwise stick to the bottom only when the
+    // reader was already at the tail (or asked to), else keep their offset.
+    const target = DeckThread.scrollAfterRender(before, opts, convo.scrollHeight);
+    if (target !== null) {
+      convo.scrollTop = target;
+      if (before.wasNear || (opts && opts.stick)) hideNewPill();
+    }
   }
 
   // Escape-first markdown (web/markdown.js).
@@ -3072,7 +3079,7 @@
     conv.push(bubble);
     // Non-blocking pending state shown immediately.
     state.pending.set(id, { ctx: slash ? text : 'thinking' });
-    renderConvo(id);
+    renderConvo(id, { stick: true }); // own send: show it
     renderDeck();
 
     try {
@@ -3098,7 +3105,7 @@
   async function sendPhotos(id, caption, photos) {
     const text = caption || 'Please look at the attached photos.';
     const bubble = { role: 'me', content: text, images: photos.length, ts: Date.now() / 1000, queued: true, status: 'sent', retryable: false };
-    ensureConvo(id).push(bubble); renderConvo(id);
+    ensureConvo(id).push(bubble); renderConvo(id, { stick: true });
     const form = new FormData();
     form.append('sessionId', id); form.append('profile', CURRENT_PROFILE); form.append('text', text);
     photos.forEach((photo, i) => form.append('photos', photo.blob, 'photo-' + (i + 1) + '.jpg'));
