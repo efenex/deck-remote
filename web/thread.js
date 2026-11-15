@@ -415,7 +415,26 @@
     return 'Not sent: ' + (e.message || 'unknown error');
   }
 
-  const api = { beginRedelivery, finishRedelivery, pendingRedeliveries, retryLabel, attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, photoCount, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
+  // Thread scroll policy. renderConvo() rebuilds the whole list, which resets scrollTop,
+  // and used to snap to the bottom for every caller that did not pass keepScroll (SSE
+  // ask-state/reply events, pending clears, redelivery checks, the "Loading older…" render)
+  // so a reader scrolled back in time was thrown to the newest message (phone 2026-11-15).
+  // Now the position is only released to the bottom when the reader was already there (or
+  // the caller asked: their own send, opening the sheet).
+  const NEAR_BOTTOM_PX = 80;
+  function nearBottom(scrollHeight, scrollTop, clientHeight, threshold) {
+    return (scrollHeight - scrollTop - clientHeight) < (threshold == null ? NEAR_BOTTOM_PX : threshold);
+  }
+  // Where scrollTop must be after a rebuild. `before` is measured BEFORE the DOM is cleared:
+  // {top, wasNear}. Returns a number, or null when the caller restores it itself (keepScroll).
+  function scrollAfterRender(before, opts, scrollHeight) {
+    const o = opts || {};
+    if (o.keepScroll) return null;
+    if (o.stick || !before || before.wasNear) return scrollHeight; // browsers clamp to the max
+    return Math.max(0, Math.min(before.top, scrollHeight));
+  }
+
+  const api = { nearBottom, scrollAfterRender, NEAR_BOTTOM_PX, beginRedelivery, finishRedelivery, pendingRedeliveries, retryLabel, attentionChipLabel, answerProgressLabel, answerFailureLabel, mergeSessionRow, firstLine, foldSummary, newTailTurns, turnKey, photoCount, imagesLabel, bashBlockHTML, mergeFreshHistory, trimOverlap, applyAskState, promoteDelivered, sendStatusLabel, canRetry };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckThread = api;
 })(typeof window !== 'undefined' ? window : globalThis);
