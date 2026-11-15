@@ -63,6 +63,8 @@ type ocBinding struct {
 
 const ocBindingTTL = 30 * time.Second
 
+const ocMaxResponseBytes = 32 << 20
+
 func newOpencodeClient() *opencodeClient {
 	home, _ := os.UserHomeDir()
 	return &opencodeClient{
@@ -119,12 +121,22 @@ func (c *opencodeClient) do(ctx context.Context, method, path string, body, out 
 		return fmt.Errorf("opencode service unreachable: %w", err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	// Read one extra byte so a local size cap cannot masquerade as broken JSON.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, ocMaxResponseBytes+1))
+	if len(data) > ocMaxResponseBytes {
+		return fmt.Errorf("opencode %s: response page too large (limit %d bytes)", path, ocMaxResponseBytes)
+	}
+	if err != nil {
+		return fmt.Errorf("read opencode %s: %w", path, err)
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("opencode %s %s: %s %s", method, path, resp.Status, preview(string(data), 200))
 	}
-	if out == nil || len(data) == 0 {
+	if out == nil {
 		return nil
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("decode opencode %s: empty response body", path)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("decode opencode %s: %w", path, err)
@@ -507,12 +519,17 @@ func (a opencodeAdapter) Capabilities(context.Context, sessionInfo) sessionCapab
 // maxOpencodeMessages bounds one snapshot's message window (newest first).
 const maxOpencodeMessages = 400
 
+// Tool outputs can make even a small message window large on the wire.
+const ocMessagePage = 50
+
 func (a opencodeAdapter) messages(ctx context.Context, sid string, max int) ([]ocMessage, error) {
 	var out []ocMessage
+	var pageErr error
 	cursor := ""
 	for len(out) < max {
 		// The cursor carries the order; the service rejects both together.
-		q := url.Values{"limit": {"200"}}
+		limit := min(ocMessagePage, max-len(out))
+		q := url.Values{"limit": {strconv.Itoa(limit)}}
 		if cursor != "" {
 			q.Set("cursor", cursor)
 		} else {
@@ -525,10 +542,11 @@ func (a opencodeAdapter) messages(ctx context.Context, sid string, max int) ([]o
 			} `json:"cursor"`
 		}
 		if err := a.s.oc.do(ctx, http.MethodGet, "/api/session/"+url.PathEscape(sid)+"/message?"+q.Encode(), nil, &page); err != nil {
-			return nil, err
+			pageErr = err
+			break
 		}
 		out = append(out, page.Data...)
-		if len(page.Data) < 200 || page.Cursor.Next == "" || page.Cursor.Next == cursor {
+		if len(page.Data) == 0 || page.Cursor.Next == "" || page.Cursor.Next == cursor {
 			break
 		}
 		cursor = page.Cursor.Next
@@ -537,7 +555,7 @@ func (a opencodeAdapter) messages(ctx context.Context, sid string, max int) ([]o
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
-	return out, nil
+	return out, pageErr
 }
 
 func (a opencodeAdapter) Snapshot(ctx context.Context, se sessionInfo, _ string, _ bool) (harnessSnapshot, error) {
@@ -558,10 +576,14 @@ func (a opencodeAdapter) snapshot(ctx context.Context, se sessionInfo, max int) 
 		return snap, nil
 	}
 	msgs, err := a.messages(ctx, sid, max)
-	if err != nil {
+	if err != nil && len(msgs) == 0 {
 		return snap, err
 	}
 	projectOpencode(&snap, msgs)
+	if err != nil {
+		// A bad older page must not erase the usable tail or its activity state.
+		snap.HistoryTruncated = true
+	}
 
 	var active struct {
 		Data map[string]json.RawMessage `json:"data"`
@@ -665,6 +687,10 @@ func (a opencodeAdapter) History(ctx context.Context, se sessionInfo) ([]histMsg
 	snap, err := a.snapshot(ctx, se, 4000)
 	if err != nil {
 		return nil, err
+	}
+	if snap.HistoryTruncated {
+		// Append so the notice is visible in the initial (newest) history window.
+		snap.Messages = append(snap.Messages, histMsg{Role: "commentary", Content: "Older history was skipped because an OpenCode page could not be read. Refresh to retry."})
 	}
 	return snap.Messages, nil
 }

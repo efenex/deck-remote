@@ -138,6 +138,141 @@ func TestOpencodeOddPartsPreserveTranscript(t *testing.T) {
 	}
 }
 
+func TestOpencodeFailedOlderPagePreservesTranscript(t *testing.T) {
+	// Valid JSON on the wire, but the old LimitReader cuts inside the string.
+	oversized := `{"data":[],"output":"` + strings.Repeat("x", ocMaxResponseBytes) + `"}`
+	if !json.Valid([]byte(oversized)) || json.Valid([]byte(oversized[:ocMaxResponseBytes])) {
+		t.Fatal("oversized fixture must reproduce local JSON truncation")
+	}
+	var legacyPage any
+	if err := json.Unmarshal([]byte(oversized[:ocMaxResponseBytes]), &legacyPage); err == nil || err.Error() != "unexpected end of JSON input" {
+		t.Fatalf("legacy capped decode = %v", err)
+	}
+	for _, tc := range []struct {
+		name, body, wantError string
+		shortRead             bool
+	}{
+		{name: "oversized", body: oversized, wantError: "response page too large"},
+		{name: "truncated JSON", body: `{"data":[`, wantError: "unexpected end of JSON input"},
+		{name: "empty", wantError: "empty response body"},
+		{name: "whitespace", body: " \n\t", wantError: "empty response body"},
+		{name: "interrupted read", body: `{"data":[]}`, shortRead: true, wantError: "unexpected EOF"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			se := sessionInfo{ID: "test", Tool: "opencode", OpenCodeSessionID: "ses_b"}
+			requests := 0
+			f := &fakeOpencode{active: true, messageHandler: func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				q := r.URL.Query()
+				if q.Get("limit") != strconv.Itoa(ocMessagePage) {
+					t.Errorf("limit = %q", q.Get("limit"))
+				}
+				if q.Get("cursor") == "" {
+					if q.Get("order") != "desc" {
+						t.Error("first page must request newest messages")
+					}
+					io.WriteString(w, `{"data":[{"id":"m2","type":"assistant","time":{"created":2000},"content":[{"type":"text","text":"recent reply"}]},{"id":"m1","type":"user","time":{"created":1000},"text":"recent prompt"}],"cursor":{"next":"older"}}`)
+					return
+				}
+				if q.Get("cursor") != "older" || q.Has("order") {
+					t.Errorf("invalid cursor query: %s", r.URL.RawQuery)
+				}
+				if tc.shortRead {
+					w.Header().Set("Content-Length", strconv.Itoa(len(tc.body)+100))
+				}
+				io.WriteString(w, tc.body)
+			}}
+			s := newOpencodeTestServer(t, f, []sessionInfo{se})
+			a := opencodeAdapter{s: s}
+			msgs, err := a.messages(context.Background(), "ses_b", 400)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("page error = %v, want %q", err, tc.wantError)
+			}
+			if len(msgs) != 2 || msgs[0].ID != "m1" || msgs[1].ID != "m2" {
+				t.Fatalf("partial messages not preserved oldest first: %+v", msgs)
+			}
+			snap, err := a.Snapshot(context.Background(), se, "", false)
+			if err != nil || !snap.HistoryTruncated || snap.DegradedReason != "" || len(snap.Messages) != 2 || snap.LastReply != "recent reply" || !snap.Activity.Working {
+				t.Fatalf("partial snapshot = %+v, err = %v", snap, err)
+			}
+			// Exercise the actual endpoint: it must remain HTTP 200, with the
+			// notice in the initial newest window, not hidden behind older rows.
+			s.lists.m["default"] = s.lists.m[""]
+			rec := httptest.NewRecorder()
+			s.handleHistory(rec, httptest.NewRequest("GET", "/api/rc/history?id=test&limit=2", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("history status %d: %s", rec.Code, rec.Body)
+			}
+			var history struct {
+				Messages []histMsg `json:"messages"`
+				HasMore  bool      `json:"hasMore"`
+				Total    int       `json:"total"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &history); err != nil {
+				t.Fatal(err)
+			}
+			if len(history.Messages) != 2 || history.Messages[0].Content != "recent reply" || history.Messages[1].Role != "commentary" || !strings.Contains(history.Messages[1].Content, "Older history was skipped") || !history.HasMore || history.Total != 3 {
+				t.Fatalf("history = %+v", history)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if requests != 6 {
+				t.Fatalf("requests = %d, want 2 per fetch (stop at failed page)", requests)
+			}
+		})
+	}
+}
+
+func TestOpencodeFirstPageFailureRemainsUnavailable(t *testing.T) {
+	se := sessionInfo{ID: "test", Tool: "opencode", OpenCodeSessionID: "ses_b"}
+	f := &fakeOpencode{messages: []byte(`{"data":[`)}
+	a := opencodeAdapter{s: newOpencodeTestServer(t, f, []sessionInfo{se})}
+	if history, err := a.History(context.Background(), se); err == nil || len(history) != 0 {
+		t.Fatalf("history = %+v, err = %v", history, err)
+	}
+	snap, err := a.Snapshot(context.Background(), se, "", false)
+	if err != nil || snap.DegradedReason == "" || snap.HistoryTruncated {
+		t.Fatalf("snapshot = %+v, err = %v", snap, err)
+	}
+}
+
+func TestOpencodeResponseExactlyAtLimit(t *testing.T) {
+	body := `{"data":[]}`
+	body += strings.Repeat(" ", ocMaxResponseBytes-len(body))
+	f := &fakeOpencode{messages: []byte(body)}
+	a := opencodeAdapter{s: newOpencodeTestServer(t, f, nil)}
+	if msgs, err := a.messages(context.Background(), "ses_b", 50); err != nil || len(msgs) != 0 {
+		t.Fatalf("exact-limit response: messages = %d, err = %v", len(msgs), err)
+	}
+}
+
+func TestOpencodeMessagePagination(t *testing.T) {
+	f := &fakeOpencode{messageHandler: func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("cursor") == "" {
+			if q.Get("limit") != "3" || q.Get("order") != "desc" {
+				t.Errorf("first query = %s", r.URL.RawQuery)
+			}
+			io.WriteString(w, `{"data":[{"id":"m3"},{"id":"m2"}],"cursor":{"next":"older"}}`)
+			return
+		}
+		if q.Get("limit") != "1" || q.Get("cursor") != "older" || q.Has("order") {
+			t.Errorf("cursor query = %s", r.URL.RawQuery)
+		}
+		io.WriteString(w, `{"data":[{"id":"m1"}],"cursor":{"next":"even-older"}}`)
+	}}
+	a := opencodeAdapter{s: newOpencodeTestServer(t, f, nil)}
+	msgs, err := a.messages(context.Background(), "ses_b", 3)
+	if err != nil || len(msgs) != 3 {
+		t.Fatalf("messages = %+v, err = %v", msgs, err)
+	}
+	for i, msg := range msgs {
+		if want := "m" + strconv.Itoa(i+1); msg.ID != want {
+			t.Errorf("message %d = %s, want %s", i, msg.ID, want)
+		}
+	}
+}
+
 func TestOpencodeFormValue(t *testing.T) {
 	sel := ocFormField{Key: "k", Type: "string"}
 	sel.Options = append(sel.Options, struct {
@@ -179,12 +314,13 @@ func TestInstanceCreated(t *testing.T) {
 // fakeOpencode is a minimal 2.x service: one directory, a session list, a
 // pending permission, and recorded POSTs.
 type fakeOpencode struct {
-	mu       sync.Mutex
-	sessions []ocSession
-	perms    []ocPermission
-	active   bool
-	posts    []string
-	messages []byte
+	mu             sync.Mutex
+	sessions       []ocSession
+	perms          []ocPermission
+	active         bool
+	posts          []string
+	messages       []byte
+	messageHandler http.HandlerFunc
 }
 
 func (f *fakeOpencode) handler(t *testing.T) http.Handler {
@@ -232,6 +368,10 @@ func (f *fakeOpencode) handler(t *testing.T) http.Handler {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"data": act})
 		case strings.HasSuffix(path, "/message"):
+			if f.messageHandler != nil {
+				f.messageHandler(w, r)
+				return
+			}
 			if f.messages != nil {
 				w.Write(f.messages)
 				return
