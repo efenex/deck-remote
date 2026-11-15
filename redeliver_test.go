@@ -444,6 +444,31 @@ func TestStatusReadsNeverResumeAndUnsupportedToolsNeverSayLost(t *testing.T) {
 	}
 }
 
+func TestCustomToolDeliveryDefersCapabilityToOwner(t *testing.T) {
+	for _, tool := range []string{"custom-claude", "custom-codex", "unknown-tool"} {
+		for _, state := range []string{"typing", "typed", "submitted"} {
+			s, dir, _ := releaseTestServer(t)
+			putFixture(t, dir, "status", mustJSON(t, queuedSend{SendID: "send1", SessionID: "s1", State: state, Tool: tool, Settled: true, SentAt: time.Now().Add(-time.Hour)}))
+			w := httptest.NewRecorder()
+			s.handleSendStatus(w, httptest.NewRequest("GET", "/api/rc/ask/status?requestId=req1&sendId=send1&sessionId=s1&profile=phone", nil))
+			if w.Code != 200 || !strings.Contains(w.Body.String(), `"state":"lost"`) {
+				t.Fatalf("%s/%s: %d %s", tool, state, w.Code, w.Body.String())
+			}
+			if calls := releaseCalls(t, dir); calls != "-p phone session send-status send1 --no-resume --json\n" {
+				t.Fatal(calls)
+			}
+			r := queuedSend{Tool: tool, State: state, RedeliveryOutcome: "unsupported"}
+			if got := mapSendState(r).State; got != "unsupported" {
+				t.Fatalf("owner result lost: %s", got)
+			}
+			r.State = "landed"
+			if got := mapSendState(r).State; got != "delivered" {
+				t.Fatalf("landing proof lost: %s", got)
+			}
+		}
+	}
+}
+
 func TestUntrackedOldCLIAndPrunedReceiptsAreShortRefusals(t *testing.T) {
 	for _, tc := range []struct{ message, outcome string }{
 		{"flag provided but not defined: -no-resume", "unsupported"},

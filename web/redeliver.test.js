@@ -97,6 +97,67 @@ function memoryStorage() {
     setItem: (k, v) => values.set(k, v), removeItem: k => values.delete(k) };
 }
 
+test('a deliberate new check replaces a stuck key atomically; late receipts cannot clear it', () => {
+  const thread = require('./thread.js'), storage = memoryStorage();
+  const e = { requestId: 'r', sendId: 's', ts: 100 };
+  thread.beginRedelivery(storage, 'phone', 'session', e, () => 'K1');
+  assert.throws(() => thread.beginRedelivery({ ...storage, setItem: () => { throw Error('quota'); } },
+    'phone', 'session', e, () => 'K2', true), /quota/);
+  assert.equal(thread.beginRedelivery(storage, 'phone', 'session', e, () => 'unused'), 'K1');
+  assert.equal(thread.beginRedelivery(storage, 'phone', 'session', e, () => 'K2', true), 'K2');
+  thread.finishRedelivery(storage, 'phone', 'session', e, 'K1');
+  assert.equal(thread.pendingRedeliveries(storage, 'phone', 'session')[0].redeliveryOperationId, 'K2');
+});
+
+test('corrupt slots neither hide valid reload receipts nor wedge the next tap', () => {
+  const thread = require('./thread.js');
+  const slot = 'deck.redelivery.' + JSON.stringify(['phone', 'session', 's']);
+  const op = { profile: 'phone', sessionId: 'session', sendId: 's', requestId: 'r', operationId: 'K1', ts: 100 };
+  for (const raw of ['{', 'null', '[]', '1', '{}', JSON.stringify({ ...op, operationId: {} }),
+    JSON.stringify({ ...op, operationId: '--invalid' }), JSON.stringify({ ...op, sessionId: 'other' }),
+    JSON.stringify({ ...op, ts: 'bad' })]) {
+    const storage = memoryStorage();
+    storage.setItem(slot, raw);
+    thread.beginRedelivery(storage, 'phone', 'session', { requestId: 'good', sendId: 'good' }, () => 'GOOD');
+    assert.equal(thread.pendingRedeliveries(storage, 'phone', 'session').length, 1, raw);
+    thread.finishRedelivery(storage, 'phone', 'session', op, 'stale');
+    assert.equal(thread.beginRedelivery(storage, 'phone', 'session', op, () => 'NEW'), 'NEW', raw);
+    assert.equal(thread.pendingRedeliveries(storage, 'phone', 'session').length, 2);
+  }
+  const storage = memoryStorage();
+  storage.setItem(slot, JSON.stringify({ ...op, requestId: 'wrong' }));
+  assert.equal(thread.beginRedelivery(storage, 'phone', 'session', op, () => 'NEW'), 'NEW');
+  assert.throws(() => thread.beginRedelivery({ getItem: () => { throw Error('denied'); } },
+    'phone', 'session', op, () => 'NEW'), /denied/);
+});
+
+test('reload receipts have no message bubble or heuristic match; exact proof adopts history', () => {
+  const thread = require('./thread.js'), storage = memoryStorage();
+  thread.beginRedelivery(storage, 'phone', 'session', { requestId: 'r', sendId: 's', ts: 100 }, () => 'K1');
+  const [receipt] = thread.pendingRedeliveries(storage, 'phone', 'session');
+  assert.equal(receipt.receiptOnly, true);
+  assert.equal(receipt.content, undefined);
+  const history = { role: 'me', content: 'original', ts: 101, id: 'row', hist: true };
+  assert.equal(thread.mergeFreshHistory([{ ...history }], [receipt]).length, 2, 'keep check actionable without guessing');
+  assert.equal(thread.promoteDelivered([receipt], [history]), 0);
+  thread.applyAskState([receipt], { requestId: 'r', state: 'delivered', landedRowId: 'row' });
+  const merged = thread.mergeFreshHistory([{ ...history }], [receipt]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].receiptOnly, false);
+  assert.equal(merged[0].content, 'original');
+  assert.equal(thread.promoteDelivered([receipt], [history]), 1);
+  assert.equal(receipt.receiptOnly, false);
+  assert.equal(receipt.content, 'original');
+  assert.equal(thread.newTailTurns([receipt], [history]).length, 0);
+  const [late] = thread.pendingRedeliveries(storage, 'phone', 'session');
+  const conv = [{ ...history }, { role: 'reply', content: 'answer', ts: 102, hist: true }, late];
+  thread.applyAskState(conv, { requestId: 'r', state: 'delivered', landedRowId: 'row' });
+  assert.equal(thread.promoteDelivered(conv, [history]), 1);
+  assert.equal(conv.length, 2, 'late proof merges the notice into an already loaded row');
+  assert.equal(conv[0].sendId, 's');
+  assert.equal(conv[1].content, 'answer');
+});
+
 test('tap key is durable before sending, retried after reload, then replaced after refusal', () => {
   const thread = require('./thread.js'), storage = memoryStorage();
   const e = { requestId:'r', sendId:'s', ts:100 };

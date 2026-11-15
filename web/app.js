@@ -2921,17 +2921,19 @@
     conv.forEach((e, i) => {
       if (e.role === 'me') {
         // Full-width user row: dim '›' marker, plain text body.
-        const row = el('div', 'msg me' + (e.queued ? ' queued' : ''));
-        row.appendChild(el('span', 'gutter', '›'));
-        const body = el('div', 'body');
-        linkifyDocs(body, e.content);
-        if (e.images) body.appendChild(el('span', 'img-chip', DeckThread.imagesLabel(e.images)));
-        row.appendChild(body);
-        convo.appendChild(row);
+        if (!e.receiptOnly) {
+          const row = el('div', 'msg me' + (e.queued ? ' queued' : ''));
+          row.appendChild(el('span', 'gutter', '›'));
+          const body = el('div', 'body');
+          linkifyDocs(body, e.content);
+          if (e.images) body.appendChild(el('span', 'img-chip', DeckThread.imagesLabel(e.images)));
+          row.appendChild(body);
+          convo.appendChild(row);
+        }
         if (e.queued || e.status || closesRun(e, conv[i + 1])) {
           const label = DeckThread.sendStatusLabel(e);
           const at = e.statusTs || e.ts;
-          const ts = el('div', 'ts' + (e.status === 'failed' || e.status === 'lost' ? ' failed' : ''), fmtTime(at) + (label ? ' · ' + label : ''));
+          const ts = el('div', 'ts' + (e.receiptOnly ? ' delivery-check' : '') + (e.status === 'failed' || e.status === 'lost' ? ' failed' : ''), (e.receiptOnly ? 'Previous delivery check · ' : '') + fmtTime(at) + (label ? ' · ' + label : ''));
           if (at) ts.title = new Date(at * 1000).toISOString();
           if (DeckThread.canRetry(e)) {
             const retry = el('button', 'retry', DeckThread.retryLabel(e));
@@ -2939,6 +2941,13 @@
             retry.title = 'Check the original send and retry only if agent-deck can do so safely';
             retry.addEventListener('click', () => retrySend(id, e));
             ts.appendChild(retry);
+            if (e.redeliveryOperationId) {
+              const fresh = el('button', 'retry', 'Start a new check');
+              fresh.type = 'button';
+              fresh.title = 'Abandon the previous check receipt and ask agent-deck to check the same original send again';
+              fresh.addEventListener('click', () => retrySend(id, e, true));
+              ts.appendChild(fresh);
+            }
           }
           convo.appendChild(ts);
           const details = [...new Set([e.reason, e.targetStatus ? 'target: ' + e.targetStatus : '', e.attempts ? 'attempts: ' + e.attempts : '', e.redelivering ? 'Checking re-delivery…' : e.redeliveryReason].filter(Boolean))];
@@ -3127,14 +3136,14 @@
 
   // Keep the same bubble and send ID. Never re-submit its text through /ask:
   // an absent transcript match can be a false negative, not a lost message.
-  async function retrySend(id, entry) {
+  async function retrySend(id, entry, newCheck = false) {
     if (!DeckThread.canRetry(entry)) return;
     entry.redelivering = true;
     renderConvo(id);
     const profile = CURRENT_PROFILE;
     let operationId = '';
     try {
-      operationId = DeckThread.beginRedelivery(localStorage, profile, id, entry, () => crypto.randomUUID());
+      operationId = DeckThread.beginRedelivery(localStorage, profile, id, entry, () => crypto.randomUUID(), newCheck);
       entry.redeliveryOperationId = operationId;
       const event = await api('POST', '/api/rc/ask/redeliver', {
         sessionId: id, requestId: entry.requestId, sendId: entry.sendId, profile, operationId,
