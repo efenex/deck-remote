@@ -63,6 +63,81 @@ func TestProjectOpencode(t *testing.T) {
 	}
 }
 
+func TestOpencodeMixedToolInputs(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "opencode", "mixed-tool-inputs.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	se := sessionInfo{ID: "test", Tool: "opencode", OpenCodeSessionID: "ses_b"}
+	f := &fakeOpencode{messages: b, active: true}
+	a := opencodeAdapter{s: newOpencodeTestServer(t, f, []sessionInfo{se})}
+	ctx := context.Background()
+	msgs, err := a.messages(ctx, "ses_b", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantText := []string{"Null input", "Object input", "String input"}
+	wantTool := []string{"shell", "shell(echo object)", "shell(echo string)"}
+	if len(msgs) != len(wantText) {
+		t.Fatalf("messages = %d, want %d", len(msgs), len(wantText))
+	}
+	for i, m := range msgs {
+		if got := runningOpencodeTool([]ocMessage{m}); got != wantTool[i] {
+			t.Errorf("message %s tool = %q, want %q", m.ID, got, wantTool[i])
+		}
+	}
+	history, err := a.History(ctx, se)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := a.Snapshot(ctx, se, "", false)
+	if err != nil || snap.DegradedReason != "" {
+		t.Fatalf("snapshot error = %v, degraded = %q", err, snap.DegradedReason)
+	}
+	for name, rendered := range map[string][]histMsg{"history": history, "snapshot": snap.Messages} {
+		if len(rendered) != len(wantText) {
+			t.Fatalf("%s messages = %+v", name, rendered)
+		}
+		for i, m := range rendered {
+			if m.Content != wantText[i] {
+				t.Errorf("%s message %d = %q, want %q", name, i, m.Content, wantText[i])
+			}
+		}
+	}
+	if snap.Activity.CurrentTool != wantTool[2] {
+		t.Errorf("current tool = %q, want %q", snap.Activity.CurrentTool, wantTool[2])
+	}
+}
+
+func TestOpencodeOddPartsPreserveTranscript(t *testing.T) {
+	for _, part := range []string{
+		`null`, `"pending"`, `42`, `[]`,
+		`{"type":"text","text":{"partial":true}}`,
+		`{"type":[],"name":{},"state":true}`,
+		`{"type":"tool","name":"shell","state":"pending"}`,
+		`{"type":"tool","name":"shell","state":{"status":{},"input":"partial"}}`,
+		`{"type":"tool","name":"shell","state":{"status":"running","input":[],"output":{},"metadata":"pending"}}`,
+		`{"type":"tool","name":"shell","state":{"status":"running","input":42,"output":[],"metadata":false}}`,
+		`{"type":"tool","name":"shell","state":{"status":"running","input":true,"output":null,"metadata":[]}}`,
+		`{"type":"tool","name":"shell","state":{"status":"running"}}`,
+	} {
+		t.Run(part, func(t *testing.T) {
+			var m ocMessage
+			if err := json.Unmarshal([]byte(`{"type":"assistant","content":[`+part+`,{"type":"text","text":"still readable"}]}`), &m); err != nil {
+				t.Fatal(err)
+			}
+			var snap harnessSnapshot
+			projectOpencode(&snap, []ocMessage{m})
+			if len(snap.Messages) != 1 || snap.Messages[0].Content != "still readable" {
+				t.Fatalf("messages = %+v", snap.Messages)
+			}
+			if got := runningOpencodeTool([]ocMessage{m}); got != "" && got != "shell" {
+				t.Fatalf("unexpected tool input: %q", got)
+			}
+		})
+	}
+}
+
 func TestOpencodeFormValue(t *testing.T) {
 	sel := ocFormField{Key: "k", Type: "string"}
 	sel.Options = append(sel.Options, struct {
@@ -109,6 +184,7 @@ type fakeOpencode struct {
 	perms    []ocPermission
 	active   bool
 	posts    []string
+	messages []byte
 }
 
 func (f *fakeOpencode) handler(t *testing.T) http.Handler {
@@ -156,6 +232,10 @@ func (f *fakeOpencode) handler(t *testing.T) http.Handler {
 			}
 			json.NewEncoder(w).Encode(map[string]any{"data": act})
 		case strings.HasSuffix(path, "/message"):
+			if f.messages != nil {
+				w.Write(f.messages)
+				return
+			}
 			w.Write([]byte(`{"data":[{"id":"m2","type":"assistant","time":{"created":2000},"finish":"stop","content":[{"type":"text","text":"hi"}]},{"id":"m1","type":"user","time":{"created":1000},"text":"hello"}],"cursor":{}}`))
 		case strings.HasSuffix(path, "/permission"):
 			json.NewEncoder(w).Encode(map[string]any{"data": f.perms})
