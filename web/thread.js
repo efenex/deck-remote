@@ -100,6 +100,7 @@
   function nativeRowId(id) { return !!id && !/^(queue|codex|line):/.test(id); }
   function rowMatch(e, f, exact) {
     if (exact) return f.id === e.landedRowId;
+    if (e.receiptOnly) return false; // no message content survived the reload
     if (e.landedRowId && nativeRowId(e.landedRowId) && nativeRowId(f.id)) return false;
     return sameEcho(e, f);
   }
@@ -127,6 +128,7 @@
         used.add(i);
         if (e.sendId) {
           Object.assign(f, e, { hist: true, ts: f.ts, id: f.id, content: f.content,
+            receiptOnly: false,
             status: e.status === 'delivered' ? 'delivered' : 'seen', queued: false,
             reason: e.status === 'delivered' ? 'Seen in the target transcript' : 'Content seen; delivery attribution is unverified',
             redeliveryReason: '', error: '', statusTs: f.ts || e.statusTs });
@@ -235,6 +237,7 @@
   function promoteDelivered(conv, tail) {
     const used = new Set();
     const photos = [];
+    const recovered = [];
     const claimed = new Map(conv.filter(e => e.landedRowId).map(e => [e.landedRowId, e]));
     let n = 0;
     conv.forEach((e) => {
@@ -250,6 +253,12 @@
         if (!exact && f.ts && e.ts && f.ts < e.ts - SAME_TURN_SECS) continue;
         used.add(i);
         if (e.hist && (!exact || e.id === f.id)) return;
+        if (e.receiptOnly) {
+          recovered.push(e);
+          e.content = f.content;
+          e.images = f.images || photoCount(f.content);
+          e.receiptOnly = false;
+        }
         if (e.images) {
           // Keep the canonical references for later polls, without losing the
           // image chip when this transcript represents attachments as text only.
@@ -266,6 +275,15 @@
         if (f.origin) e.origin = f.origin;
         n++;
         return;
+      }
+    });
+    // History may already contain the proven row when a reload receipt gets
+    // its first landed ID. Attach the receipt there, preserving its position.
+    recovered.forEach(e => {
+      const row = conv.find(f => f !== e && f.hist && !f.sendId && f.id === e.id);
+      if (row) {
+        Object.assign(row, e);
+        conv.splice(conv.indexOf(e), 1);
       }
     });
     // A pre-fix echo may already sit after newer history. Move just the
@@ -312,30 +330,38 @@
   function operationSlot(profile, sessionId, sendId) {
     return REDELIVERY_PREFIX + JSON.stringify([profile, sessionId, sendId]);
   }
-  function beginRedelivery(storage, profile, sessionId, entry, uuid) {
+  function readRedelivery(storage, slot) {
+    const raw = storage.getItem(slot); // storage access errors must still block sending
+    let op;
+    try { op = JSON.parse(raw); } catch (_) { return null; }
+    if (!op || typeof op.profile !== 'string' || typeof op.sessionId !== 'string' || !op.sessionId ||
+        typeof op.sendId !== 'string' || !op.sendId || typeof op.requestId !== 'string' || !op.requestId ||
+        typeof op.operationId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(op.operationId) ||
+        (op.ts !== undefined && (typeof op.ts !== 'number' || !Number.isFinite(op.ts))) ||
+        operationSlot(op.profile, op.sessionId, op.sendId) !== slot) return null;
+    return op;
+  }
+  function beginRedelivery(storage, profile, sessionId, entry, uuid, newCheck = false) {
     const slot = operationSlot(profile, sessionId, entry.sendId);
-    const old = JSON.parse(storage.getItem(slot) || 'null');
-    if (old) {
-      if (old.requestId !== entry.requestId || !old.operationId) throw new Error('Original check receipt does not match');
-      return old.operationId;
-    }
+    const old = readRedelivery(storage, slot);
+    if (!newCheck && old && old.requestId === entry.requestId) return old.operationId;
     const op = { profile, sessionId, sendId: entry.sendId, requestId: entry.requestId, operationId: uuid(), ts: entry.ts };
     storage.setItem(slot, JSON.stringify(op)); // failure must prevent the POST
     return op.operationId;
   }
   function finishRedelivery(storage, profile, sessionId, entry, operationId) {
     const slot = operationSlot(profile, sessionId, entry.sendId);
-    const op = JSON.parse(storage.getItem(slot) || 'null');
+    const op = readRedelivery(storage, slot);
     if (op && op.operationId === operationId) storage.removeItem(slot);
   }
   function pendingRedeliveries(storage, profile, sessionId) {
     const pending = [];
     for (let i = 0; i < storage.length; i++) {
       const key = storage.key(i);
-      if (!key.startsWith(REDELIVERY_PREFIX)) continue;
-      const op = JSON.parse(storage.getItem(key));
-      if (op.profile === profile && op.sessionId === sessionId) pending.push({
-        role: 'me', content: 'Original message · delivery check pending',
+      if (!key || !key.startsWith(REDELIVERY_PREFIX)) continue;
+      const op = readRedelivery(storage, key);
+      if (op && op.profile === profile && op.sessionId === sessionId) pending.push({
+        role: 'me', receiptOnly: true,
         requestId: op.requestId, sendId: op.sendId, ts: op.ts, redeliveryOperationId: op.operationId,
         status: 'unconfirmed', reason: 'Previous check has no confirmed response; retry to recover it',
       });

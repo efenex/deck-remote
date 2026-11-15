@@ -174,6 +174,17 @@ type uiSendState struct {
 	Retryable bool
 }
 
+// Only known non-row tools can be classified locally. Other names may be
+// custom Claude/Codex-compatible tools resolved by agent-deck's rowsHarness;
+// keep their ordinary uncertain state until the owner returns a capability result.
+func knownUnverifiableTool(tool string) bool {
+	switch tool {
+	case "opencode", "shell", "ssh", "pi", "omp":
+		return true
+	}
+	return false
+}
+
 // mapSendState translates an agent-deck send record into the PWA's states.
 //
 // Only landed is proof of transcript delivery. A settled typed/submitted
@@ -186,7 +197,7 @@ func mapSendState(r queuedSend) uiSendState {
 	// Unverifiable is about landing proof only: a queued, failed or cancelled
 	// SSH-placeholder send keeps its real state (and leaves the tracker when final).
 	if r.State != "landed" && (r.RedeliveryOutcome == "unsupported" ||
-		((r.State == "typed" || r.State == "submitted" || r.State == "typing") && (r.SSH || (r.Tool != "" && r.Tool != "claude" && r.Tool != "codex")))) {
+		((r.State == "typed" || r.State == "submitted" || r.State == "typing") && (r.SSH || knownUnverifiableTool(r.Tool)))) {
 		return uiSendState{State: "unsupported", Final: r.Settled}
 	}
 	switch r.RedeliveryOutcome {

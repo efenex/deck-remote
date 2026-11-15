@@ -24,10 +24,16 @@ commands and the owner's `remote_redeliver_unavailable` response become
 Before the request, the browser persists receipt IDs and the operation key in
 `localStorage`, scoped by profile/session/send. Message content is not stored.
 A timeout, failed response, or page reload retains that operation. A reload
-restores a receipt-only bubble with **Retry check**. A matching HTTP or SSE
-receipt acknowledges the operation; the next deliberate tap gets a fresh UUID.
+restores a delivery-check notice with **Retry check**, without a duplicate message
+bubble. A matching HTTP or SSE receipt acknowledges the operation; the next
+deliberate tap gets a fresh UUID.
 This allows a sticky refusal or `pending/reopen_busy` to be tried again.
 Storage failure prevents the action rather than sending without a durable key.
+**Start a new check** explicitly replaces an unfinished key, allowing recovery
+from deterministic replay errors while still checking the same original send.
+Replacement is persisted before posting; a failed write retains the old key.
+Malformed or incorrectly scoped slots are ignored during reload and replaced
+on the next tap for that send. They cannot hide other valid pending checks.
 
 Reopened sends rejoin the persisted polling set. An operation timestamp does
 not suppress a subsequent status read of an older queue-record timestamp.
@@ -44,19 +50,30 @@ not suppress a subsequent status read of an older queue-record timestamp.
 
 A replay's current landed snapshot overrides its older decision. Invalid or
 mismatched receipts are uncertain errors; the browser keeps the operation key.
+The operator can escape a repeatedly invalid receipt with **Start a new check**.
 The same mappings work through both HTTP and SSE.
 
-`GET /api/rc/ask/status` is authenticated but read-capable. All queue status
-reads use `send-status --no-resume --json`, including polling and the legacy
-POST `checkOnly` compatibility path. An older CLI is never retried without
-`--no-resume`. Tool metadata marks OpenCode/shell receipts unverifiable; the
-already-loaded session list supplies SSH-placeholder metadata absent from the
+`GET /api/rc/ask/status` is authenticated but read-capable. Phone-triggered queue
+status reads use `send-status --no-resume --json`, including the ownership lookup
+and legacy POST `checkOnly` path. These never retry an older CLI without
+`--no-resume`. The server's background poller uses plain `send-status --json`,
+preserving agent-deck's ability to resume a dead worker for a non-final queued
+send after a reboot or kill. It never re-types a typed or settled send.
+Known non-row tools (OpenCode, shell, SSH, Pi, OMP) are marked unverifiable;
+unknown/custom tool names retain ordinary unconfirmed delivery states until the
+owner reports a capability result, since agent-deck resolves Claude/Codex-compatible
+custom tools through `rowsHarness`. The already-loaded session list supplies
+SSH-placeholder metadata absent from the
 queue record. The owner primitive remains the capability authority on a tap.
 
 Transcript reconciliation reserves `landed_row_id` before content matching.
-Exact row identity wins over content/timestamp heuristics. Content-only matches
-say **seen (unverified)** and retain the receipt so it can still be checked.
-The app-shell cache version is 60.
+Exact row identity wins over content/timestamp heuristics. A different native ID
+cannot match. When IDs are synthesized (`queue:`, `codex:`, `line:`) or missing,
+the existing one-for-one, time-bounded content match can reconcile a bubble;
+owner-proven delivery stays **landed**. Content matches without owner proof say
+**seen (unverified)** and retain the receipt so it can still be checked. A reload
+notice has no saved content and can attach to history only by exact landed row ID.
+The app-shell cache version is 62.
 
 ## Automatic queue nudges
 

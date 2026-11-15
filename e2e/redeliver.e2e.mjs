@@ -86,7 +86,7 @@ test('delivery diagnostics and same-ID re-delivery preserve bubble and composer'
   assert.deepEqual(errors, []);
 });
 
-test('an unfinished tap survives page reload; a fresh tap after refusal gets a new key', { timeout: 60000 }, async t => {
+test('reload recovery, corrupt storage, and explicit new checks preserve the original send', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
   const browser = await launchChrome(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
@@ -97,7 +97,8 @@ test('an unfinished tap survives page reload; a fresh tap after refusal gets a n
       close() {}
     };
   });
-  await page.route('**/api/rc/history?*', r => r.fulfill({ json: { messages: [], hasMore: false } }));
+  let messages = [];
+  await page.route('**/api/rc/history?*', r => r.fulfill({ json: { messages, hasMore: false } }));
   await page.route('**/api/rc/activity?*', r => r.fulfill({ json: { working: false } }));
   await page.route('**/api/rc/attention?*', r => r.fulfill({ json: { pending: false } }));
   let asks = 0;
@@ -111,6 +112,7 @@ test('an unfinished tap survives page reload; a fresh tap after refusal gets a n
   await page.route('**/api/rc/ask/redeliver*', r => {
     const body = r.request().postDataJSON(); taps.push(body);
     if (taps.length === 1 || taps.length === 3) return r.abort('failed'); // owner may have committed; response lost
+    if (taps.length === 5 || taps.length === 6) return r.fulfill({ status: 502, json: { error: 're-delivery returned no landed snapshot; retry this check' } });
     return r.fulfill({ json: { ...event, operationId: body.operationId, redeliveryOutcome: 'refused', state: 'refused', redeliveryReason: 'refused: target not running' } });
   });
   await openApp(page, base + '/?token=fake');
@@ -125,9 +127,17 @@ test('an unfinished tap survives page reload; a fresh tap after refusal gets a n
   assert.equal(saved.length, 1);
   assert.equal(saved[0].operationId, taps[0].operationId);
   assert.equal(JSON.stringify(saved).includes('[REDACTED]'), false, 'persist only receipt IDs');
+  // One corrupt slot must not suppress another send's valid recovery receipt.
+  await page.evaluate(() => localStorage.setItem('deck.redelivery.corrupt', '{'));
+  messages = [{ role: 'user', id: 'original-row', content: '[REDACTED]', ts: event.statusTs }];
   await openApp(page, base + '/?token=fake');
   await page.click('.card[data-id="s1"]');
-  await page.locator('#convo .retry').click();
+  await page.locator('#convo .msg.me').waitFor();
+  assert.equal(await page.locator('#convo .msg.me').count(), 1, 'history is the only message bubble after reload');
+  assert.equal(await page.locator('#convo .delivery-check').count(), 1, 'receipt remains actionable as a notice');
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await page.evaluate(() => localStorage.removeItem('deck.redelivery.corrupt'));
+  await page.getByRole('button', { name: 'Retry check', exact: true }).click();
   await page.getByText('refused: target not running', { exact: false }).waitFor();
   assert.equal(taps[1].operationId, taps[0].operationId, 'reload retries the SAME operation');
   await page.getByRole('button', { name: 'Re-deliver', exact: true }).click();
@@ -144,5 +154,19 @@ test('an unfinished tap survives page reload; a fresh tap after refusal gets a n
   await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith('deck.redelivery.')));
   assert.equal(taps.length, 4);
   assert.notEqual(taps[3].operationId, taps[2].operationId);
+  await page.getByRole('button', { name: 'Re-deliver', exact: true }).click();
+  await page.getByText(/no landed snapshot/).waitFor();
+  await page.getByRole('button', { name: 'Retry check', exact: true }).click();
+  await page.getByRole('button', { name: 'Start a new check', exact: true }).waitFor();
+  assert.equal(taps[5].operationId, taps[4].operationId, 'ordinary retry preserves a stuck key');
+  await page.getByRole('button', { name: 'Start a new check', exact: true }).click();
+  await page.getByRole('button', { name: 'Re-deliver', exact: true }).waitFor();
+  assert.notEqual(taps[6].operationId, taps[5].operationId, 'explicit new check escapes a deterministic replay error');
+  assert.ok(taps.every(tap => tap.sendId === 'send1' && tap.requestId === 'r1'));
+  // A corrupt slot for this send is replaced durably on the next deliberate tap.
+  await page.evaluate(profile => localStorage.setItem('deck.redelivery.' + JSON.stringify([profile, 's1', 'send1']), '{'), taps[0].profile);
+  await page.getByRole('button', { name: 'Re-deliver', exact: true }).click();
+  await page.waitForFunction(() => !Object.keys(localStorage).some(k => k.startsWith('deck.redelivery.')));
+  assert.equal(taps.length, 8);
   assert.equal(asks, 1, 'no new text send');
 });
