@@ -161,15 +161,49 @@ type ocMessage struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
-	Content []struct {
-		Type  string `json:"type"` // text | tool | reasoning
-		Text  string `json:"text"`
-		Name  string `json:"name"`
-		State struct {
-			Status string         `json:"status"`
-			Input  map[string]any `json:"input"`
-		} `json:"state"`
-	} `json:"content"`
+	Content []ocPart `json:"content"`
+}
+
+type ocPart struct {
+	Type  string `json:"type"` // text | tool | reasoning
+	Text  string `json:"text"`
+	Name  string `json:"name"`
+	State struct {
+		Status string          `json:"status"`
+		Input  json.RawMessage `json:"input"`
+	} `json:"state"`
+}
+
+// Decode each part field independently: an unexpected or streaming field shape
+// must not make the entire message page unavailable. Output and metadata are
+// deliberately ignored, regardless of their wire shapes.
+func (p *ocPart) UnmarshalJSON(data []byte) error {
+	*p = ocPart{}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil
+	}
+	_ = json.Unmarshal(fields["type"], &p.Type)
+	_ = json.Unmarshal(fields["text"], &p.Text)
+	_ = json.Unmarshal(fields["name"], &p.Name)
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(fields["state"], &state); err == nil {
+		_ = json.Unmarshal(state["status"], &p.State.Status)
+		p.State.Input = state["input"]
+	}
+	return nil
+}
+
+// Tool input may be an object or raw text (including a partially streamed
+// argument string). Null, missing and other JSON values have no display input.
+func opencodeToolInput(raw json.RawMessage) (map[string]any, string) {
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err == nil {
+		return object, ""
+	}
+	var text string
+	_ = json.Unmarshal(raw, &text)
+	return nil, text
 }
 
 type ocPermission struct {
@@ -610,10 +644,15 @@ func runningOpencodeTool(msgs []ocMessage) string {
 		for j := len(m.Content) - 1; j >= 0; j-- {
 			c := m.Content[j]
 			if c.Type == "tool" && (c.State.Status == "running" || c.State.Status == "streaming") {
+				input, text := opencodeToolInput(c.State.Input)
 				for _, k := range []string{"command", "filePath", "path", "pattern", "url"} {
-					if v, ok := c.State.Input[k].(string); ok && v != "" {
-						return fmt.Sprintf("%s(%s)", c.Name, preview(v, 60))
+					if v, ok := input[k].(string); ok && v != "" {
+						text = v
+						break
 					}
+				}
+				if text != "" {
+					return fmt.Sprintf("%s(%s)", c.Name, preview(text, 60))
 				}
 				return c.Name
 			}

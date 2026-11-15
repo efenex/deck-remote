@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "id": "msg_string", "type": "assistant", "time": {"created": 3000},
+      "content": [
+        {"type": "text", "text": "String input"},
+        {"type": "tool", "name": "shell", "state": {"status": "streaming", "input": "echo string", "output": "partial", "metadata": "pending"}}
+      ]
+    },
+    {
+      "id": "msg_object", "type": "assistant", "time": {"created": 2000},
+      "content": [
+        {"type": "text", "text": "Object input"},
+        {"type": "tool", "name": "shell", "state": {"status": "running", "input": {"command": "echo object"}, "output": {"text": "partial"}, "metadata": {"exit": 0}}}
+      ]
+    },
+    {
+      "id": "msg_null", "type": "assistant", "time": {"created": 1000},
+      "content": [
+        {"type": "text", "text": "Null input"},
+        {"type": "tool", "name": "shell", "state": {"status": "running", "input": null, "output": null, "metadata": null}}
+      ]
+    }
+  ],
+  "cursor": {}
+}
