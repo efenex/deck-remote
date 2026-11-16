@@ -3,9 +3,9 @@
 Task: `deckremote-webkit-lane-1116`. Base:
 `c53360366a7dedff0a2ec7d94ae963843f22d45f`.
 
-**WebKit gate: FAIL — 18/20 tests pass, zero skips; six of eight specs pass.**
-The lane and harness fixes are implemented. Two failures remain visible; no
-product source was changed. Physical iPhone acceptance has not been performed.
+**WebKit gate (as first recorded): FAIL — 18/20 tests pass, zero skips.**
+The two findings below were then fixed as product changes (see each
+*Resolution*); the lane is 20/20 afterwards. Physical iPhone acceptance has not been performed.
 
 ## Configuration and scope
 
@@ -79,6 +79,13 @@ focused textarea and a button reproduced the engine difference:
 This is a reproducible product compatibility failure in Playwright WebKit, not a
 load timeout. The app handler is unchanged. Native iPhone confirmation and a
 product fix preserving focus and cancelled-gesture behavior remain operator work.
+
+**Resolution (product fix).** Confirmed as the cause: the `pointerdown` handler's
+`preventDefault()` suppresses the click for touch activation in WebKit. Send now
+prevents the default on `mousedown` instead (the same focus-transfer default, as the
+slash button already does), which leaves `click` intact. The composer spec also asserts
+the textarea keeps focus after the touch send. Verified under Playwright WebKit and
+Chrome only; native iPhone behavior is still to be confirmed with the checklist.
 
 ### F2 — Photo flow reports an EventSource access-control error on navigation
 

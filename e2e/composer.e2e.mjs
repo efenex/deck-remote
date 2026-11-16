@@ -47,6 +47,7 @@ test('composer: keyboard geometry survives focus transfer and sends once per tap
   await secondResponse;
   await page.waitForFunction(() => document.querySelector('#composerInput').value === '');
   assert.equal(sends.length, 2);
+  assert.equal(await page.locator('#composerInput').evaluate(el => el === document.activeElement), true, 'touch send keeps typing focus');
   await page.fill('#composerInput', 'cancelled gesture');
   const target = await page.locator('.send-btn').boundingBox();
   await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2);

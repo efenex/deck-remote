@@ -2343,7 +2343,7 @@
     send.disabled = true;
     // Keep the textarea and keyboard steady until the normal click handler.
     // Do not send on pointerdown: a cancelled tap/drag must not submit.
-    send.addEventListener('pointerdown', (e) => {
+    send.addEventListener('mousedown', (e) => {
       if (e.button === 0 && document.activeElement === ta) e.preventDefault();
     });
     send.addEventListener('click', async () => {
