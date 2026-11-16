@@ -2,11 +2,11 @@
 // G15: a typed Tower reply survives overview refreshes, and a closed ask keeps its draft visible.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 test('Tower reply drafts survive refreshes, ask closes and reloads', { timeout: 90000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
   withDefaults(page.context());
   let asks = ['ask-a', 'ask-b'];

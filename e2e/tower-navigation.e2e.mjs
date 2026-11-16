@@ -1,11 +1,11 @@
 // Fixture-only: never send replies to the live Tower journal.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 test('Tower reply leaves tab navigation reachable with stale keyboard metrics', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
   await page.addInitScript(() => {

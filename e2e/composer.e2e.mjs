@@ -1,11 +1,11 @@
 // Real hit testing and pointer activation against the UI fixture; no live sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 test('composer: keyboard geometry survives focus transfer and sends once per tap', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
   const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -47,6 +47,7 @@ test('composer: keyboard geometry survives focus transfer and sends once per tap
   await secondResponse;
   await page.waitForFunction(() => document.querySelector('#composerInput').value === '');
   assert.equal(sends.length, 2);
+  assert.equal(await page.locator('#composerInput').evaluate(el => el === document.activeElement), true, 'touch send keeps typing focus');
   await page.fill('#composerInput', 'cancelled gesture');
   const target = await page.locator('.send-btn').boundingBox();
   await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2);

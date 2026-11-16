@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 test('delivered photo caption stays before later replies after reopening', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
   const sent = Math.floor(Date.now() / 1000);
@@ -42,17 +42,16 @@ test('delivered photo caption stays before later replies after reopening', { tim
 });
 
 test('phone photos: pick, preview, remove, failed upload, queued send and unsupported harness', { timeout: 60000 }, async t => {
-  const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  let reject = true; const requests = [];
+  const base = await startMockApi(t, { onAsk: req => {
+    requests.push(req);
+    return reject ? { status: 400, json: { error: 'fixture refusal' } } : { status: 202, json: { requestId: 'photo1', sendId: 'queued1', status: 'queued', images: 1 } };
+  } });
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.route('**/api/rc/attention?*', r => r.fulfill({ json: { pending: false } }));
-  let reject = true; const requests = [];
-  await page.route('**/api/rc/ask*', async route => {
-    const req = route.request(); requests.push({ headers: req.headers(), body: req.postDataBuffer(), url: req.url() });
-    await route.fulfill(reject ? { status: 400, json: { error: 'fixture refusal' } } : { status: 202, json: { requestId: 'photo1', sendId: 'queued1', status: 'queued', images: 1 } });
-  });
   await openApp(page, base + '/?token=fake'); await page.click('.card[data-id="s1"]');
   await page.waitForFunction(() => !document.getElementById('composerInput').disabled);
   assert.equal(await page.locator('#photoCamera').getAttribute('capture'), 'environment');
