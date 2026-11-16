@@ -224,6 +224,14 @@ proxied `agent-deck web` profile (`--proxy-profile`, default `--profile`); the
 terminal affordance is disabled in the PWA whenever a different profile is
 selected.
 
+## Browser acceptance
+
+`make e2e` runs the serial system-Chrome suite. For the WebKit mock-fixture lane,
+run `make e2e-webkit-deps` once, then `make e2e-webkit`. See the
+[e2e lane guide](e2e/README.md) for scope and single-spec commands, and the
+[real-iPhone checklist](docs/iphone-acceptance.md) for PWA installation, native
+composer/keyboard behavior, passkeys and push acceptance.
+
 ## Upstreaming
 deck-remote's `/api/rc/*` endpoints work around one gap in agent-deck: there's no
 HTTP endpoint to send input / get a reply / approve. The natural upstream is a
