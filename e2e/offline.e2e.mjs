@@ -1,11 +1,11 @@
 // Uses the existing UI fixture server; no real sessions or sends.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 test('phone: offline refresh feedback, transcript failure and resume layout recovery', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome();
+  const browser = await launchBrowser();
   t.after(() => browser.close());
   const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
   const page = await ctx.newPage(); const errors = [];
@@ -51,7 +51,7 @@ test('phone: offline refresh feedback, transcript failure and resume layout reco
 
 test('phone: Tower BACKLOG section, defer picker and the act payload', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome();
+  const browser = await launchBrowser();
   t.after(() => browser.close());
   const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
   const page = await ctx.newPage(); const errors = []; const posts = [];

@@ -1,7 +1,7 @@
 // Isolated loopback fixtures only: no installed browser profile or live service.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, launchBrowser, withDefaults } from './harness.mjs';
 
 const rows = Array.from({ length: 17 }, (_, i) => ({
   id: 'session-' + i, title: 'session-' + i, group: 'fixture', tool: 'claude',
@@ -10,7 +10,7 @@ const rows = Array.from({ length: 17 }, (_, i) => ({
 
 async function fixture(t, { stallProfiles = false, initialStatus = 503, path = '', listDelay = 0, expectFailure = true } = {}) {
   const base = await startMockApi(t);
-  const browser = await launchChrome();
+  const browser = await launchBrowser();
   t.after(() => browser.close());
   const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, serviceWorkers: 'block' }));
   const page = await ctx.newPage();
@@ -128,7 +128,10 @@ test('Resync reloads for a new shell, preserving synthetic pairing and persisted
   const drafts = await page.evaluate(() => localStorage.getItem('dr-tower-drafts'));
   await page.route('**/index.html', async route => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: (await response.text()).replace('/app.js?v=61', '/app.js?v=next-fixture') });
+    const original = await response.text();
+    const body = original.replace(/\/app\.js\?v=[^"'\s<>]+/, '/app.js?v=next-fixture');
+    assert.notEqual(body, original, 'fixture must change the current shell version');
+    await route.fulfill({ response, body });
   });
   await page.click('.tab[data-tab="settings"]');
   await Promise.all([page.waitForNavigation(), page.click('#btnResync')]);

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startMockApi, openApp, launchChrome, withDefaults } from './harness.mjs';
+import { startMockApi, openApp, launchBrowser, withDefaults } from './harness.mjs';
 
 // Real app.js rendering and click path, but ONLY a disposable mock server and
 // fake SSE/requests. Never open an act-token instance or the real phone journal.
 test('delivery diagnostics and same-ID re-delivery preserve bubble and composer', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' });
   withDefaults(page.context());
   const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -88,7 +88,7 @@ test('delivery diagnostics and same-ID re-delivery preserve bubble and composer'
 
 test('reload recovery, corrupt storage, and explicit new checks preserve the original send', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
   withDefaults(page.context());
   await page.addInitScript(() => {

@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { launchChrome, startMockApi, withDefaults, openApp } from './harness.mjs';
+import { launchBrowser, startMockApi, withDefaults, openApp } from './harness.mjs';
 
 test('S1 child list stays read-only, escaped and stable across polls and resume', { timeout: 60000 }, async t => {
   const base = await startMockApi(t);
-  const browser = await launchChrome(); t.after(() => browser.close());
+  const browser = await launchBrowser(); t.after(() => browser.close());
   const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, serviceWorkers: 'block' }));
   const page = await ctx.newPage();
   const errors = []; page.on('pageerror', e => errors.push(e.message));

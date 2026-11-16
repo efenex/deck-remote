@@ -1,7 +1,14 @@
 {
   "name": "deck-remote-e2e",
   "private": true,
-  "description": "Playwright end-to-end checks for the run-bang confirm sheet, passkey enrolment and CSP (make e2e). Uses the system Google Chrome; downloads no browser.",
+  "description": "Serial Node test-runner projects using Playwright Core: system Chrome (full suite) and downloaded WebKit (mock fixtures).",
+  "scripts": {
+    "test": "npm run test:chromium",
+    "test:chromium": "E2E_BROWSER=chromium node --test --test-reporter=tap --test-concurrency=1 *.e2e.mjs",
+    "test:fixtures": "node --test --test-reporter=tap --test-concurrency=1 offline.e2e.mjs recovery.e2e.mjs photos.e2e.mjs composer.e2e.mjs tower-navigation.e2e.mjs tower-draft.e2e.mjs redeliver.e2e.mjs subagents.e2e.mjs",
+    "test:webkit": "PLAYWRIGHT_BROWSERS_PATH=0 E2E_BROWSER=webkit npm run test:fixtures",
+    "install:webkit": "PLAYWRIGHT_BROWSERS_PATH=0 playwright-core install webkit"
+  },
   "devDependencies": {
     "playwright-core": "1.64.1"
   }
