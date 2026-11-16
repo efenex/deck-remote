@@ -109,6 +109,20 @@ do not yet label it an iPhone CORS bug or suppress it as harmless browser noise.
 Investigate WebKit/Playwright EventSource cancellation during navigation and
 confirm on a real device. No product networking change was made.
 
+**Resolution (product fix).** Root cause: not a CORS or EventSource-cancellation
+quirk. Navigating (here `page.goto` while a `history` fetch for a just-opened session
+is in flight) cancels the page's fetches; `api()`'s catch path treats that failure as
+"network down" and calls `startStreams()`, constructing a *new* `EventSource` inside a
+document that is already stopping its loads, which WebKit reports as an access-control
+failure. A trace showed `beforeunload` firing first, then the cancelled fetches, then
+`new EventSource` from `app.js:121` (`api` ← `reconcileTranscriptTail`), then the error.
+It only reproduced with a fetch in flight at navigation time (waiting 300 ms avoided
+it, which is why the navigation-only probe passed). `startStreams()` now does nothing
+after `beforeunload` (expiring after 1.5 s, before the first 2 s reconnect timer, in case of a
+download-style navigation;
+`pageshow` clears it). `pagehide` is deliberately not used: it runs after the cancel,
+and iOS also fires it when merely suspending the app, where a resume must reconnect.
+
 ## Additional validation and handoff
 
 - Web JavaScript tests: **245/245 PASS** (`node --test web/`).

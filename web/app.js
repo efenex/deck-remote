@@ -3551,7 +3551,24 @@
     }
   }
 
+  // A navigation cancels this page's in-flight fetches; api() reacts to that failure by
+  // reopening the event stream, i.e. constructing an EventSource inside a document that is
+  // already stopping its loads. WebKit reports that load as an unresolved "access control
+  // checks" error. Do not (re)open the stream while the page is being left. Only
+  // beforeunload sets this, and it fires before the fetches are cancelled; pagehide also
+  // fires when iOS merely suspends the app, and a resume must still reconnect. beforeunload
+  // can be followed by staying (a download), so the flag expires; it must lapse before the
+  // first reconnect timer (DeckNetwork.retryDelay >= 2 s) so a cancelled stream still
+  // reopens. pageshow clears it.
+  let leaving = false, leavingTimer = null;
+  window.addEventListener('beforeunload', () => {
+    leaving = true; clearTimeout(leavingTimer);
+    leavingTimer = setTimeout(() => { leaving = false; }, 1500);
+  });
+  window.addEventListener('pageshow', () => { leaving = false; clearTimeout(leavingTimer); });
+
   function startStreams() {
+    if (leaving) return;
     teardownStreams();
     if (!TOKEN) return;
     connection.attempt++;
