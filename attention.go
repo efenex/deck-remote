@@ -18,6 +18,8 @@ type attentionOption struct {
 }
 
 type attentionQuestion struct {
+	// AllowCustom opts OpenCode fields into free-form input; other harnesses retain their defaults.
+	AllowCustom bool              `json:"allowCustom,omitempty"`
 	MultiSelect bool              `json:"multiSelect,omitempty"`
 	Header      string            `json:"header"`
 	ID          string            `json:"id"`

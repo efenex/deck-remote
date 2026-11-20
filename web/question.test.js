@@ -8,7 +8,7 @@ const vm = require('node:vm');
 // Execute the actual renderer with a small DOM; no mirrored rendering logic.
 const source = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
 const renderer = source.slice(source.indexOf('  function renderQuestionPanel('), source.indexOf('  // A question menu the agent is parked on'));
-function setup(questions) {
+function setup(questions, tool = 'claude') {
   class Element {
     constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.value = ''; this.checked = false; }
     appendChild(child) { this.children.push(child); child.parentElement = this; return child; }
@@ -33,7 +33,7 @@ function setup(questions) {
     respondAttention: (...args) => sent.push(JSON.parse(JSON.stringify(args))),
   };
   vm.runInNewContext(renderer + '\nthis.render = renderQuestionPanel;', ctx);
-  ctx.render({ id: 's1', tool: 'claude' }, info);
+  ctx.render({ id: 's1', tool }, info);
   return { form, sent, card: mount.children[0], inputs: form.all().filter(e => e.tag === 'input'), submit: form.all().find(e => e.tag === 'button') };
 }
 const question = (multiSelect = true, id = 'q0') => ({ id, header: 'Multi', question: 'Pick several?', multiSelect, options: [{ label: 'One' }, { label: 'Two' }, { label: 'Three' }] });
@@ -76,6 +76,58 @@ test('mixed questions retain single-select radio answers', () => {
   env.inputs[0].checked = env.inputs[1].checked = env.inputs[6].checked = true;
   env.form.fire('submit');
   assert.deepEqual(env.sent[0][3], [{ id: 'q0', options: [1, 2], answer: '' }, { id: 'q1', answer: 'Two' }]);
+});
+
+test('OpenCode choices hide Other unless custom input is explicitly supported', () => {
+  for (const capability of [{}, { allowCustom: false }, { allowCustom: 'true' }]) {
+    const env = setup([{ ...question(false), ...capability }], 'opencode');
+    assert.deepEqual(env.inputs.map(e => e.type), ['radio', 'radio', 'radio']);
+    assert.ok(env.inputs.every(e => e.required));
+    env.form.fire('submit');
+    assert.equal(env.sent.length, 0);
+    env.inputs[1].checked = true;
+    env.form.fire('submit');
+    assert.deepEqual(env.sent[0][3], [{ id: 'q0', answer: 'Two' }]);
+  }
+});
+
+test('OpenCode multi-select without Other validates and submits listed choices', () => {
+  const env = setup([question()], 'opencode');
+  assert.deepEqual(env.inputs.map(e => e.type), ['checkbox', 'checkbox', 'checkbox']);
+  env.form.fire('submit');
+  assert.equal(env.sent.length, 0);
+  assert.match(env.inputs[0].validationMessage, /at least one/);
+  env.inputs[1].checked = true;
+  env.inputs[1].fire('input');
+  assert.equal(env.inputs[0].validationMessage, '');
+  env.form.fire('submit');
+  assert.deepEqual(env.sent[0][3], [{ id: 'q0', options: [2], answer: '' }]);
+});
+
+test('OpenCode fields with explicit custom support retain free-text submission', () => {
+  for (const options of [question(false).options, []]) {
+    const env = setup([{ ...question(false), options, allowCustom: true }], 'opencode');
+    const text = env.inputs.at(-1);
+    assert.equal(text.type, 'text');
+    text.fire('focus');
+    env.form.fire('submit');
+    assert.equal(env.sent.length, 0);
+    text.value = 'Custom words';
+    env.form.fire('submit');
+    assert.deepEqual(env.sent[0][3], [{ id: 'q0', answer: 'Custom words' }]);
+  }
+});
+
+test('Claude single-select retains Other regardless of the OpenCode capability flag', () => {
+  for (const capability of [{}, { allowCustom: false }]) {
+    const env = setup([{ ...question(false), ...capability }]);
+    assert.deepEqual(env.inputs.map(e => e.type), ['radio', 'radio', 'radio', 'radio', 'text']);
+    const text = env.inputs[4];
+    text.value = 'Claude custom answer';
+    text.fire('focus');
+    env.form.fire('submit');
+    assert.deepEqual(env.sent[0][3], [{ id: 'q0', answer: 'Claude custom answer' }]);
+  }
 });
 
 test('response transport includes the menu snapshot for server-side stale refusal', () => {
