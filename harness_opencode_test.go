@@ -302,6 +302,59 @@ func TestOpencodeFormValue(t *testing.T) {
 	}
 }
 
+func TestOpencodeFormCustomInput(t *testing.T) {
+	var form ocForm
+	if err := json.Unmarshal([]byte(`{"id":"form_1","fields":[
+		{"key":"choice","type":"string","options":[{"value":"pg","label":"Postgres"}]},
+		{"key":"boolean","type":"boolean"},
+		{"key":"multi","type":"multiselect","options":[{"value":"pg","label":"Postgres"}]},
+		{"key":"text","type":"string"},
+		{"key":"number","type":"number"},
+		{"key":"integer","type":"integer"},
+		{"key":"number-choice","type":"number","options":[{"value":"1","label":"1"}]},
+		{"key":"unknown","type":"external"},
+		{"key":"missing-type"},
+		{"key":"hidden","type":"string","hidden":true}
+	]}`), &form); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeOpencode{forms: []ocForm{form}}
+	a := opencodeAdapter{s: newOpencodeTestServer(t, f, nil)}
+	info, err := a.attention(context.Background(), "ses_b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Pending || info.Kind != "question" || info.ID != "form_1" || len(info.Questions) != 9 {
+		t.Fatalf("attention = %+v", info)
+	}
+	// Check the JSON consumed by the renderer, not just the Go field value.
+	b, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Questions []struct {
+			ID          string `json:"id"`
+			AllowCustom bool   `json:"allowCustom"`
+		} `json:"questions"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range wire.Questions {
+		want := q.ID == "text" || q.ID == "number" || q.ID == "integer"
+		if q.AllowCustom != want {
+			t.Errorf("%s: allowCustom = %v, want %v", q.ID, q.AllowCustom, want)
+		}
+	}
+	if got := info.Questions[0].Options; len(got) != 1 || got[0].Label != "Postgres" {
+		t.Fatalf("choice options = %+v", got)
+	}
+	if got := info.Questions[1].Options; len(got) != 2 || got[0].Label != "Yes" || got[1].Label != "No" {
+		t.Fatalf("boolean options = %+v", got)
+	}
+}
+
 func TestInstanceCreated(t *testing.T) {
 	if got := instanceCreated("794f558d-1792109210"); got.Unix() != 1792109210 {
 		t.Fatalf("got %v", got)
@@ -317,6 +370,7 @@ type fakeOpencode struct {
 	mu             sync.Mutex
 	sessions       []ocSession
 	perms          []ocPermission
+	forms          []ocForm
 	active         bool
 	posts          []string
 	messages       []byte
@@ -380,7 +434,7 @@ func (f *fakeOpencode) handler(t *testing.T) http.Handler {
 		case strings.HasSuffix(path, "/permission"):
 			json.NewEncoder(w).Encode(map[string]any{"data": f.perms})
 		case strings.HasSuffix(path, "/form"):
-			w.Write([]byte(`{"data":[]}`))
+			json.NewEncoder(w).Encode(map[string]any{"data": f.forms})
 		case strings.HasPrefix(path, "/api/session/"):
 			w.Write([]byte(`{"data":{"id":"x"}}`))
 		default:

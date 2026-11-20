@@ -731,6 +731,9 @@ func (a opencodeAdapter) attention(ctx context.Context, sid string) (attentionIn
 				continue
 			}
 			q := attentionQuestion{ID: fl.Key, Header: firstNonempty(fl.Title, fl.Key), Question: firstNonempty(fl.Description, fl.Title, fl.Key)}
+			// The service field type has no custom-option capability. Only plain
+			// text/numeric fields without choices are known to accept typed input.
+			q.AllowCustom = len(fl.Options) == 0 && (fl.Type == "string" || fl.Type == "number" || fl.Type == "integer")
 			for _, o := range fl.Options {
 				q.Options = append(q.Options, attentionOption{Label: o.Label, Description: o.Description})
 			}

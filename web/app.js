@@ -3370,16 +3370,20 @@
         copy.innerHTML = '<b>' + esc(opt.label) + '</b>' + (opt.description ? '<small>' + esc(opt.description) + '</small>' : '');
         label.appendChild(copy); field.appendChild(label);
       });
-      const custom = el('label', 'question-option');
-      const radio = document.createElement('input');
-      radio.type = q.multiSelect ? 'checkbox' : 'radio'; radio.name = q.id; radio.value = '__other__'; radio.required = !q.multiSelect;
-      const text = document.createElement('input');
-      text.type = 'text'; text.className = 'question-freeform'; text.placeholder = 'Other answer';
-      text.addEventListener('focus', () => { radio.checked = true; });
-      const clearValidity = () => { if (inputs[0]) inputs[0].setCustomValidity(''); text.setCustomValidity(''); };
-      [...inputs, radio, text].forEach((input) => input.addEventListener('input', clearValidity));
-      text.addEventListener('focus', clearValidity);
-      custom.appendChild(radio); custom.appendChild(text); field.appendChild(custom);
+      let radio, text;
+      const clearValidity = () => { if (inputs[0]) inputs[0].setCustomValidity(''); if (text) text.setCustomValidity(''); };
+      inputs.forEach((input) => input.addEventListener('input', clearValidity));
+      if (s.tool !== 'opencode' || q.allowCustom === true) {
+        const custom = el('label', 'question-option');
+        radio = document.createElement('input');
+        radio.type = q.multiSelect ? 'checkbox' : 'radio'; radio.name = q.id; radio.value = '__other__'; radio.required = !q.multiSelect;
+        text = document.createElement('input');
+        text.type = 'text'; text.className = 'question-freeform'; text.placeholder = 'Other answer';
+        text.addEventListener('focus', () => { radio.checked = true; });
+        [radio, text].forEach((input) => input.addEventListener('input', clearValidity));
+        text.addEventListener('focus', clearValidity);
+        custom.appendChild(radio); custom.appendChild(text); field.appendChild(custom);
+      }
       form.appendChild(field);
       fields.push({ q, inputs, radio, text });
     });
@@ -3391,8 +3395,8 @@
       for (const { q, inputs, radio, text } of fields) {
         if (q.multiSelect) {
           const options = inputs.flatMap((input, i) => input.checked ? [i + 1] : []);
-          const answer = radio.checked ? text.value.trim() : '';
-          if (radio.checked && !answer) {
+          const answer = radio?.checked ? text.value.trim() : '';
+          if (radio?.checked && !answer) {
             text.setCustomValidity('Enter your other answer.'); text.reportValidity(); return;
           }
           if (!options.length && !answer) {
