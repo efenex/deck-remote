@@ -44,6 +44,10 @@ test('expiry is re-checked at draw time; already ran rc=0 blocks', () => {
 test('runState glyphs', () => {
   assert.strictEqual(R.runState({ state: 'done', rc: 0 }).glyph, '✓');
   assert.strictEqual(R.runState({ state: 'done', rc: 2 }).text, 'rc=2');
+  const yk = R.runState({ state: 'done', rc: 124, auth_reason: 'yubikey-locked-or-timeout',
+    hint: 'YubiKey locked or not touched: unlock it on the laptop, or run this from the laptop' });
+  assert.strictEqual(yk.text, 'YubiKey locked or not touched: unlock it on the laptop, or run this from the laptop (rc=124)');
+  assert.strictEqual(yk.tone, 'urgent');
   assert.strictEqual(R.runState({ state: 'running', attempt: 2 }).glyph, '⏳');
   assert.strictEqual(R.runState({ state: 'refused', reason: 'expired' }).text, 'refused: expired');
   assert.strictEqual(R.runState(null), null);

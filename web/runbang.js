@@ -94,6 +94,8 @@
     if (run.state === 'refused') return { glyph: '⊘', tone: 'dim', text: 'refused: ' + (run.reason || '') };
     if (run.state !== 'done') return null;
     if (run.rc === 0) return { glyph: '✓', tone: 'ok', text: 'ran, rc=0' };
+    // YubiKey C (tower runner): ssh did not authenticate within its 30 s deadline; the runner journals the hint with it.
+    if (run.auth_reason) return { glyph: '✗', tone: 'urgent', text: (run.hint || 'YubiKey locked or not touched: unlock it on the laptop, or run this from the laptop') + ' (rc=' + run.rc + ')' };
     return { glyph: '✗', tone: 'urgent', text: 'rc=' + run.rc + (run.stale ? ' (runner lost: stale)' : '') };
   }
 
