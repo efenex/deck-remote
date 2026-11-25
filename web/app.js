@@ -441,6 +441,9 @@
     // BACKLOG section (backlog.js): collapsed by default; the row whose defer picker is open;
     // request ids posted from this tab (shown "queued with tower" until the overview has them).
     backlogOpen: false, backlogDefer: null, backlogQueued: new Set(),
+    // GA TODO section (gatodo.js): collapsed by default; its filter text, the expanded row keys and
+    // the exact keys started from this tab (shown queued until the overview's pending has them).
+    gatodoOpen: false, gatodoFilter: '', gatodoExpanded: new Set(), gatodoQueued: new Set(),
     // The date typed into the open defer picker (kept across renders), and the reply drafts (G15,
     // towerdraft.js): per ask id, persisted. renderPending: a refresh deferred while the operator
     // is typing / mid-tap / sending; replyInFlight: a reply is being confirmed or posted.
@@ -1187,6 +1190,7 @@
     towerDraftBox(list);
     m.sections.forEach((sec, n) => {
       if (sec.id === 'backlog' && towerBacklogData(m)) return; // drawn below, with its actions
+      if (sec.id === 'gatodo') return; // the TUI's full-view section never belongs on the phone; GA TODO is drawn below
       const key = 'section:' + sec.id;
       const folded = tower.localFold.has(key) ? tower.localFold.get(key) : !!sec.folded;
       const hdr = el('div', 'tsechead');
@@ -1219,6 +1223,7 @@
       }
     });
     renderTowerBacklog(list, m, true);
+    renderTowerGatodo(list, m);
     const lg = document.createElement('details');
     lg.className = 'tlegend';
     const sm = document.createElement('summary'); sm.textContent = 'Legend'; lg.append(sm);
@@ -1285,6 +1290,95 @@
       towerBtn('Defer…', '', () => { tower.backlogDefer = row.id; tower.backlogDeferDate = ''; renderTower(true); }),
       towerBtn('Drop', '', (b) => { if (confirm('Drop ' + row.id + ' from the backlog?')) post('drop', b); }));
     card.append(acts);
+    return card;
+  }
+
+  // --- GA TODO (S6; helpers in gatodo.js): the bounded schema-1 block, never the full view ---
+  function renderTowerGatodo(list, m) {
+    const G = window.DeckGatodo;
+    const sec = G ? G.section(m) : null;
+    if (!sec) return; // older tower: no ga_todo block, no section
+    const hdr = el('div', 'tsechead tgatodo');
+    hdr.append(el('span', 'tnum', ''), el('span', 'tarrow', tower.gatodoOpen ? '▾ ' : '▸ '), towerStyle(el('span', 'tsectitle', 'GA TODO'), 'sec'),
+      el('span', 'tcount', ' (' + sec.rows.length + (sec.more ? ' + ' + sec.more + ' more' : '') + ')'));
+    if (sec.stale) hdr.append(el('span', 'tcount stale', '  STALE'));
+    hdr.addEventListener('click', () => { tower.gatodoOpen = !tower.gatodoOpen; renderTower(true); });
+    list.append(hdr);
+    if (!tower.gatodoOpen) return;
+    const b = sec.block;
+    if (sec.stale) list.append(el('div', 'thint stale', 'GA TODO refused / stale: ' + sec.stale + '. Actions are off until GA refreshes the feed.'));
+    list.append(el('div', 'thint', 'Bounded feed: all P0–P2 + up to ' + G.OTHERS_MAX + ' others' + (sec.more ? ' · ' + sec.more + ' more on the laptop TUI' : '') +
+      ' · snapshot ' + String(b.source_sha || '?').slice(0, 9) + ' · ' + (b.built_at || '?')));
+    if (sec.overBudget) list.append(el('div', 'thint', 'Payload ' + Math.round(b.payload_bytes / 1024) + ' KB (target ' + Math.round(b.payload_budget / 1024) + ' KB)'));
+    const pend = G.pendingView(b);
+    if (pend.length) {
+      const det = document.createElement('details');
+      det.className = 'tfolded tgapending';
+      const sum = document.createElement('summary');
+      sum.textContent = 'Pending with tower (' + pend.length + ', applied in this order)';
+      det.append(sum);
+      pend.forEach((p, i) => det.append(el('div', 'tline', (i + 1) + '. ' + (p.kind === 'start' ? 'start ' : 'priority ') + p.text)));
+      list.append(det);
+    }
+    const f = document.createElement('input');
+    f.type = 'search'; f.className = 'tdate tgafilter'; f.placeholder = 'Filter GA TODO'; f.value = tower.gatodoFilter;
+    f.addEventListener('input', () => {
+      tower.gatodoFilter = f.value;
+      const pos = f.selectionStart;
+      renderTower(true);
+      const nf = document.querySelector('.tgafilter');
+      if (nf) { nf.focus(); try { nf.setSelectionRange(pos, pos); } catch (_) { /* search inputs on old WebKit */ } }
+    });
+    list.append(f);
+    const rows = G.filter(sec.rows, tower.gatodoFilter);
+    if (!rows.length) { list.append(el('div', 'thint', '(nothing)')); return; }
+    const queued = G.queuedKeys(b, tower.gatodoQueued);
+    rows.forEach((row) => list.append(towerGatodoRow(row, G.rowView(row, queued), sec, !sec.stale)));
+  }
+
+  function towerGatodoRow(row, v, sec, fresh) {
+    const G = window.DeckGatodo;
+    const b = sec.block;
+    const open = tower.gatodoExpanded.has(row.key);
+    const card = el('div', 'tcard tgarow' + (v.queued ? ' done' : ''));
+    const head = el('div', 'thead');
+    head.append(el('span', 'tmeta tgaband' + (v.pending ? ' tgapend' : ''), '[' + v.band + (v.pending ? ' pending' : '') + '] '), el('span', 'tid', v.key));
+    head.addEventListener('click', () => { if (open) tower.gatodoExpanded.delete(row.key); else tower.gatodoExpanded.add(row.key); renderTower(true); });
+    card.append(head, el('div', 'tbody ttitle', v.title));
+    card.append(towerStyle(el('div', 'thint', v.state + ' · ' + v.section + ' · ' + v.where), 'dim'));
+    if (v.queued) card.append(towerStyle(el('div', 'thint tqueued', 'queued with tower'), 'accent'));
+    if (!open) return card;
+    if (v.parent || v.wkey) card.append(towerStyle(el('div', 'thint', (v.parent ? 'parent ' + v.parent : '') + (v.wkey ? (v.parent ? ' · ' : '') + v.wkey : '')), 'dim'));
+    const pre = el('pre', 'tgahead', v.bodyHead);
+    card.append(pre);
+    if (v.bodyUrl) {
+      const a = el('a', 'tlink', 'Source at ' + String(b.source_sha || '').slice(0, 9));
+      a.href = v.bodyUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      card.append(a);
+    }
+    if (!tower.act || !fresh) return card;
+    const go = (body, btn, title, onOk) => towerAct(body, btn, title, onOk);
+    if (v.startable && !v.queued) {
+      const acts = el('div', 'tactions');
+      Object.keys(G.MODES).forEach((mode) => acts.append(towerBtn(G.MODES[mode], mode === 'implement' ? 'tprimary' : '', (btn) => {
+        if (!confirm(G.MODES[mode] + ' ' + row.key + '?\n' + v.title)) return;
+        go(G.startBody(row, mode, b), btn, 'Queued with tower', () => tower.gatodoQueued.add(row.key));
+      })));
+      card.append(acts);
+    }
+    const pr = el('div', 'tactions tgaprio');
+    G.BANDS.forEach((p) => pr.append(towerBtn(p, v.band === p ? 'tprimary' : '', (btn) => {
+      if (!confirm('Set ' + row.key + ' to ' + p + ' (end of band)?')) return;
+      go(G.prioBody(row, p, b), btn, 'Priority queued with tower');
+    })));
+    if (v.band !== '—') {
+      pr.append(towerBtn('Clear', '', (btn) => { if (confirm('Clear the priority of ' + row.key + '?')) go(G.prioBody(row, null, b), btn, 'Priority queued with tower'); }));
+      [['↑', -1], ['↓', 1]].forEach(([label, dir]) => {
+        const body = G.moveBody(row, dir, sec.rows, b);
+        if (body) pr.append(towerBtn(label, '', (btn) => { if (confirm('Move ' + row.key + (dir < 0 ? ' up' : ' down') + ' in ' + v.band + '?')) go(body, btn, 'Priority queued with tower'); }));
+      });
+    }
+    card.append(pr);
     return card;
   }
 
