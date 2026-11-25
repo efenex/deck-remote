@@ -9,6 +9,7 @@ commands; prose and inline code are never split heuristically. Read-only: it nev
 anything (writes go through journal.py, see tower_actions.go).
 """
 import argparse
+import copy
 import json
 import os
 import re
@@ -68,9 +69,19 @@ def main():
         return 0
 
     ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
+    # GA TODO (S6): the phone gets only overview.json's bounded schema-1 `ga_todo` block. Copy it BEFORE visible():
+    # the TUI's own GA TODO section lazily loads the schema-2 full view (load_gatodo) when the operator unfolded it
+    # in the TUI, which would put the full corpus into this model and rewrite ov["ga_todo"] in place.
+    ga_block = copy.deepcopy(ov.get("ga_todo")) if "ga_todo" in ov else None
+    if hasattr(m, "load_gatodo"):
+        m.load_gatodo = lambda *a, **k: True
+    if isinstance(getattr(m, "sfold", None), dict):
+        m.sfold["gatodo"] = {"since": "", "why": "phone: bounded feed only"}
 
     sections = []
     for n, (sid, title, items, folded) in enumerate(m.visible(), 1):
+        if sid == "gatodo":
+            continue  # drawn by the tab from the bounded `ga_todo` block (web/gatodo.js)
         hdr = m.header_item(n, sid, title, items, folded)
         out_items = []
         for it in items:
@@ -122,6 +133,7 @@ def main():
     out = {"header": m.header(), "generated_at": m.o.get("generated_at"), "sections": sections,
            "palette": pal, "legend": legend, "gaq_stale": bool((m.o.get("ga_queue") or {}).get("stale"))}
     out.update(backlog_extras(ov))
+    out.update(ga_todo_extras(ga_block, ov))
     print(json.dumps(out))
     return 0
 
@@ -145,6 +157,79 @@ def backlog_extras(ov):
         out["open_requests"] = [r["id"] for r in reqs if isinstance(r, dict) and isinstance(r.get("id"), str)
                                 and r.get("status") == "open"]
     return out
+
+
+# --- GA TODO (S6, GA TODO-view report §4) ------------------------------------------------------------------------
+GA_BANDS = ("P0", "P1", "P2", "P3")
+GA_EXPLICIT = ("P0", "P1", "P2")        # always shown, never capped
+GA_UNPRIORITIZED_MAX = 25              # everything else (no band, or P3): at most this many rows
+GA_PAYLOAD_BUDGET = 80 * 1024          # the original phone-payload target; monitored, never enforced by dropping P0-P2
+# schema-1 feed item fields (GA scripts/feed.schema.json, additionalProperties:false): nothing else is passed on.
+GA_ITEM_FIELDS = ("key", "w_key", "doc", "line_start", "line_end", "parent", "title", "section", "doc_state", "closable",
+                  "closing_subentries", "body_sha", "body_head", "body_url", "view_url", "priority", "enrich", "deps")
+GA_BLOCK_FIELDS = ("schema_version", "source_sha", "source_ref", "built_at", "input_digest", "total_units", "total_open",
+                   "more", "collision_count", "orphan_count", "stale", "error", "pending_errors", "pending_unverifiable")
+# Same patterns as tower scripts/ga_todo.py REDACT_RE (overview.py already redacts; this is defense in depth).
+_GA_REDACT = re.compile(r"(hvs\.[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"
+                        r"|xox[bpa]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}"
+                        r"|(?i:bearer)\s+[A-Za-z0-9._-]{24,})")
+
+
+def ga_clean(value):
+    """Redact every string (dictionary keys too) and make control/format characters visible."""
+    import unicodedata
+    if isinstance(value, str):
+        value = _GA_REDACT.sub("[redacted]", value)
+        return "".join("<U+%04X>" % ord(c) if c not in "\n\t" and unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c
+                       for c in value)
+    if isinstance(value, dict):
+        return {ga_clean(k): ga_clean(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [ga_clean(v) for v in value]
+    return value
+
+
+def _ga_band(row):
+    p = row.get("priority")
+    return p.get("p") if isinstance(p, dict) and p.get("p") in GA_BANDS else None
+
+
+def ga_todo_extras(block, ov):
+    """overview.json's bounded `ga_todo` block for the Tower tab: schema 1 only, all explicit P0-P2 rows plus at most
+    25 others (cut rows are added to `more`), every string redacted. Never the schema-2 full view. Absent (an older
+    tower): nothing is added and the tab shows no GA TODO section."""
+    if block is None:
+        return {}
+    if not isinstance(block, dict) or type(block.get("schema_version")) is not int or block["schema_version"] != 1:
+        sv = block.get("schema_version") if isinstance(block, dict) else None
+        return {"ga_todo": ga_clean({"schema_version": sv if isinstance(sv, (int, str)) else None, "items": [], "pending": [],
+                                     "stale": True, "error": "unsupported GA TODO block (schema_version %r): phone reads schema 1 only" % (sv,),
+                                     "more": 0, "payload_bytes": 0, "payload_budget": GA_PAYLOAD_BUDGET})}
+    out = {k: block[k] for k in GA_BLOCK_FIELDS if k in block}
+    rows, others, cut = [], 0, 0
+    for row in block.get("items") if isinstance(block.get("items"), list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("key"), str) or not row["key"]:
+            continue
+        if _ga_band(row) not in GA_EXPLICIT:
+            if others >= GA_UNPRIORITIZED_MAX:
+                cut += 1
+                continue
+            others += 1
+        rows.append({k: row[k] for k in GA_ITEM_FIELDS if k in row})
+    out["items"] = rows
+    more = block.get("more")
+    out["more"] = (more if type(more) is int and more >= 0 else 0) + cut
+    pend = block.get("pending")
+    out["pending"] = [r for r in pend if isinstance(r, dict) and str(r.get("id", "")).startswith(("pick-gatodo-", "ga-prio-"))] \
+        if isinstance(pend, list) else []
+    fl = ov.get("in_flight")
+    # tasks already carrying an exact GA key: the tab and the server refuse a second start for it (the TUI's check)
+    out["in_flight_keys"] = sorted({t["ga_key"] for t in fl if isinstance(t, dict) and isinstance(t.get("ga_key"), str) and t["ga_key"]}) \
+        if isinstance(fl, list) else []
+    out = ga_clean(out)
+    out["payload_budget"] = GA_PAYLOAD_BUDGET
+    out["payload_bytes"] = len(json.dumps(out))
+    return {"ga_todo": out}
 
 
 if __name__ == "__main__":

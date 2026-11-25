@@ -15,7 +15,11 @@ package main
 // arbitrary record.
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -59,6 +63,10 @@ type towerModel struct {
 	// overview may not show the new open request until tower regenerates it, and a second
 	// tap in that window must not journal a second action for the same task.
 	recentBacklog map[string]time.Time
+	// GA TODO actions journaled from here recently (guarded by server.towerActMu), keyed
+	// "start:<exact key>" / "prio:<exact key>": the same double-tap bridge until the overview's
+	// ga_todo.pending shows the new request.
+	recentGA map[string]gaRecent
 }
 
 const towerBacklogRecent = 15 * time.Minute
@@ -71,6 +79,7 @@ type towerIndex struct {
 	secs     map[string]bool           // section ids
 	backlog  map[string]bool           // backlog task ids
 	openReqs map[string]bool           // open request ids (model request items + overview requests)
+	ga       *gaSnap                   // the bounded GA TODO block (nil: an older tower/overview has none)
 }
 
 func fileStamp(path string) string {
@@ -110,7 +119,8 @@ func (s *server) towerModelJSON(ctx context.Context) ([]byte, *towerIndex, error
 		Backlog []struct {
 			ID string `json:"id"`
 		} `json:"backlog"`
-		OpenRequests []string `json:"open_requests"`
+		OpenRequests []string        `json:"open_requests"`
+		GaTodo       json.RawMessage `json:"ga_todo"`
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
 		return nil, nil, fmt.Errorf("tower_model.py output: %w", err)
@@ -137,6 +147,11 @@ func (s *server) towerModelJSON(ctx context.Context) ([]byte, *towerIndex, error
 	}
 	for _, id := range doc.OpenRequests {
 		idx.openReqs[id] = true
+	}
+	idx.ga = parseGaSnap(doc.GaTodo)
+	if g := idx.ga; g != nil && g.PayloadBudget > 0 && g.PayloadBytes > g.PayloadBudget {
+		// monitored, not enforced: explicit P0-P2 rows are never dropped to fit a cap
+		log.Printf("tower: ga_todo block is %d bytes (target %d)", g.PayloadBytes, g.PayloadBudget)
 	}
 	m.key, m.raw, m.idx = key, out, idx
 	return out, idx, nil
@@ -297,10 +312,20 @@ func (s *server) towerRun(argv []string) (int, string) {
 }
 
 type towerActReq struct {
-	Op        string `json:"op"` // fold | unfold | close | pick | dismiss | backlog_start | backlog_defer | backlog_drop
+	Op        string `json:"op"` // fold | unfold | close | pick | dismiss | backlog_start | backlog_defer | backlog_drop | gatodo_start | gatodo_prio
 	Kind      string `json:"kind"`
 	ID        string `json:"id"`
 	NotBefore string `json:"not_before"` // backlog_defer only: YYYY-MM-DDT08:00:00Z
+
+	// GA TODO (gatodo_start / gatodo_prio). Key is the exact GA stable key (id is accepted as
+	// an alias). ViewSHA is the snapshot source_sha the tab rendered and BodySHA the row body
+	// hash it showed: compare-only preconditions, never journaled from the client.
+	Key     string          `json:"key"`
+	Mode    string          `json:"mode"`  // gatodo_start: design | implement | verify
+	P       json.RawMessage `json:"p"`     // gatodo_prio: "P0".."P3", or null to clear
+	After   json.RawMessage `json:"after"` // gatodo_prio: absent = end of band, null = top, "<key>" = after that row
+	ViewSHA string          `json:"view_sha"`
+	BodySHA string          `json:"body_sha"`
 }
 
 // POST /api/rc/tower/act — see the file comment. Gated by authAct.
@@ -310,7 +335,14 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	req.ID = strings.TrimSpace(req.ID)
+	req.ID, req.Key = strings.TrimSpace(req.ID), strings.TrimSpace(req.Key)
+	if req.Key != "" {
+		if req.ID != "" && req.ID != req.Key {
+			httpError(w, http.StatusBadRequest, "id and key differ")
+			return
+		}
+		req.ID = req.Key
+	}
 	if req.ID == "" || len(req.ID) > 200 {
 		httpError(w, http.StatusBadRequest, "id required")
 		return
@@ -326,7 +358,8 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 	}
 	items, secs := idx.items, idx.secs
 	var steps [][]string
-	var wake bool // last step is a best-effort wake: its failure does not fail the action
+	var gaMemo string // gatodo_*: the recentGA entry to record once the journal write succeeded
+	var wake bool     // last step is a best-effort wake: its failure does not fail the action
 	switch req.Op {
 	case "fold", "unfold":
 		to := map[string]string{"fold": "folded", "unfold": "unfolded"}[req.Op]
@@ -399,6 +432,14 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		steps, wake = s.backlogArgvs(req.Op, req.ID, req.NotBefore), true
+	case "gatodo_start", "gatodo_prio":
+		var code int
+		var msg string
+		if steps, gaMemo, code, msg = s.gatodoSteps(req, idx.ga, time.Now()); steps == nil {
+			httpError(w, code, msg)
+			return
+		}
+		wake = true
 	default:
 		httpError(w, http.StatusBadRequest, "unknown op")
 		return
@@ -435,6 +476,9 @@ func (s *server) handleTowerAct(w http.ResponseWriter, r *http.Request) {
 		}
 		s.towerM.recentBacklog[p+towerSlug(req.ID)] = time.Now()
 	}
+	if gaMemo != "" {
+		s.rememberGA(gaMemo)
+	}
 	s.towerLog(map[string]any{"action": "act", "op": req.Op, "kind": req.Kind, "id": req.ID, "allowed": true, "ok": true, "device": device, "login": tsLogin(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "op": req.Op, "id": req.ID, "msg": msg})
 }
@@ -447,4 +491,360 @@ func (s *server) warmTower() {
 	if _, _, err := s.towerModelJSON(context.Background()); err != nil {
 		log.Printf("tower: warm model: %v", err)
 	}
+}
+
+// --- GA TODO (S6: GA TODO-view report §4) -------------------------------------------------------------
+//
+// The tab shows overview.json's bounded schema-1 `ga_todo` block (tower_model.py passes it through:
+// all explicit P0-P2 rows plus at most 25 others). Two ops journal the same request records as the
+// tower TUI (tower scripts/ga_todo.py start_request / priority_request), with from:"phone", then
+// wake tower; tower's /tick re-resolves the exact key against a fresh GA read before anything runs.
+// Nothing here reads or writes GA files. Validation is against the CURRENT bounded model only:
+// exact key present, permitted mode / band, anchor in the destination band, a fresh snapshot
+// (built_at within 120 min) and the snapshot the tab rendered (view_sha). Titles come from the
+// model, never from the client.
+
+const (
+	gaStaleAfter = 120 * time.Minute
+	gaSkew       = time.Minute // a laptop/server clock difference is not a "future" snapshot
+	gaRecentFor  = 15 * time.Minute
+)
+
+var (
+	gaBands = map[string]bool{"P0": true, "P1": true, "P2": true, "P3": true}
+	gaModes = map[string]bool{"design": true, "implement": true, "verify": true}
+	// doc_state values that can carry remaining work (shipped-marked may hold a residual); the
+	// tick still checks the resolved status before dispatch.
+	gaStartable = map[string]bool{"open": true, "shipped-marked": true}
+)
+
+type gaPrio struct {
+	P    string `json:"p"`
+	Rank int    `json:"rank"`
+}
+
+type gaRow struct {
+	Key      string  `json:"key"`
+	WKey     *string `json:"w_key"`
+	Doc      string  `json:"doc"`
+	Title    string  `json:"title"`
+	BodySHA  string  `json:"body_sha"`
+	DocState string  `json:"doc_state"`
+	Priority *gaPrio `json:"priority"`
+}
+
+type gaPendingReq struct {
+	ID    string            `json:"id"`
+	Key   string            `json:"key"`
+	Edits []json.RawMessage `json:"edits"`
+}
+
+type gaSnap struct {
+	SchemaVersion any            `json:"schema_version"`
+	SourceSHA     string         `json:"source_sha"`
+	BuiltAt       string         `json:"built_at"`
+	Stale         bool           `json:"stale"`
+	Error         string         `json:"error"`
+	Items         []gaRow        `json:"items"`
+	Pending       []gaPendingReq `json:"pending"`
+	InFlightKeys  []string       `json:"in_flight_keys"`
+	PayloadBytes  int            `json:"payload_bytes"`
+	PayloadBudget int            `json:"payload_budget"`
+
+	bad   string // a block this server cannot read: every GA action is refused
+	byKey map[string]*gaRow
+}
+
+type gaRecent struct {
+	at   time.Time
+	edit string // prio: the canonical edit last journaled for this key
+}
+
+func parseGaSnap(raw json.RawMessage) *gaSnap {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil
+	}
+	g := &gaSnap{}
+	if err := json.Unmarshal(raw, g); err != nil {
+		return &gaSnap{bad: "unreadable GA TODO block: " + err.Error()}
+	}
+	if v, ok := g.SchemaVersion.(float64); !ok || v != 1 {
+		g.bad = "GA TODO block is not schema 1"
+	}
+	g.byKey = map[string]*gaRow{}
+	for i := range g.Items {
+		if r := &g.Items[i]; r.Key != "" {
+			g.byKey[r.Key] = r
+		}
+	}
+	return g
+}
+
+// fresh: the reason a snapshot may not be acted on, "" when it may. Freshness is recomputed from
+// built_at at action time: the block's own stale flag is only as new as overview.json.
+func (g *gaSnap) fresh(now time.Time) string {
+	if g.bad != "" {
+		return g.bad
+	}
+	if g.Error != "" {
+		return "GA TODO refused: " + g.Error
+	}
+	if g.Stale {
+		return "GA TODO snapshot is stale; refresh first"
+	}
+	t, err := time.Parse(time.RFC3339, g.BuiltAt)
+	if err != nil {
+		return "GA TODO snapshot has no valid built_at"
+	}
+	if t.After(now.Add(gaSkew)) {
+		return "GA TODO snapshot built_at is in the future"
+	}
+	if now.Sub(t) > gaStaleAfter {
+		return "GA TODO snapshot older than 120 minutes; refresh first"
+	}
+	return ""
+}
+
+func (g *gaSnap) band(key string) string {
+	if r := g.byKey[key]; r != nil && r.Priority != nil {
+		return r.Priority.P
+	}
+	return ""
+}
+
+// gaEdit is one GA priority edit, {key, p, after?}. After: nil = absent (end of band),
+// "null" = top of band, else the JSON string of the anchor key (GA's applier semantics).
+type gaEdit struct {
+	Key   string
+	P     *string
+	After json.RawMessage
+}
+
+func (e gaEdit) MarshalJSON() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteString(`{"key":` + jsonStr(e.Key) + `,"p":`)
+	if e.P == nil {
+		b.WriteString("null")
+	} else {
+		b.WriteString(jsonStr(*e.P))
+	}
+	if e.After != nil {
+		b.WriteString(`,"after":`)
+		b.Write(e.After)
+	}
+	b.WriteString("}")
+	return b.Bytes(), nil
+}
+
+// canonical identity of an edit (for the double-tap check); "" for an unreadable edit.
+func (e gaEdit) canon() string { b, _ := e.MarshalJSON(); return string(b) }
+
+func decodeGaEdit(raw json.RawMessage) (gaEdit, bool) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return gaEdit{}, false
+	}
+	var e gaEdit
+	if json.Unmarshal(m["key"], &e.Key) != nil {
+		return gaEdit{}, false
+	}
+	if p, ok := m["p"]; ok && string(p) != "null" {
+		var s string
+		if json.Unmarshal(p, &s) != nil {
+			return gaEdit{}, false
+		}
+		e.P = &s
+	}
+	if a, ok := m["after"]; ok {
+		e.After = compactJSON(a)
+	}
+	return e, true
+}
+
+func compactJSON(raw json.RawMessage) json.RawMessage {
+	var b bytes.Buffer
+	if json.Compact(&b, raw) != nil {
+		return raw
+	}
+	return b.Bytes()
+}
+
+// lastEdit: the newest edit for key, from this server's recent memory or, failing that, the open
+// ga-prio-* requests in journal order (each request's last edit per key wins, as in GA's applier).
+func (s *server) lastGaEdit(g *gaSnap, key string, now time.Time) string {
+	if r, ok := s.towerM.recentGA["prio:"+key]; ok && now.Sub(r.at) < gaRecentFor {
+		return r.edit
+	}
+	last := ""
+	for _, req := range g.Pending {
+		if !strings.HasPrefix(req.ID, "ga-prio-") {
+			continue
+		}
+		for _, raw := range req.Edits {
+			if e, ok := decodeGaEdit(raw); ok && e.Key == key {
+				last = e.canon()
+			}
+		}
+	}
+	return last
+}
+
+// gaPrioEdit validates a gatodo_prio request against the model: 400 for a bad enum or anchor.
+func gaPrioEdit(req towerActReq, g *gaSnap) (gaEdit, string) {
+	e := gaEdit{Key: req.ID}
+	p := bytes.TrimSpace(req.P)
+	switch {
+	case len(p) == 0:
+		return e, "p required: P0..P3, or null to clear"
+	case string(p) != "null":
+		var band string
+		if json.Unmarshal(p, &band) != nil || !gaBands[band] {
+			return e, "p must be P0, P1, P2, P3 or null"
+		}
+		e.P = &band
+	}
+	a := bytes.TrimSpace(req.After)
+	if len(a) == 0 {
+		return e, ""
+	}
+	if string(a) == "null" {
+		if e.P == nil {
+			return e, "after is for setting a band, not for a clear"
+		}
+		e.After = json.RawMessage("null")
+		return e, ""
+	}
+	var anchor string
+	if json.Unmarshal(a, &anchor) != nil {
+		return e, "after must be a key or null"
+	}
+	switch {
+	case e.P == nil:
+		return e, "after is for setting a band, not for a clear"
+	case anchor == req.ID:
+		return e, "a row cannot follow itself"
+	case g.byKey[anchor] == nil:
+		return e, "after: anchor not in the current GA TODO model"
+	case g.band(anchor) != *e.P:
+		return e, "after: anchor must be in the destination band " + *e.P
+	}
+	e.After = json.RawMessage(jsonStr(anchor))
+	return e, ""
+}
+
+func gaRandHex(n int) string {
+	b := make([]byte, (n+1)/2)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)[:n]
+}
+
+// gatodoSteps validates one GA TODO action and returns its argv (journal request, then the wake),
+// or nil with the HTTP status and message. memo is what rememberGA records after the write.
+func (s *server) gatodoSteps(req towerActReq, g *gaSnap, now time.Time) (steps [][]string, memo string, code int, msg string) {
+	if g == nil {
+		return nil, "", http.StatusNotFound, "no GA TODO block in the current overview"
+	}
+	if why := g.fresh(now); why != "" {
+		return nil, "", http.StatusConflict, why
+	}
+	if req.ViewSHA == "" {
+		return nil, "", http.StatusBadRequest, "view_sha required (the snapshot the tab shows)"
+	}
+	if req.ViewSHA != g.SourceSHA {
+		return nil, "", http.StatusConflict, "GA TODO snapshot changed; review it and try again"
+	}
+	row := g.byKey[req.ID]
+	if row == nil {
+		return nil, "", http.StatusNotFound, "key not in the current GA TODO model"
+	}
+	if req.BodySHA != "" && req.BodySHA != row.BodySHA {
+		return nil, "", http.StatusConflict, "GA TODO entry changed; review it and try again"
+	}
+	var rid string
+	var data string
+	if req.Op == "gatodo_start" {
+		if len(req.P) != 0 || len(req.After) != 0 {
+			return nil, "", http.StatusBadRequest, "p/after are for gatodo_prio"
+		}
+		if !gaModes[req.Mode] {
+			return nil, "", http.StatusBadRequest, "mode must be design, implement or verify"
+		}
+		if !gaStartable[row.DocState] {
+			return nil, "", http.StatusConflict, "not remaining work (doc_state " + row.DocState + ")"
+		}
+		for _, k := range g.InFlightKeys {
+			if k == row.Key {
+				return nil, "", http.StatusConflict, "exact GA key already in flight"
+			}
+		}
+		for _, p := range g.Pending {
+			if strings.HasPrefix(p.ID, "pick-gatodo-") && p.Key == row.Key {
+				return nil, "", http.StatusConflict, "exact GA key already queued with tower (" + p.ID + ")"
+			}
+		}
+		if r, ok := s.towerM.recentGA["start:"+row.Key]; ok && now.Sub(r.at) < gaRecentFor {
+			return nil, "", http.StatusConflict, "exact GA key already queued with tower"
+		}
+		// tower ga_todo.start_request, field for field; the full key is the identity, the digest
+		// keeps ids distinct for keys whose slugs would collide.
+		sum := sha256.Sum256([]byte(row.Key))
+		rid = "pick-gatodo-" + req.Mode + "-" + hex.EncodeToString(sum[:])[:20] + "-" + gaRandHex(8)
+		type startData struct {
+			Key      string  `json:"key"`
+			WKeySeen *string `json:"w_key_seen"`
+			Mode     string  `json:"mode"`
+			Title    string  `json:"title"`
+			Doc      string  `json:"doc"`
+			BodySHA  string  `json:"body_sha"`
+			ViewSHA  string  `json:"view_sha"`
+			From     string  `json:"from"`
+			Text     string  `json:"text"`
+		}
+		d := startData{Key: row.Key, WKeySeen: row.WKey, Mode: req.Mode, Title: row.Title, Doc: row.Doc, BodySHA: row.BodySHA,
+			ViewSHA: g.SourceSHA, From: "phone", Text: "GA TODO " + req.Mode + ": " + row.Title + " (" + row.Key + ")"}
+		data, memo = jsonStr(d), "start:"+row.Key+"\n"
+	} else {
+		if req.Mode != "" {
+			return nil, "", http.StatusBadRequest, "mode is for gatodo_start"
+		}
+		e, bad := gaPrioEdit(req, g)
+		if bad != "" {
+			return nil, "", http.StatusBadRequest, bad
+		}
+		if s.lastGaEdit(g, row.Key, now) == e.canon() {
+			return nil, "", http.StatusConflict, "the same priority edit is already pending with tower"
+		}
+		rid = "ga-prio-" + now.UTC().Format("20060102T150405Z") + "-" + gaRandHex(12)
+		type prioData struct {
+			Edits   []gaEdit `json:"edits"`
+			From    string   `json:"from"`
+			ViewSHA string   `json:"view_sha"`
+			Text    string   `json:"text"`
+		}
+		data = jsonStr(prioData{Edits: []gaEdit{e}, From: "phone", ViewSHA: g.SourceSHA, Text: "GA TODO priority edits (1)"})
+		memo = "prio:" + row.Key + "\n" + e.canon()
+	}
+	return [][]string{
+		s.journalArgv("--kind", "request", "--id", rid, "--to", "open", "--by", "operator", "--data", data),
+		// the TUI's wake wording (tower_tui.Actions.ga_request): tower reads the exact key/edits from the journal
+		append([]string{s.cfg.bin}, adeckArgs(s.cfg.profile, "session", "send", "--no-wait", s.cfg.towerSession,
+			"[tui] GA TODO request "+rid+"; read exact key/edits from journal")...),
+	}, memo, 0, ""
+}
+
+// rememberGA records a journaled GA action, memo "<start|prio>:<key>\n<canonical edit>" (caller
+// holds towerActMu), and prunes entries older than gaRecentFor.
+func (s *server) rememberGA(memo string) {
+	m := &s.towerM
+	if m.recentGA == nil {
+		m.recentGA = map[string]gaRecent{}
+	}
+	now := time.Now()
+	for k, r := range m.recentGA {
+		if now.Sub(r.at) >= gaRecentFor {
+			delete(m.recentGA, k)
+		}
+	}
+	k, edit, _ := strings.Cut(memo, "\n")
+	m.recentGA[k] = gaRecent{at: now, edit: edit}
 }
