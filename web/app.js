@@ -443,7 +443,7 @@
     backlogOpen: false, backlogDefer: null, backlogQueued: new Set(),
     // GA TODO section (gatodo.js): collapsed by default; its filter text, the expanded row keys and
     // the exact keys started from this tab (shown queued until the overview's pending has them).
-    gatodoOpen: false, gatodoFilter: '', gatodoExpanded: new Set(), gatodoQueued: new Set(),
+    gatodoOpen: false, gatodoFilter: '', gatodoExpanded: new Set(), gatodoQueued: new Map(), // key -> posted at (ms)
     // The date typed into the open defer picker (kept across renders), and the reply drafts (G15,
     // towerdraft.js): per ask id, persisted. renderPending: a refresh deferred while the operator
     // is typing / mid-tap / sending; replyInFlight: a reply is being confirmed or posted.
@@ -1320,20 +1320,24 @@
       pend.forEach((p, i) => det.append(el('div', 'tline', (i + 1) + '. ' + (p.kind === 'start' ? 'start ' : 'priority ') + p.text)));
       list.append(det);
     }
+    // Filtering redraws only the rows box, so the focused input (and the iOS keyboard) survives.
     const f = document.createElement('input');
     f.type = 'search'; f.className = 'tdate tgafilter'; f.placeholder = 'Filter GA TODO'; f.value = tower.gatodoFilter;
-    f.addEventListener('input', () => {
-      tower.gatodoFilter = f.value;
-      const pos = f.selectionStart;
-      renderTower(true);
-      const nf = document.querySelector('.tgafilter');
-      if (nf) { nf.focus(); try { nf.setSelectionRange(pos, pos); } catch (_) { /* search inputs on old WebKit */ } }
-    });
-    list.append(f);
-    const rows = G.filter(sec.rows, tower.gatodoFilter);
-    if (!rows.length) { list.append(el('div', 'thint', '(nothing)')); return; }
-    const queued = G.queuedKeys(b, tower.gatodoQueued);
-    rows.forEach((row) => list.append(towerGatodoRow(row, G.rowView(row, queued), sec, !sec.stale)));
+    const box = el('div', 'tgarows');
+    // keys started from this tab count as queued for 15 min (the server's double-tap window),
+    // after which the overview's own pending list is the only source
+    const now = Date.now();
+    tower.gatodoQueued.forEach((at, k) => { if (now - at >= 15 * 60 * 1000) tower.gatodoQueued.delete(k); });
+    const queued = G.queuedKeys(b, [...tower.gatodoQueued.keys()]);
+    const fill = () => {
+      box.innerHTML = '';
+      const rows = G.filter(sec.rows, tower.gatodoFilter);
+      if (!rows.length) { box.append(el('div', 'thint', '(nothing)')); return; }
+      rows.forEach((row) => box.append(towerGatodoRow(row, G.rowView(row, queued), sec, !sec.stale)));
+    };
+    f.addEventListener('input', () => { tower.gatodoFilter = f.value; fill(); });
+    list.append(f, box);
+    fill();
   }
 
   function towerGatodoRow(row, v, sec, fresh) {
@@ -1362,7 +1366,7 @@
       const acts = el('div', 'tactions');
       Object.keys(G.MODES).forEach((mode) => acts.append(towerBtn(G.MODES[mode], mode === 'implement' ? 'tprimary' : '', (btn) => {
         if (!confirm(G.MODES[mode] + ' ' + row.key + '?\n' + v.title)) return;
-        go(G.startBody(row, mode, b), btn, 'Queued with tower', () => tower.gatodoQueued.add(row.key));
+        go(G.startBody(row, mode, b), btn, 'Queued with tower', () => tower.gatodoQueued.set(row.key, Date.now()));
       })));
       card.append(acts);
     }

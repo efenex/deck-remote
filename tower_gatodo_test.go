@@ -280,7 +280,7 @@ func TestGatodoSnapshotChangeIsRevalidated(t *testing.T) {
 	if w := do(strings.Replace(body, gaSHA, newSHA, 1)); w.Code != 404 || len(*ran) != 0 {
 		t.Fatalf("gone key on the new snapshot: %d %s", w.Code, w.Body.String())
 	}
-	// the same snapshot ages past 120 minutes while the tab stays open
+	// a snapshot just inside the 120-minute window is still accepted (freshness is recomputed per act)
 	set(gaBlock(now.Add(-119*time.Minute-55*time.Second), gaSHA, ""))
 	if w := do(body); w.Code != 200 {
 		t.Fatalf("fresh: %d %s", w.Code, w.Body.String())

@@ -7,7 +7,7 @@ package main
 // the tower checkout, so the phone cannot drift from the laptop; the result is cached on the
 // (overview.json, journal.jsonl) mtimes.
 //
-// WRITE: POST /api/rc/tower/act {op, id[, kind][, not_before]} behind authAct (act-cap device token +
+// WRITE: POST /api/rc/tower/act {op, id[, kind][, not_before]} (GA TODO: {op, key, mode | p[, after], view_sha[, body_sha]}) behind authAct (act-cap device token +
 // Tailscale identity). The ONLY writer is `python3 -I <root>/scripts/journal.py add …` with
 // the same argv the TUI uses (tower_tui.Actions); nothing here touches journal.jsonl or
 // state/. Every op is validated against the CURRENT model (kind/id must exist there and be
