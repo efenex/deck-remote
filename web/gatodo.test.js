@@ -70,6 +70,213 @@ test('payload: the bounded fixture (1500-byte body heads) stays under the ~80KB 
   assert.strictEqual(sec.rows.length, 31);
 });
 
+// --- feed schema 2 (meta/status/body_head_shed/budget) --------------------------------------------
+
+// fixture() as a schema-2 feed: every row gets meta + status; row 0 is a fallback row with an EMPTY summary
+// (and an enrich.summary that must never stand in for it), row 1 is shed, row 2 has a stale sidecar summary.
+function fixtureV2(over) {
+  const b = fixture();
+  b.schema_version = 2;
+  b.items.forEach((r, i) => {
+    r.meta = { title: 'Meta title ' + i, summary: 'Meta summary ' + i, source: 'sidecar', kind: 'bug', area: 'bot', size: 'S' };
+    r.status = 'open';
+  });
+  Object.assign(b.items[0].meta, { summary: '', source: 'fallback' });
+  b.items[0].enrich = { summary: 'ENRICH SUMMARY must not show' };
+  b.items[1].body_head = ''; b.items[1].body_head_shed = true;
+  b.items[2].meta.stale = true;
+  b.budget = { target_bytes: 80000, items_bytes: 53248, shed: 1, over: false };
+  return Object.assign(b, over || {});
+}
+
+test('schema gate is strict: only the numbers 1 and 2; anything else is refused visibly with no rows', () => {
+  for (const v of [1, 2]) {
+    const sec = G.section({ ga_todo: Object.assign(fixtureV2(), { schema_version: v }) }, NOW);
+    assert.strictEqual(sec.unsupported, '', 'v' + v);
+    assert.strictEqual(sec.stale, '');
+    assert.strictEqual(sec.rows.length, 31);
+  }
+  for (const v of [3, 0, -1, 1.5, '1', '2', true, null, undefined, [2], { v: 2 }]) {
+    const sec = G.section({ ga_todo: Object.assign(fixtureV2(), { schema_version: v }) }, NOW);
+    assert.match(sec.unsupported, /schema 1 or 2 only/, String(v));
+    assert.strictEqual(sec.stale, sec.unsupported);
+    assert.deepStrictEqual(sec.rows, [], 'no rows from an unsupported block: ' + String(v));
+    assert.strictEqual(sec.more, 0);
+    assert.strictEqual(sec.header, 'GA TODO · UNSUPPORTED');
+    assert.match(G.staleReason(sec.block, NOW), /schema 1 or 2 only/);
+  }
+  const noVersion = fixtureV2();
+  delete noVersion.schema_version;
+  assert.match(G.section({ ga_todo: noVersion }, NOW).unsupported, /schema 1 or 2 only/);
+});
+
+test('the full view (units) and an absent or non-list items are refused, whatever else the block holds', () => {
+  for (const patch of [{ units: [{ key: 'FULL', body: 'FULL BODY' }] }, { units: [] }, { units: null }, { items: undefined }, { items: null },
+    { items: {} }, { items: 'rows' }, { items: { 0: row('back@' + hex12(1), 't', null) } }]) {
+    for (const v of [1, 2]) {
+      const sec = G.section({ ga_todo: Object.assign(fixtureV2(), { schema_version: v }, patch) }, NOW);
+      assert.match(sec.unsupported, /full view or no item list/, JSON.stringify(Object.keys(patch)));
+      assert.deepStrictEqual(sec.rows, []);
+      assert.ok(sec.stale);
+    }
+  }
+  assert.strictEqual(G.section({ ga_todo: { schema_version: 2, units: [{ key: 'FULL' }] } }, NOW).rows.length, 0);
+});
+
+test('v2 rows: meta.title preferred, meta.summary shown as its own text (empty stays empty, enrich.summary never)', () => {
+  const b = fixtureV2();
+  const q = new Set();
+  const v0 = G.rowView(b.items[0], q);
+  assert.strictEqual(v0.title, 'Meta title 0');
+  assert.strictEqual(v0.hasSummary, true);
+  assert.strictEqual(v0.summary, '', 'empty meta.summary is not replaced by enrich.summary');
+  assert.ok(!JSON.stringify(v0).includes('ENRICH SUMMARY'));
+  assert.strictEqual(v0.derived, true);
+  const v2 = G.rowView(b.items[2], q);
+  assert.strictEqual(v2.summary, 'Meta summary 2');
+  assert.strictEqual(v2.metaStale, true);
+  assert.strictEqual(v2.derived, false);
+  assert.deepStrictEqual(v2.chips, ['open', 'bug', 'bot', 'S']);
+  // v1 rows (no meta) fall back to the raw heading and have no summary slot, even with an enrich.summary
+  const v1 = G.rowView(row('back@' + hex12(1), 'Raw heading', null, { enrich: { summary: 'ENRICH' } }), q);
+  assert.strictEqual(v1.title, 'Raw heading');
+  assert.strictEqual(v1.hasSummary, false);
+  assert.strictEqual(v1.summary, '');
+  assert.deepStrictEqual(v1.chips, []);
+  // a v2 row with an unusable meta.title (empty / not a string / meta not an object) keeps the raw heading
+  for (const meta of [{ title: '' }, { title: '  ' }, { title: 7 }, null, 'x', [], { summary: 5 }]) {
+    const v = G.rowView(row('back@' + hex12(1), 'Raw heading', null, { meta }), q);
+    assert.strictEqual(v.title, 'Raw heading', JSON.stringify(meta));
+    assert.strictEqual(v.hasSummary, false);
+  }
+  // the dispatch data keeps the raw heading: meta.title is a label, never an identity
+  const r = Object.assign({}, b.items[2], { w_key: 'back:1@' + hex12(2) });
+  assert.strictEqual(G.startRequestData(r, 'design', b).title, 'prio P1 2');
+  assert.ok(!('title' in G.startBody(r, 'design', b)));
+  assert.strictEqual(G.startBody(r, 'design', b).key, r.key);
+});
+
+test('v2 text is plain text with every string redacted, nested meta included', () => {
+  const tok = { ghp: 'ghp_' + 'A'.repeat(30), bearer: 'Bearer ' + 'c'.repeat(30), sk: 'sk-' + 'b'.repeat(24), gl: 'glpat-' + 'g'.repeat(24) };
+  const all = Object.values(tok).join(' ');
+  const r = row('back@' + hex12(1), 'raw', { p: 'P1', rank: 0, pending: false }, {
+    meta: { title: '<img src=x onerror=alert(1)> ' + all + '\u001b[31m', summary: '**bold** <b>x</b> ' + all + '‮', source: 'sidecar', kind: all, area: tok.ghp, size: tok.sk },
+    status: 'open ' + tok.ghp,
+  });
+  const v = G.rowView(r, new Set());
+  const strings = [v.title, v.summary, ...v.chips];
+  for (const s of strings) for (const t of Object.values(tok)) assert.ok(!s.includes(t), 'leaked ' + t + ' in ' + s);
+  assert.match(v.title, /^<img src=x onerror=alert\(1\)> /); // text, not markup: the DOM code uses textContent
+  assert.match(v.title, /<U\+001B>\[31m$/);
+  assert.match(v.summary, /^\*\*bold\*\* <b>x<\/b> .*<U\+202E>$/);
+  assert.ok(v.chips.length === 4 && v.chips.every((c) => !/ghp_|sk-/.test(c)));
+  // the filter sees meta text too, but never enrich.summary
+  const b = fixtureV2();
+  b.items[4].meta.summary = 'zebra-unique summary';
+  b.items[5].meta.title = 'quokka-unique title';
+  assert.deepStrictEqual(G.filter(b.items, 'zebra-unique').map((r) => r.key), [b.items[4].key]);
+  assert.deepStrictEqual(G.filter(b.items, 'quokka-unique').map((r) => r.key), [b.items[5].key]);
+  assert.strictEqual(G.filter(b.items, 'ENRICH SUMMARY').length, 0);
+  assert.strictEqual(G.filter(b.items, 'fallback').length, 0);
+  assert.strictEqual(G.filter(b.items, 'bug').length, b.items.length);
+});
+
+test('shed rows: no body head, a visible shed mark, the source link kept', () => {
+  const b = fixtureV2();
+  const shed = G.rowView(b.items[1], new Set());
+  assert.strictEqual(shed.shed, true);
+  assert.strictEqual(shed.bodyHead, '');
+  assert.strictEqual(shed.bodyUrl, b.items[1].body_url);
+  const kept = G.rowView(b.items[3], new Set());
+  assert.strictEqual(kept.shed, false);
+  assert.ok(kept.bodyHead.length > 0);
+  // only the boolean true counts
+  assert.strictEqual(G.rowView(row('back@' + hex12(1), 't', null, { body_head_shed: 'true' }), new Set()).shed, false);
+  assert.strictEqual(G.rowView(row('back@' + hex12(1), 't', null, { body_head: '', body_head_shed: true }), new Set()).shed, true);
+});
+
+test('producer budget is separate from the wire estimate: both can be flagged independently', () => {
+  const quiet = G.section({ ga_todo: fixtureV2() }, NOW);
+  assert.strictEqual(quiet.producerOver, false);
+  assert.strictEqual(quiet.overBudget, false);
+  assert.deepStrictEqual(quiet.budget, { target: 80000, items: 53248, shed: 1, over: false });
+  assert.strictEqual(quiet.header, 'GA TODO (31 + 265 more)');
+  // producer over, wire estimate fine
+  const p = G.section({ ga_todo: fixtureV2({ budget: { target_bytes: 80000, items_bytes: 98765, shed: 31, over: true }, payload_bytes: 1000 }) }, NOW);
+  assert.strictEqual(p.producerOver, true);
+  assert.strictEqual(p.overBudget, false);
+  assert.match(p.header, / · over size budget \(99 KB\)$/);
+  assert.strictEqual(p.rows.length, 31, 'over budget never drops rows');
+  // wire estimate over, producer fine
+  const w = G.section({ ga_todo: fixtureV2({ payload_bytes: 90000, payload_budget: 81920 }) }, NOW);
+  assert.strictEqual(w.overBudget, true);
+  assert.strictEqual(w.producerOver, false);
+  assert.ok(!/budget/.test(w.header));
+  // no budget (schema 1) or a malformed one: nothing invented
+  assert.strictEqual(G.section({ ga_todo: fixture() }, NOW).budget, null);
+  for (const bd of ['x', 7, [], { over: 'true', shed: -1, items_bytes: 1.5 }]) {
+    const s = G.section({ ga_todo: fixtureV2({ budget: bd }) }, NOW);
+    assert.strictEqual(s.producerOver, false, JSON.stringify(bd));
+    assert.strictEqual(s.rows.length, 31);
+  }
+});
+
+test('size units: producer budget is decimal KB rounded up, the wire estimate is KiB; exactly 80,001 bytes is over', () => {
+  assert.strictEqual(G.kb(80000), '80 KB');
+  assert.strictEqual(G.kb(80001), '81 KB');
+  assert.strictEqual(G.kb(0), '0 KB');
+  assert.strictEqual(G.kb(1), '1 KB');
+  assert.strictEqual(G.kib(81920), '80 KiB');
+  assert.strictEqual(G.kib(80000), '78 KiB');
+  const at = G.section({ ga_todo: fixtureV2({ budget: { target_bytes: 80000, items_bytes: 80000, shed: 0, over: false } }) }, NOW);
+  assert.strictEqual(at.producerOver, false);
+  assert.ok(!/budget/.test(at.header));
+  assert.strictEqual(at.budget.items, 80000);
+  // GA reports over only when even the all-shed baseline exceeds the target: 80,001 bytes
+  const over = G.section({ ga_todo: fixtureV2({ budget: { target_bytes: 80000, items_bytes: 80001, shed: 31, over: true } }) }, NOW);
+  assert.strictEqual(over.producerOver, true);
+  assert.match(over.header, / · over size budget \(81 KB\)$/); // never "80 KB" for an over-budget block
+  assert.strictEqual(over.rows.length, 31);
+});
+
+test('shed line wording: singular and plural', () => {
+  assert.strictEqual(G.shedText(1), '1 row trimmed to its source link');
+  assert.strictEqual(G.shedText(2), '2 rows trimmed to their source link');
+  assert.strictEqual(G.shedText(31), '31 rows trimmed to their source link');
+});
+
+test('the tower_model.py refusal marker (unsupported:true) is honored even with version 2 and items []', () => {
+  const refusal = (over) => Object.assign({ schema_version: 2, items: [], pending: [], stale: true, unsupported: true, more: 0,
+    error: 'unsupported GA TODO block: the full view ghp_' + 'A'.repeat(30), payload_bytes: 0, payload_budget: 81920 }, over || {});
+  const sec = G.section({ ga_todo: refusal() }, NOW);
+  assert.strictEqual(sec.header, 'GA TODO · UNSUPPORTED');
+  assert.deepStrictEqual(sec.rows, []);
+  assert.strictEqual(sec.stale, sec.unsupported);
+  assert.strictEqual(sec.unsupported, 'unsupported GA TODO block: the full view [redacted]'); // the visible reason, redacted
+  assert.strictEqual(G.unsupportedReason(refusal({ error: '' })), 'unsupported GA TODO block');
+  assert.strictEqual(G.unsupportedReason(refusal({ error: undefined })), 'unsupported GA TODO block');
+  // the marker wins over everything else: version 1, rows present, fresh, not stale
+  const rows = fixtureV2().items;
+  for (const v of [1, 2]) {
+    const s = G.section({ ga_todo: refusal({ schema_version: v, items: rows, stale: false, built_at: '2026-11-25T11:00:00Z' }) }, NOW);
+    assert.ok(s.unsupported && s.rows.length === 0, 'v' + v);
+  }
+  // only the boolean true is a marker
+  for (const m of [false, 'true', 1, null]) {
+    assert.strictEqual(G.unsupportedReason(Object.assign(fixtureV2(), { unsupported: m })), '', String(m));
+  }
+});
+
+test('unknown item fields and a future budget field never break a v2 row or the selection', () => {
+  const b = fixtureV2();
+  b.items.forEach((r) => { r.future = { deep: [1, { x: 'y' }] }; });
+  b.budget.future = 'x';
+  const sec = G.section({ ga_todo: b }, NOW);
+  assert.strictEqual(sec.rows.length, 31);
+  assert.strictEqual(sec.unsupported, '');
+  assert.strictEqual(G.rowView(sec.rows[0], new Set()).title, 'Meta title 0');
+});
+
 test('no ga_todo block (an older tower): no section', () => {
   assert.strictEqual(G.section({ sections: [] }, NOW), null);
   assert.strictEqual(G.section(null, NOW), null);
@@ -83,7 +290,7 @@ test('stale / refused snapshots are visible and block actions', () => {
   assert.match(sec({ built_at: 'nope' }).stale, /built_at/);
   assert.match(sec({ stale: true }).stale, /stale/);
   assert.match(sec({ error: 'feed refused ghp_' + 'A'.repeat(30) }).stale, /^feed refused \[redacted\]$/);
-  assert.match(sec({ schema_version: 2 }).stale, /schema 1 only/);
+  assert.strictEqual(sec({ schema_version: 2 }).stale, ''); // feed schema 2 is a strict superset of 1
   assert.match(sec({ stale: true }).header, / · STALE$/);
 });
 

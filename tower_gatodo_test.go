@@ -210,7 +210,10 @@ func TestGatodoRefusals(t *testing.T) {
 		{gaBlock(now.Add(10*time.Minute), gaSHA, ""), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
 		{strings.Replace(fresh, `"stale":false`, `"stale":true`, 1), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
 		{strings.Replace(fresh, `"error":""`, `"error":"feed refused"`, 1), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
-		{strings.Replace(fresh, `"schema_version":1`, `"schema_version":2`, 1), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
+		{strings.Replace(fresh, `"schema_version":1`, `"schema_version":3`, 1), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
+		{strings.Replace(fresh, `"schema_version":1`, `"schema_version":"2"`, 1), `{"op":"gatodo_prio","key":"` + gaKeyA + `","p":"P0"` + v + `}`, 409},
+		{strings.Replace(fresh, `"schema_version":1`, `"schema_version":2.0`, 1), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
+		{gaBlock(now.Add(-10*time.Minute), gaSHA, `"units":[{"key":"`+gaKeyA+`"}]`), `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
 		{`{"schema_version":1,"items":"nope"}`, `{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"design"` + v + `}`, 409},
 		// not remaining / already queued / in flight
 		{fresh, `{"op":"gatodo_start","key":"` + gaKeyX + `","mode":"implement"` + v + `}`, 409},
@@ -222,6 +225,105 @@ func TestGatodoRefusals(t *testing.T) {
 		if w := do(c.body); w.Code != c.code || len(*ran) != 0 {
 			t.Fatalf("%s: %d want %d (%s), wrote %q", c.body, w.Code, c.code, w.Body.String(), *ran)
 		}
+	}
+}
+
+// gaBlockV2: the same block as a schema-2 feed (meta, status, a shed row, the producer budget). Every meta.title is
+// a label that differs from the row title and the key: no action may use it.
+func gaBlockV2(builtAt time.Time) string {
+	b := gaBlock(builtAt, gaSHA, `"budget":{"target_bytes":80000,"items_bytes":1234,"shed":1,"over":false}`)
+	b = strings.Replace(b, `"schema_version":1`, `"schema_version":2`, 1)
+	for _, k := range []string{gaKeyA, gaKeyB, gaKeyC, gaKeyU, gaKeyX, gaKeyQ, gaKeyF, gaKeyP3} {
+		b = strings.Replace(b, `"key":"`+k+`","doc"`, `"key":"`+k+`","meta":{"title":"META TITLE `+k+`","summary":"","source":"fallback"},"status":"open","body_head_shed":true,"doc"`, 1)
+	}
+	return b
+}
+
+// start and priority actions on a schema-2 block are the same requests as on schema 1: exact key only,
+// the journal title is the model row's heading, never meta.title.
+func TestGatodoV2ActionsMatchV1ExactKey(t *testing.T) {
+	now := time.Now()
+	norm := func(argv []string) string {
+		d := gaData(t, argv)
+		return jsonStr(d)
+	}
+	for _, body := range []string{
+		`{"op":"gatodo_start","key":"` + gaKeyA + `","mode":"implement","view_sha":"` + gaSHA + `","body_sha":"00112233445566ff"}`,
+		`{"op":"gatodo_prio","key":"` + gaKeyU + `","p":"P1","after":"` + gaKeyB + `","view_sha":"` + gaSHA + `"}`,
+	} {
+		_, do1, ran1, _ := gaActServer(t, gaBlock(now.Add(-10*time.Minute), gaSHA, ""))
+		_, do2, ran2, _ := gaActServer(t, gaBlockV2(now.Add(-10*time.Minute)))
+		w1, w2 := do1(body), do2(body)
+		if w1.Code != 200 || w2.Code != 200 || len(*ran1) != 2 || len(*ran2) != 2 {
+			t.Fatalf("%s: v1 %d v2 %d (%s)", body, w1.Code, w2.Code, w2.Body.String())
+		}
+		if a, b := norm((*ran1)[0]), norm((*ran2)[0]); a != b {
+			t.Fatalf("v2 request differs from v1:\n v1 %s\n v2 %s", a, b)
+		}
+		if strings.Contains((*ran2)[0][13], "META TITLE") {
+			t.Fatalf("meta.title reached the journal: %s", (*ran2)[0][13])
+		}
+	}
+	// a title (raw or meta) is never an identity; neither is a key that is only a prefix of a real one
+	_, do, ran, _ := gaActServer(t, gaBlockV2(now.Add(-10*time.Minute)))
+	for _, k := range []string{"META TITLE " + gaKeyA, "Model title A", "back@aaaaaaaaaaa", gaKeyA + "x", strings.ToUpper(gaKeyA)} {
+		for _, body := range []string{
+			`{"op":"gatodo_start","key":` + jsonStr(k) + `,"mode":"design","view_sha":"` + gaSHA + `"}`,
+			`{"op":"gatodo_prio","key":` + jsonStr(k) + `,"p":"P1","view_sha":"` + gaSHA + `"}`,
+		} {
+			if w := do(body); w.Code != 404 || len(*ran) != 0 {
+				t.Fatalf("%s: %d %s, wrote %q", body, w.Code, w.Body.String(), *ran)
+			}
+		}
+	}
+}
+
+// parseGaSnap's strict gates: the integers 1 and 2 only, never the full view, and a real item list.
+func TestParseGaSnapGates(t *testing.T) {
+	for _, c := range []struct {
+		raw string
+		bad bool
+	}{
+		{`{"schema_version":1,"items":[]}`, false},
+		{`{"schema_version":2,"items":[]}`, false},
+		{`{"schema_version": 2 ,"items":[{"key":"back@aaaaaaaaaaaa","meta":{"title":"t","summary":""},"status":"open","body_head_shed":true}],"budget":{"over":true}}`, false},
+		{`{"schema_version":3,"items":[]}`, true},
+		{`{"schema_version":0,"items":[]}`, true},
+		{`{"schema_version":"1","items":[]}`, true},
+		{`{"schema_version":"2","items":[]}`, true},
+		{`{"schema_version":2.0,"items":[]}`, true},
+		{`{"schema_version":1.0,"items":[]}`, true},
+		{`{"schema_version":2e0,"items":[]}`, true},
+		{`{"schema_version":true,"items":[]}`, true},
+		{`{"schema_version":null,"items":[]}`, true},
+		{`{"schema_version":[2],"items":[]}`, true},
+		{`{"items":[]}`, true},
+		{`{"schema_version":2,"units":[{"key":"x"}]}`, true},
+		{`{"schema_version":2,"units":[],"items":[]}`, true},
+		{`{"schema_version":1,"units":null,"items":[]}`, true},
+		{`{"schema_version":2}`, true},
+		{`{"schema_version":2,"items":null}`, true},
+		{`{"schema_version":2,"items":{}}`, true},
+		{`{"schema_version":2,"items":"nope"}`, true},
+		{`{"schema_version":2,"items":[1]}`, true},
+		{`{"schema_version":2,"items":[],"unsupported":true,"stale":true}`, true}, // tower_model.py's refusal marker
+		{`{"schema_version":2,"items":[],"unsupported":false}`, false},
+		{`[1,2]`, true},
+		{`"x"`, true},
+	} {
+		g := parseGaSnap(json.RawMessage(c.raw))
+		if g == nil {
+			t.Fatalf("%s: nil", c.raw)
+		}
+		if (g.bad != "") != c.bad {
+			t.Fatalf("%s: bad=%q, want bad=%v", c.raw, g.bad, c.bad)
+		}
+		if c.bad && g.fresh(time.Now()) == "" {
+			t.Fatalf("%s: a refused block must never be fresh", c.raw)
+		}
+	}
+	if parseGaSnap(nil) != nil || parseGaSnap(json.RawMessage(" null ")) != nil {
+		t.Fatal("an absent block is nil (older tower)")
 	}
 }
 
@@ -355,72 +457,142 @@ func runGaTowerModelPy(t *testing.T, overview string) map[string]any {
 	return doc
 }
 
-func TestTowerModelPassesBoundedGaTodo(t *testing.T) {
+// gaBoundedBlock: a feed block of 6 explicit rows and 30 others (28 unprioritized + 2 P3) at the given schema version.
+func gaBoundedBlock(version int, secret string, extraItem string, tail string) string {
 	var rows []string
 	for i, p := range []string{"P0", "P1", "P1", "P2", "P2", "P2"} {
 		rows = append(rows, gaRowJSON(fmt.Sprintf("back@%012x", i), "prio "+p, "open", `{"p":"`+p+`","rank":`+fmt.Sprint(i)+`,"pending":false}`))
 	}
-	for i := 0; i < 30; i++ { // 28 unprioritized + 2 P3: 25 survive, 5 are added to `more`
+	for i := 0; i < 30; i++ {
 		prio := ""
 		if i >= 28 {
 			prio = `{"p":"P3","rank":0,"pending":true}`
 		}
 		rows = append(rows, gaRowJSON(fmt.Sprintf("todo@%012x", 0x100+i), fmt.Sprintf("other %d", i), "open", prio))
 	}
-	secret := "ghp_" + strings.Repeat("A", 30)
-	rows[0] = strings.Replace(rows[0], `"title":"prio P0"`, `"title":"leak `+secret+`","meta":{"title":"v2 only"},"status":"open"`, 1)
-	block := `{"schema_version":1,"source_sha":"` + gaSHA + `","source_ref":"origin/main","built_at":"2026-11-25T10:00:00Z","input_digest":"` +
+	rows[0] = strings.Replace(rows[0], `"title":"prio P0"`, `"title":"leak `+secret+`"`+extraItem, 1)
+	return `{"schema_version":` + fmt.Sprint(version) + `,"source_sha":"` + gaSHA + `","source_ref":"origin/main","built_at":"2026-11-25T10:00:00Z","input_digest":"` +
 		strings.Repeat("a", 64) + `","total_units":400,"total_open":90,"more":50,"collision_count":0,"orphan_count":1,"stale":false,"error":"",` +
 		`"items":[` + strings.Join(rows, ",") + `],"pending":[{"id":"ga-prio-1","edits":[{"key":"k","p":"P1"}],"note":"Bearer ` + strings.Repeat("x", 30) + `"},{"id":"other-1"}],` +
-		`"pending_errors":[],"pending_unverifiable":[],"units":[{"key":"FULL"}]}`
-	doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z","in_flight":[{"id":"t1","ga_key":"back@000000000001"},{"id":"t2"}],"ga_todo":`+block+`}`)
-	g, _ := doc["ga_todo"].(map[string]any)
-	if g == nil {
-		t.Fatalf("no ga_todo: %v", doc)
-	}
-	items := g["items"].([]any)
-	explicit, others := 0, 0
-	for _, it := range items {
-		m := it.(map[string]any)
-		if _, ok := m["meta"]; ok {
-			t.Fatalf("schema-2 field passed through: %v", m)
+		`"pending_errors":[],"pending_unverifiable":[]` + tail + `}`
+}
+
+func TestTowerModelPassesBoundedGaTodo(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("A", 30)
+	bearer := "Bearer " + strings.Repeat("x", 30)
+	for _, version := range []int{1, 2} {
+		// v2 extras: meta (nested strings, an empty summary, an unknown nested object), status, shed flag, a
+		// future item field; the producer budget; a private block field that is not part of the bounded projection
+		extra := `,"meta":{"title":"meta ` + secret + `","summary":"","source":"fallback","stale":true,"area":"x","future":{"deep":["` + bearer + `",{"k` + secret + `":1}]}},` +
+			`"status":"partial","body_head_shed":true,"future_item_field":{"n":[1,"` + secret + `"]}`
+		tail := `,"budget":{"target_bytes":80000,"items_bytes":79000,"shed":2,"over":false,"note":"` + secret + `"},"private_body":"FULL BODY"`
+		doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z","in_flight":[{"id":"t1","ga_key":"back@000000000001"},{"id":"t2"}],"ga_todo":`+
+			gaBoundedBlock(version, secret, extra, tail)+`}`)
+		g, _ := doc["ga_todo"].(map[string]any)
+		if g == nil || g["schema_version"] != float64(version) || g["error"] != "" || g["stale"] != false {
+			t.Fatalf("v%d: ga_todo %v", version, doc["ga_todo"])
 		}
-		if p, _ := m["priority"].(map[string]any); p != nil && p["p"] != "P3" {
-			explicit++
-		} else {
-			others++
+		items := g["items"].([]any)
+		explicit, others := 0, 0
+		for _, it := range items {
+			m := it.(map[string]any)
+			if p, _ := m["priority"].(map[string]any); p != nil && p["p"] != "P3" {
+				explicit++
+			} else {
+				others++
+			}
 		}
-	}
-	if explicit != 6 || others != 25 || g["more"] != 55.0 {
-		t.Fatalf("explicit %d others %d more %v", explicit, others, g["more"])
-	}
-	raw, _ := json.Marshal(g)
-	if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "Bearer "+strings.Repeat("x", 30)) || !strings.Contains(string(raw), "[redacted]") {
-		t.Fatalf("not redacted: %s", raw)
-	}
-	if strings.Contains(string(raw), "FULL") || g["units"] != nil {
-		t.Fatalf("full view leaked: %s", raw)
-	}
-	if p := g["pending"].([]any); len(p) != 1 || !reflect.DeepEqual(g["in_flight_keys"], []any{"back@000000000001"}) {
-		t.Fatalf("pending %v in_flight_keys %v", p, g["in_flight_keys"])
-	}
-	if b, _ := g["payload_bytes"].(float64); b <= 0 || g["payload_budget"] != 81920.0 {
-		t.Fatalf("payload accounting: %v / %v", g["payload_bytes"], g["payload_budget"])
-	}
-	for _, sec := range doc["sections"].([]any) {
-		if sec.(map[string]any)["id"] == "gatodo" {
-			t.Fatalf("the TUI's GA TODO section (full view) reached the phone model: %v", sec)
+		if explicit != 6 || others != 25 || g["more"] != 55.0 {
+			t.Fatalf("v%d: explicit %d others %d more %v", version, explicit, others, g["more"])
+		}
+		first := items[0].(map[string]any)
+		meta, _ := first["meta"].(map[string]any)
+		if meta == nil || meta["summary"] != "" || meta["source"] != "fallback" || meta["stale"] != true || first["status"] != "partial" ||
+			first["body_head_shed"] != true || first["future_item_field"] == nil || first["title"] == nil {
+			t.Fatalf("v%d: unknown/v2 item fields were not kept: %v", version, first)
+		}
+		if bd, _ := g["budget"].(map[string]any); bd == nil || bd["items_bytes"] != 79000.0 || bd["shed"] != 2.0 || bd["over"] != false || bd["target_bytes"] != 80000.0 {
+			t.Fatalf("v%d: budget not kept: %v", version, g["budget"])
+		}
+		raw, _ := json.Marshal(g)
+		if strings.Contains(string(raw), secret) || strings.Contains(string(raw), bearer) || strings.Count(string(raw), "[redacted]") < 6 {
+			t.Fatalf("v%d: not redacted (nested meta, dict keys, budget, pending): %s", version, raw)
+		}
+		if strings.Contains(string(raw), "FULL BODY") || g["private_body"] != nil || g["units"] != nil {
+			t.Fatalf("v%d: a non-projection block field leaked: %s", version, raw)
+		}
+		if p := g["pending"].([]any); len(p) != 1 || !reflect.DeepEqual(g["in_flight_keys"], []any{"back@000000000001"}) {
+			t.Fatalf("pending %v in_flight_keys %v", p, g["in_flight_keys"])
+		}
+		// payload_* is this block's wire estimate; budget is the producer's: separate fields, both present
+		if b, _ := g["payload_bytes"].(float64); b <= 0 || g["payload_budget"] != 81920.0 || b == 79000.0 {
+			t.Fatalf("payload accounting: %v / %v", g["payload_bytes"], g["payload_budget"])
+		}
+		for _, sec := range doc["sections"].([]any) {
+			if sec.(map[string]any)["id"] == "gatodo" {
+				t.Fatalf("the TUI's GA TODO section (full view) reached the phone model: %v", sec)
+			}
 		}
 	}
 }
 
-func TestTowerModelGaTodoSchemaAndAbsence(t *testing.T) {
-	doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z","ga_todo":{"schema_version":2,"units":[{"key":"x","body":"B"}]}}`)
-	g := doc["ga_todo"].(map[string]any)
-	if g["stale"] != true || !strings.Contains(g["error"].(string), "schema 1 only") || len(g["items"].([]any)) != 0 {
-		t.Fatalf("schema 2 block: %v", g)
+// Full-view-only fields (body, private_body) never ride on a bounded item, at any schema; unknown and v2 fields do.
+func TestTowerModelGaTodoItemBoundary(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		extra := `,"body":"FULL BODY ITEM","private_body":"PRIVATE ITEM","meta":{"title":"kept","summary":"","body":"nested body is meta data"},"future_item_field":"kept too"`
+		doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z","ga_todo":`+gaBoundedBlock(version, "ghp_"+strings.Repeat("A", 30), extra, `,"body":"FULL BODY BLOCK"`)+`}`)
+		g := doc["ga_todo"].(map[string]any)
+		first := g["items"].([]any)[0].(map[string]any)
+		if _, ok := first["body"]; ok || first["private_body"] != nil || g["body"] != nil {
+			t.Fatalf("v%d: full-view field on a bounded item/block: %v", version, first)
+		}
+		raw, _ := json.Marshal(g)
+		if strings.Contains(string(raw), "FULL BODY ITEM") || strings.Contains(string(raw), "PRIVATE ITEM") || strings.Contains(string(raw), "FULL BODY BLOCK") {
+			t.Fatalf("v%d: leaked: %s", version, raw)
+		}
+		if first["future_item_field"] != "kept too" || first["meta"].(map[string]any)["title"] != "kept" || first["body_head"] == nil {
+			t.Fatalf("v%d: bounded/unknown fields must survive: %v", version, first)
+		}
 	}
-	doc = runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z"}`)
+}
+
+// The TUI's schema-2 FULL view (units) and every unreadable version become a visible, action-free refusal that
+// carries no body, whatever else the block holds.
+func TestTowerModelGaTodoRefusals(t *testing.T) {
+	good := gaBoundedBlock(2, "ghp_"+strings.Repeat("A", 30), "", "")
+	withTail := func(sv, tail string) string {
+		return strings.Replace(strings.Replace(good, `"schema_version":2`, `"schema_version":`+sv, 1), `"pending_errors":[]`, `"pending_errors":[]`+tail, 1)
+	}
+	for name, block := range map[string]string{
+		"full view":          `{"schema_version":2,"units":[{"key":"x","body":"FULL BODY"}]}`,
+		"units beside items": withTail("2", `,"units":[{"key":"FULL","body":"FULL BODY"}]`),
+		"units null":         withTail("1", `,"units":null`),
+		"v3":                 withTail("3", ""),
+		"string version":     withTail(`"2"`, ""),
+		"float version":      withTail("2.0", ""),
+		"bool version":       withTail("true", ""),
+		"null version":       withTail("null", ""),
+		"missing version":    strings.Replace(good, `"schema_version":2,`, "", 1),
+		"no items":           `{"schema_version":1,"source_sha":"` + gaSHA + `","private_body":"FULL BODY"}`,
+		"items null":         `{"schema_version":2,"items":null,"private_body":"FULL BODY"}`,
+		"items object":       `{"schema_version":2,"items":{"a":{"key":"k"}},"private_body":"FULL BODY"}`,
+		"items string":       `{"schema_version":1,"items":"FULL BODY"}`,
+		"block is a list":    `[{"key":"FULL BODY"}]`,
+	} {
+		doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z","ga_todo":`+block+`}`)
+		g, _ := doc["ga_todo"].(map[string]any)
+		if g == nil || g["stale"] != true || !strings.Contains(g["error"].(string), "unsupported GA TODO block") || len(g["items"].([]any)) != 0 {
+			t.Fatalf("%s: not refused: %v", name, doc["ga_todo"])
+		}
+		raw, _ := json.Marshal(g)
+		if strings.Contains(string(raw), "FULL BODY") || strings.Contains(string(raw), "ghp_") || g["units"] != nil || g["budget"] != nil {
+			t.Fatalf("%s: a refusal must carry no body: %s", name, raw)
+		}
+		if g["unsupported"] != true || g["more"] != 0.0 || len(g["pending"].([]any)) != 0 {
+			t.Fatalf("%s: refusal not empty: %s", name, raw)
+		}
+	}
+	doc := runGaTowerModelPy(t, `{"generated_at":"2026-11-25T10:00:00Z"}`)
 	if _, ok := doc["ga_todo"]; ok {
 		t.Fatalf("an older overview must not grow ga_todo: %v", doc["ga_todo"])
 	}

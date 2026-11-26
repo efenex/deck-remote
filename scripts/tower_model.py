@@ -69,7 +69,7 @@ def main():
         return 0
 
     ov = m.o if isinstance(getattr(m, "o", None), dict) else {}
-    # GA TODO (S6): the phone gets only overview.json's bounded schema-1 `ga_todo` block. Copy it BEFORE visible():
+    # GA TODO (S6): the phone gets only overview.json's bounded schema-1/2 `ga_todo` block. Copy it BEFORE visible():
     # the TUI's own GA TODO section lazily loads the schema-2 full view (load_gatodo) when the operator unfolded it
     # in the TUI, which would put the full corpus into this model and rewrite ov["ga_todo"] in place.
     ga_block = copy.deepcopy(ov.get("ga_todo")) if "ga_todo" in ov else None
@@ -164,9 +164,11 @@ GA_BANDS = ("P0", "P1", "P2", "P3")
 GA_EXPLICIT = ("P0", "P1", "P2")        # always shown, never capped
 GA_UNPRIORITIZED_MAX = 25              # everything else (no band, or P3): at most this many rows
 GA_PAYLOAD_BUDGET = 80 * 1024          # the original phone-payload target; monitored, never enforced by dropping P0-P2
-# schema-1 feed item fields (GA scripts/feed.schema.json, additionalProperties:false): nothing else is passed on.
-GA_ITEM_FIELDS = ("key", "w_key", "doc", "line_start", "line_end", "parent", "title", "section", "doc_state", "closable",
-                  "closing_subentries", "body_sha", "body_head", "body_url", "view_url", "priority", "enrich", "deps")
+GA_SCHEMAS = (1, 2)                    # bounded feed versions the phone reads (GA feed schema 2 is a strict superset of 1)
+# Item fields are NOT whitelisted: the v2 feed adds meta/status/body_head_shed and later versions may add more, so every
+# item key passes through ga_clean() (recursive redaction). The block, by contrast, is a bounded projection: only these
+# top-level fields (plus the producer's `budget`) are forwarded, never the full view's body/private fields.
+GA_ITEM_DENY = ("body", "private_body")   # the full view's per-unit body; never part of a bounded feed item
 GA_BLOCK_FIELDS = ("schema_version", "source_sha", "source_ref", "built_at", "input_digest", "total_units", "total_open",
                    "more", "collision_count", "orphan_count", "stale", "error", "pending_errors", "pending_unverifiable")
 # Same patterns as tower scripts/ga_todo.py REDACT_RE (overview.py already redacts; this is defense in depth).
@@ -194,20 +196,33 @@ def _ga_band(row):
     return p.get("p") if isinstance(p, dict) and p.get("p") in GA_BANDS else None
 
 
+def _ga_refusal(block):
+    """Why the phone cannot show this block ("" = supported): an unreadable version, or the TUI's full view."""
+    if not isinstance(block, dict):
+        return "unsupported GA TODO block: not an object"
+    sv = block.get("schema_version")
+    if type(sv) is not int or sv not in GA_SCHEMAS:
+        return "unsupported GA TODO block (schema_version %r): phone reads schema 1 or 2 only" % (sv,)
+    if "units" in block or not isinstance(block.get("items"), list):
+        return "unsupported GA TODO block: the full view or no item list (phone reads the bounded feed only)"
+    return ""
+
+
 def ga_todo_extras(block, ov):
-    """overview.json's bounded `ga_todo` block for the Tower tab: schema 1 only, all explicit P0-P2 rows plus at most
-    25 others (cut rows are added to `more`), every string redacted. Never the schema-2 full view. Absent (an older
-    tower): nothing is added and the tab shows no GA TODO section."""
+    """overview.json's bounded `ga_todo` block for the Tower tab: feed schema 1 or 2, all explicit P0-P2 rows plus at
+    most 25 others (cut rows are added to `more`), every string redacted. Unknown item fields (v2 meta/status/shed)
+    and the producer `budget` are kept; the full view never is. Absent (an older tower): nothing is added and the tab
+    shows no GA TODO section. Anything unsupported becomes a visible, action-free refusal that carries no body."""
     if block is None:
         return {}
-    if not isinstance(block, dict) or type(block.get("schema_version")) is not int or block["schema_version"] != 1:
+    why = _ga_refusal(block)
+    if why:
         sv = block.get("schema_version") if isinstance(block, dict) else None
-        return {"ga_todo": ga_clean({"schema_version": sv if isinstance(sv, (int, str)) else None, "items": [], "pending": [],
-                                     "stale": True, "error": "unsupported GA TODO block (schema_version %r): phone reads schema 1 only" % (sv,),
-                                     "more": 0, "payload_bytes": 0, "payload_budget": GA_PAYLOAD_BUDGET})}
+        return {"ga_todo": ga_clean({"schema_version": sv if type(sv) in (int, str) else None, "items": [], "pending": [],
+                                     "stale": True, "unsupported": True, "error": why, "more": 0, "payload_bytes": 0, "payload_budget": GA_PAYLOAD_BUDGET})}
     out = {k: block[k] for k in GA_BLOCK_FIELDS if k in block}
     rows, others, cut = [], 0, 0
-    for row in block.get("items") if isinstance(block.get("items"), list) else []:
+    for row in block["items"]:
         if not isinstance(row, dict) or not isinstance(row.get("key"), str) or not row["key"]:
             continue
         if _ga_band(row) not in GA_EXPLICIT:
@@ -215,8 +230,11 @@ def ga_todo_extras(block, ov):
                 cut += 1
                 continue
             others += 1
-        rows.append({k: row[k] for k in GA_ITEM_FIELDS if k in row})
+        # full-view-only / private fields never ride on a bounded item, whatever else (unknown, v2) it carries
+        rows.append({k: v for k, v in row.items() if k not in GA_ITEM_DENY})
     out["items"] = rows
+    if isinstance(block.get("budget"), dict):
+        out["budget"] = block["budget"]    # the producer's size budget; separate from payload_bytes (this block's wire estimate)
     more = block.get("more")
     out["more"] = (more if type(more) is int and more >= 0 else 0) + cut
     pend = block.get("pending")
