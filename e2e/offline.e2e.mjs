@@ -92,3 +92,65 @@ test('phone: Tower BACKLOG section, defer picker and the act payload', { timeout
   await page.screenshot({ path: process.env.E2E_SHOT || '/dev/null' }).catch(() => {});
   assert.deepEqual(errors, []);
 });
+
+test('phone: Tower GA TODO section (bounded feed), filter keeps focus, start + priority payloads', { timeout: 60000 }, async t => {
+  const base = await startMockApi(t);
+  const browser = await launchBrowser();
+  t.after(() => browser.close());
+  const ctx = withDefaults(await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, serviceWorkers: 'block' }));
+  const page = await ctx.newPage(); const errors = []; const posts = [];
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('dialog', d => d.accept());
+  const gen = new Date().toISOString();
+  const sha = '0123456789abcdef0123456789abcdef01234567';
+  const row = (key, title, prio, extra) => Object.assign({ key, doc: 'docs/TODO-backlog.md', line_start: 3, line_end: 5, parent: null, title, section: 'Sec',
+    doc_state: 'open', closable: true, closing_subentries: 0, body_sha: '00112233445566ff', body_head: 'head of ' + key + ' ghp_' + 'A'.repeat(30),
+    body_url: 'https://git.example/blob/' + sha + '/docs/TODO-backlog.md#L3', view_url: 'file:///x' }, prio ? { priority: prio } : {}, extra || {});
+  const items = [row('back@aaaaaaaaaaaa', 'First P1', { p: 'P1', rank: 0, pending: false }), row('back@bbbbbbbbbbbb', 'Second P1', { p: 'P1', rank: 1, pending: true })];
+  for (let i = 0; i < 30; i++) items.push(row('todo@' + i.toString(16).padStart(12, '0'), 'Other ' + i, null));
+  const ga_todo = { schema_version: 1, source_sha: sha, source_ref: 'origin/main', built_at: gen, input_digest: 'a'.repeat(64), total_units: 99, total_open: 50,
+    more: 10, collision_count: 0, orphan_count: 0, stale: false, error: '', items, in_flight_keys: [],
+    pending: [{ id: 'ga-prio-20261125T100000Z-aaaaaaaaaaaa', edits: [{ key: 'back@bbbbbbbbbbbb', p: 'P1' }] }], payload_bytes: 1000, payload_budget: 81920 };
+  await page.route('**/api/rc/tower**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/act')) { posts.push(route.request().postDataJSON()); return route.fulfill({ json: { ok: true, msg: 'queued → tower' } }); }
+    const data = path.endsWith('/model') ? { enabled: true, actions: true, model: { header: 'TOWER', generated_at: gen, sections: [{ id: 'gatodo', title: 'GA TODO', count: '1', items: [{ kind: 'gatodo', id: 'FULLVIEW', key: 'gatodo:FULLVIEW', head: 'FULLVIEW' }] }], palette: {}, legend: [], ga_todo } } :
+      path.endsWith('/whoami') ? { actions_enabled: true, act: true } : { enabled: true, overview: { generated_at: gen, counts: {} } };
+    return route.fulfill({ json: data });
+  });
+  await openApp(page, base + '/?token=fake');
+  await page.click('.tab[data-tab="tower"]');
+  const head = page.locator('.tsechead.tgatodo');
+  await head.waitFor();
+  const txt = async l => (await l.textContent()).replace(/\s+/g, ' ');
+  assert.match(await txt(head), /▸ GA TODO \(27 \+ 15 more\)/);
+  assert.equal(await page.locator('.tgarow').count(), 0, 'collapsed by default');
+  assert.ok(!(await txt(page.locator('#towerList'))).includes('FULLVIEW'), 'the TUI full-view section is never drawn');
+  await head.click();
+  assert.equal(await page.locator('.tgarow').count(), 27);
+  assert.match(await txt(page.locator('.tgapending')), /Pending with tower \(1/);
+  assert.match(await txt(page.locator('.tgarow').nth(1)), /\[P1 pending\] back@bbbbbbbbbbbb/);
+  // filter in place: the input node survives typing
+  const f = page.locator('.tgafilter');
+  await f.click();
+  await page.keyboard.type('second p1');
+  assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('tgafilter')), true);
+  assert.equal(await page.locator('.tgarow').count(), 1);
+  await f.fill('');
+  // expand the first row: redacted body head, SHA-pinned link, then Implement and a move down
+  await page.locator('.tgarow').first().locator('.thead').click();
+  const first = page.locator('.tgarow').first();
+  assert.match(await txt(first.locator('.tgahead')), /\[redacted\]/);
+  assert.equal(await first.locator('a.tlink').getAttribute('href'), items[0].body_url);
+  await first.getByRole('button', { name: '↓' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.tgarow').length > 0);
+  await page.locator('.tgarow').first().getByRole('button', { name: 'Implement' }).click();
+  await page.waitForFunction(() => document.querySelector('.tgarow').textContent.includes('queued with tower'));
+  assert.deepEqual(posts, [
+    { op: 'gatodo_prio', key: 'back@aaaaaaaaaaaa', p: 'P1', after: 'back@bbbbbbbbbbbb', view_sha: sha },
+    { op: 'gatodo_start', key: 'back@aaaaaaaaaaaa', mode: 'implement', view_sha: sha, body_sha: '00112233445566ff' },
+  ]);
+  const box = await page.locator('.tgarow').first().boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390, 'row fits the phone width');
+  assert.deepEqual(errors, []);
+});
