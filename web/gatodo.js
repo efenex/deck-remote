@@ -1,9 +1,13 @@
 // Tower tab GA TODO section (S6, GA TODO-view report §4): pure helpers, no DOM. Loaded before
 // app.js; the same file is required by node --test (gatodo.test.js). Modeled on backlog.js.
 //
-// The rows are overview.json's bounded schema-1 `ga_todo` block (tower_model.py passes it through):
-// every explicit P0-P2 row plus at most 25 others, `more` for the rest. Never the schema-2 full view:
-// no meta/status/related fields are assumed. Actions POST /api/rc/tower/act:
+// The rows are overview.json's bounded `ga_todo` block (tower_model.py passes it through), feed schema 1
+// or 2 (2 is a strict superset: item.meta{title,summary,source,stale?,kind?,area?,size?}, item.status,
+// item.body_head_shed, block.budget): every explicit P0-P2 row plus at most 25 others, `more` for the
+// rest. Anything else (another version, the TUI's full view `units`, no item list) is refused visibly:
+// no rows, no actions. Fields are chosen by presence, so an unknown field never breaks a row. The
+// producer's `budget` (compact items bytes vs its 80 KB target) is shown apart from `payload_bytes`
+// (tower_model.py's estimate of this block on the wire). Actions POST /api/rc/tower/act:
 //   start     {op:'gatodo_start', key, mode: design|implement|verify, view_sha, body_sha}
 //   priority  {op:'gatodo_prio', key, p: 'P0'..'P3' | null, [after: null | '<key>'], view_sha}
 // and the server (tower_actions.go) journals the same request records as the tower TUI
@@ -11,6 +15,7 @@
 (function (root) {
   'use strict';
 
+  const SCHEMAS = [1, 2];
   const BANDS = ['P0', 'P1', 'P2', 'P3'];
   const EXPLICIT = ['P0', 'P1', 'P2'];
   const OTHERS_MAX = 25;
@@ -52,10 +57,21 @@
     return { rows, cut };
   }
 
+  // Why this block cannot be shown at all ('' = supported). schema_version is strict: the number 1 or 2
+  // (a string "2" or a missing version is refused); the full view and a missing/non-list `items` too.
+  function unsupportedReason(block) {
+    if (!block || typeof block !== 'object') return 'no GA TODO data';
+    // tower_model.py's refusal marker: honored even when the refusal itself carries a supported-looking version and items []
+    if (block.unsupported === true) return redact(block.error) || 'unsupported GA TODO block';
+    if (!SCHEMAS.includes(block.schema_version)) return 'unsupported schema_version (phone reads schema 1 or 2 only)';
+    if ('units' in block || !Array.isArray(block.items)) return 'unsupported GA TODO block (full view or no item list; phone reads the bounded feed only)';
+    return '';
+  }
+
   // Why the snapshot may not be acted on ('' = fresh): the server re-checks the same at act time.
   function staleReason(block, now) {
-    if (!block) return 'no GA TODO data';
-    if (block.schema_version !== 1) return 'unsupported schema_version (phone reads schema 1 only)';
+    const bad = unsupportedReason(block);
+    if (bad) return bad;
     if (block.error) return redact(block.error);
     if (block.stale) return 'snapshot stale';
     const t = Date.parse(block.built_at || '');
@@ -88,15 +104,56 @@
     return out;
   }
 
+  // v2 row text, chosen by presence. title: meta.title (schema 2; non-empty) else the raw heading. summary:
+  // meta.summary only, which MAY be "" (a fallback row without a derived summary); enrich.summary is a
+  // different cache slot (LLM enrichment) and is never shown in its place.
+  function metaOf(row) {
+    return row && row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta) ? row.meta : null;
+  }
+  function titleOf(row) {
+    const m = metaOf(row);
+    return m && typeof m.title === 'string' && m.title.trim() ? m.title : row.title;
+  }
+  function summaryOf(row) {
+    const m = metaOf(row);
+    return m && typeof m.summary === 'string' ? m.summary : null; // null: no summary slot (v1 row)
+  }
+
+  // Sizes. The producer budget is decimal (80,000 bytes = "80 KB", like tower's heading; 80,001 rounds UP to "81 KB",
+  // so an over-budget block never reads as "80 KB"). The wire estimate is binary: "KiB", 1024 bytes.
+  const kb = (n) => Math.ceil(Number(n) / 1000) + ' KB';
+  const kib = (n) => Math.round(Number(n) / 1024) + ' KiB';
+
+  const shedText = (n) => (n === 1 ? '1 row trimmed to its source link' : n + ' rows trimmed to their source link');
+
+  // The producer's size budget (block.budget), normalized; null without one (schema 1).
+  function budgetView(block) {
+    const bd = block && block.budget;
+    if (!bd || typeof bd !== 'object' || Array.isArray(bd)) return null;
+    const n = (x) => (Number.isInteger(x) && x >= 0 ? x : null);
+    return { target: n(bd.target_bytes), items: n(bd.items_bytes), shed: n(bd.shed) || 0, over: bd.over === true };
+  }
+
   // The display shape of one row: everything the DOM code prints, every string redacted.
   function rowView(row, queued) {
     const b = band(row);
     const p = row.priority || {};
+    const m = metaOf(row);
+    const sum = summaryOf(row);
+    const chips = [];
+    if (typeof row.status === 'string' && row.status) chips.push(row.status);
+    if (m) ['kind', 'area', 'size'].forEach((k) => { if (typeof m[k] === 'string' && m[k]) chips.push(m[k]); });
     return {
       key: redact(row.key),
       band: b || '—',
       pending: !!(b && p.pending),
-      title: truncate(redact(row.title), 160),
+      title: truncate(redact(titleOf(row)), 160),
+      hasSummary: sum !== null,
+      summary: sum === null ? '' : truncate(redact(sum), 480),
+      chips: chips.map((c) => truncate(redact(c), 40)),
+      derived: !!(m && m.source === 'fallback'),
+      metaStale: !!(m && m.stale === true),
+      shed: row.body_head_shed === true,
       section: truncate(redact(row.section), 80),
       state: redact(row.doc_state),
       where: redact(row.doc) + ':' + row.line_start + (row.line_end && row.line_end !== row.line_start ? '–' + row.line_end : ''),
@@ -113,12 +170,22 @@
   function section(model, now) {
     const block = model && model.ga_todo;
     if (!block || typeof block !== 'object') return null;
+    const unsupported = unsupportedReason(block);
+    if (unsupported) { // visible refusal: nothing from the block is drawn or acted on
+      return { title: 'GA TODO', block, rows: [], more: 0, stale: unsupported, unsupported, budget: null, overBudget: false, producerOver: false,
+        header: 'GA TODO · UNSUPPORTED' };
+    }
     const sel = select(block.items);
     const more = (Number.isInteger(block.more) && block.more > 0 ? block.more : 0) + sel.cut;
     const stale = staleReason(block, now);
+    const budget = budgetView(block);
+    const producerOver = !!(budget && budget.over);
     return {
-      title: 'GA TODO', block, rows: sel.rows, more, stale,
-      header: 'GA TODO (' + sel.rows.length + (more ? ' + ' + more + ' more' : '') + ')' + (stale ? ' · STALE' : ''),
+      title: 'GA TODO', block, rows: sel.rows, more, stale, unsupported: '', budget, producerOver,
+      header: 'GA TODO (' + sel.rows.length + (more ? ' + ' + more + ' more' : '') + ')' + (stale ? ' · STALE' : '') +
+        (producerOver ? ' · over size budget' + (budget.items != null ? ' (' + kb(budget.items) + ')' : '') : ''),
+      // overBudget: this block on the phone's wire (tower_model.py's estimate); producerOver: GA's own
+      // compact-items budget. Two different measures, never merged.
       overBudget: Number(block.payload_bytes) > Number(block.payload_budget || Infinity),
     };
   }
@@ -128,7 +195,9 @@
     const words = String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return rows;
     return rows.filter((r) => {
-      const hay = [r.key, r.title, r.section, r.doc_state, r.body_head, band(r) || ''].join(' ').toLowerCase();
+      const m = metaOf(r) || {};
+      const hay = [r.key, r.title, titleOf(r), summaryOf(r) || '', m.kind, m.area, m.size, r.status, r.section, r.doc_state, r.body_head, band(r) || '']
+        .filter((x) => typeof x === 'string').join(' ').toLowerCase();
       return words.every((w) => hay.includes(w));
     });
   }
@@ -186,7 +255,7 @@
     });
   }
 
-  const api = { BANDS, MODES, OTHERS_MAX, redact, band, select, staleReason, safeUrl, queuedKeys, rowView, section, filter,
+  const api = { kb, kib, shedText, SCHEMAS, BANDS, MODES, OTHERS_MAX, redact, band, select, unsupportedReason, staleReason, titleOf, summaryOf, budgetView, safeUrl, queuedKeys, rowView, section, filter,
     startBody, prioBody, moveBody, bandRows, startRequestData, pendingView };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DeckGatodo = api;

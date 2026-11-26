@@ -495,7 +495,7 @@ func (s *server) warmTower() {
 
 // --- GA TODO (S6: GA TODO-view report §4) -------------------------------------------------------------
 //
-// The tab shows overview.json's bounded schema-1 `ga_todo` block (tower_model.py passes it through:
+// The tab shows overview.json's bounded schema-1/2 `ga_todo` block (tower_model.py passes it through:
 // all explicit P0-P2 rows plus at most 25 others). Two ops journal the same request records as the
 // tower TUI (tower scripts/ga_todo.py start_request / priority_request), with from:"phone", then
 // wake tower; tower's /tick re-resolves the exact key against a fresh GA read before anything runs.
@@ -560,16 +560,34 @@ type gaRecent struct {
 	edit string // prio: the canonical edit last journaled for this key
 }
 
+// parseGaSnap reads the bounded ga_todo block. Strict gates, all of which refuse every GA action (g.bad) instead of
+// guessing: schema_version must be exactly the JSON integer 1 or 2 (not "2", 2.0, 1e0 or true), the block must not be
+// the TUI's full view (`units`), and `items` must be a list. v2 adds item fields (meta, status, body_head_shed) and a
+// top-level budget that are deliberately not decoded here: the exact key is the only identity an action uses, and a
+// title (raw or meta.title) is a label that is never trusted for dispatch.
 func parseGaSnap(raw json.RawMessage) *gaSnap {
 	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
 		return nil
 	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return &gaSnap{bad: "unreadable GA TODO block: " + err.Error()}
+	}
+	if v := string(bytes.TrimSpace(top["schema_version"])); v != "1" && v != "2" {
+		return &gaSnap{bad: "GA TODO block is not schema 1 or 2"}
+	}
+	if string(bytes.TrimSpace(top["unsupported"])) == "true" { // tower_model.py's refusal marker
+		return &gaSnap{bad: "GA TODO block was refused by the tower model"}
+	}
+	if _, full := top["units"]; full {
+		return &gaSnap{bad: "GA TODO block is the full view, not the bounded feed"}
+	}
+	if items := bytes.TrimSpace(top["items"]); len(items) == 0 || items[0] != '[' {
+		return &gaSnap{bad: "GA TODO block has no item list"}
+	}
 	g := &gaSnap{}
 	if err := json.Unmarshal(raw, g); err != nil {
 		return &gaSnap{bad: "unreadable GA TODO block: " + err.Error()}
-	}
-	if v, ok := g.SchemaVersion.(float64); !ok || v != 1 {
-		g.bad = "GA TODO block is not schema 1"
 	}
 	g.byKey = map[string]*gaRow{}
 	for i := range g.Items {

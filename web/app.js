@@ -1293,7 +1293,7 @@
     return card;
   }
 
-  // --- GA TODO (S6; helpers in gatodo.js): the bounded schema-1 block, never the full view ---
+  // --- GA TODO (S6; helpers in gatodo.js): the bounded feed block (schema 1 or 2), never the full view ---
   function renderTowerGatodo(list, m) {
     const G = window.DeckGatodo;
     const sec = G ? G.section(m) : null;
@@ -1301,15 +1301,27 @@
     const hdr = el('div', 'tsechead tgatodo');
     hdr.append(el('span', 'tnum', ''), el('span', 'tarrow', tower.gatodoOpen ? '▾ ' : '▸ '), towerStyle(el('span', 'tsectitle', 'GA TODO'), 'sec'),
       el('span', 'tcount', ' (' + sec.rows.length + (sec.more ? ' + ' + sec.more + ' more' : '') + ')'));
-    if (sec.stale) hdr.append(el('span', 'tcount stale', '  STALE'));
+    if (sec.unsupported) hdr.append(el('span', 'tcount stale', '  UNSUPPORTED'));
+    else if (sec.stale) hdr.append(el('span', 'tcount stale', '  STALE'));
+    if (sec.producerOver) hdr.append(el('span', 'tcount stale', '  over size budget' + (sec.budget.items != null ? ' (' + G.kb(sec.budget.items) + ')' : '')));
     hdr.addEventListener('click', () => { tower.gatodoOpen = !tower.gatodoOpen; renderTower(true); });
     list.append(hdr);
     if (!tower.gatodoOpen) return;
     const b = sec.block;
+    if (sec.unsupported) { // refused visibly: no rows, no filter, no actions, nothing of the block is drawn
+      list.append(el('div', 'thint stale', 'GA TODO unsupported: ' + G.redact(sec.unsupported) + '. Nothing is shown and actions are off; update the phone app or the feed.'));
+      return;
+    }
     if (sec.stale) list.append(el('div', 'thint stale', 'GA TODO refused / stale: ' + sec.stale + '. Actions are off until GA refreshes the feed.'));
     list.append(el('div', 'thint', 'Bounded feed: all P0–P2 + up to ' + G.OTHERS_MAX + ' others' + (sec.more ? ' · ' + sec.more + ' more on the laptop TUI' : '') +
       ' · snapshot ' + String(b.source_sha || '?').slice(0, 9) + ' · ' + (b.built_at || '?')));
-    if (sec.overBudget) list.append(el('div', 'thint', 'Payload ' + Math.round(b.payload_bytes / 1024) + ' KB (target ' + Math.round(b.payload_budget / 1024) + ' KB)'));
+    if (sec.overBudget) list.append(el('div', 'thint', 'Wire payload ' + G.kib(b.payload_bytes) + ' (target ' + G.kib(b.payload_budget) + ')'));
+    if (sec.budget && (sec.budget.shed || sec.producerOver)) {
+      // GA's own budget (compact items bytes), a different measure from the wire estimate above
+      list.append(el('div', 'thint' + (sec.producerOver ? ' stale' : ''), 'Feed size budget: ' + (sec.budget.shed ? G.shedText(sec.budget.shed) : 'no rows trimmed') +
+        (sec.budget.items != null && sec.budget.target != null ? ' · items ' + G.kb(sec.budget.items) + ' of ' + G.kb(sec.budget.target) : '') +
+        (sec.producerOver ? ' · OVER even with every detail trimmed' : '')));
+    }
     const pend = G.pendingView(b);
     if (pend.length) {
       const det = document.createElement('details');
@@ -1349,14 +1361,20 @@
     head.append(el('span', 'tmeta tgaband' + (v.pending ? ' tgapend' : ''), '[' + v.band + (v.pending ? ' pending' : '') + '] '), el('span', 'tid', v.key));
     head.addEventListener('click', () => { if (open) tower.gatodoExpanded.delete(row.key); else tower.gatodoExpanded.add(row.key); renderTower(true); });
     card.append(head, el('div', 'tbody ttitle', v.title));
+    if (v.summary) card.append(el('div', 'thint tgasummary', v.summary));
     card.append(towerStyle(el('div', 'thint', v.state + ' · ' + v.section + ' · ' + v.where), 'dim'));
     if (v.queued) card.append(towerStyle(el('div', 'thint tqueued', 'queued with tower'), 'accent'));
     if (!open) return card;
     if (v.parent || v.wkey) card.append(towerStyle(el('div', 'thint', (v.parent ? 'parent ' + v.parent : '') + (v.wkey ? (v.parent ? ' · ' : '') + v.wkey : '')), 'dim'));
-    const pre = el('pre', 'tgahead', v.bodyHead);
-    card.append(pre);
+    if (v.chips.length || v.derived || v.metaStale) {
+      card.append(towerStyle(el('div', 'thint tgachips', v.chips.join(' · ') + (v.derived ? (v.chips.length ? ' · ' : '') + 'title/summary derived from the text' : '') +
+        (v.metaStale ? ((v.chips.length || v.derived) ? ' · ' : '') + 'summary may be stale' : '')), 'dim'));
+    }
+    if (v.hasSummary && !v.summary) card.append(towerStyle(el('div', 'thint tgasummary', '(no summary)'), 'dim'));
+    if (v.bodyHead) card.append(el('pre', 'tgahead', v.bodyHead));
+    else card.append(towerStyle(el('div', 'thint tgashed', v.shed ? 'Detail trimmed to fit the feed size budget; the full text is at the source link.' : '(no detail in the feed)'), 'dim'));
     if (v.bodyUrl) {
-      const a = el('a', 'tlink', 'Source at ' + String(b.source_sha || '').slice(0, 9));
+      const a = el('a', 'tlink', (v.bodyHead ? 'Source at ' : 'Full text at ') + String(b.source_sha || '').slice(0, 9));
       a.href = v.bodyUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
       card.append(a);
     }
